@@ -43,6 +43,9 @@ class BrowserSession {
       else if (r.status() >= 400 && ['script', 'stylesheet'].includes(t)) this.events.push(`HTTP ${r.status()} for the page's ${t === 'script' ? 'JavaScript' : 'CSS'} ${r.url().slice(0, 160)}: the page's code did not load, so its buttons and forms will not work. If you rebuilt the app, stop the running server and start it again.`);
     });
     this.page.on('requestfailed', (q) => {
+      // A request the browser itself cancelled (a navigation replacing a prefetch, as Next.js does
+      // with its ?_rsc= requests) is normal, not a broken app.
+      if (/ERR_ABORTED|NS_BINDING_ABORTED|cancelled/i.test(q.failure()?.errorText || '')) return;
       if (['document', 'fetch', 'xhr', 'script'].includes(q.resourceType())) this.events.push(`request failed: ${q.method()} ${q.url().slice(0, 160)} (${q.failure()?.errorText || 'error'})`);
     });
     this.page.on('dialog', (d) => { this.events.push(`dialog (${d.type()}): ${d.message().slice(0, 200)} → accepted`); d.accept().catch(() => {}); });

@@ -94,6 +94,28 @@ test('browser: a dead button and missing page code are reported as issues', { ti
   } finally { dead.close(); }
 });
 
+test('browser: a request the page cancelled itself (a Next.js prefetch) is not reported as a problem', { timeout: 120_000 }, async (t) => {
+  if (!browser.available()) return t.skip('playwright-core not installed');
+  const s = http.createServer((req, res) => {
+    if (req.url.startsWith('/slow')) return setTimeout(() => { try { res.end('late'); } catch {} }, 5000); // still pending when the page leaves
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (req.url === '/b') return res.end('<title>B</title><h1>Contacts page</h1>');
+    res.end('<title>A</title><a href="/b">Contacts</a><script>const c=new AbortController();fetch("/slow?_rsc=abc",{signal:c.signal}).catch(()=>{});setTimeout(()=>c.abort(),150)</script>');
+  });
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const k = 'abort-' + process.pid;
+  try {
+    let r;
+    try { r = await browser.act(k, { action: 'open', url: `http://127.0.0.1:${s.address().port}/` }); } catch (e) { if (/No browser/.test(e.message)) return t.skip(e.message); throw e; }
+    assert.doesNotMatch(r.text, /request failed/, 'the cancelled prefetch is not a problem');
+    assert.ok(!r.issue, `no issue expected on open, got: ${r.issue}`);
+    r = await browser.act(k, { action: 'click', target: 'Contacts' });
+    assert.match(r.text, /Contacts page/);
+    assert.doesNotMatch(r.text, /request failed/);
+    assert.ok(!r.issue, `no issue expected, got: ${r.issue}`);
+  } finally { s.close(); }
+});
+
 test('sandbox URL mapping: localhost ports go to the published ports, other URLs are untouched', () => {
   const { Sandbox } = require('../src/main/shell');
   const s = new Sandbox(process.cwd());
