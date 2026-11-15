@@ -49,7 +49,7 @@ const TOOL_INFO = {
   list_dir: ['List', 'folder'], glob: ['Find', 'search'], grep: ['Search', 'textSearch'], powershell: ['Run', 'terminal'], shell: ['Run', 'terminal'],
   todo_write: ['Plan', 'list'], check_requirement: ['Verify', 'shield'], web_search: ['Web search', 'globe'], web_fetch: ['Fetch', 'globe'], fetch_url: ['Fetch', 'globe'],
   start_process: ['Start process', 'play'], process_output: ['Process output', 'terminal'], stop_process: ['Stop process', 'square'],
-  task: ['Sub-agent', 'bot'], impact: ['Impact', 'branch'], remember: ['Remember', 'bookmark'], ask_user: ['Question', 'info'],
+  task: ['Sub-agent', 'bot'], impact: ['Impact', 'branch'], find_breaking_change: ['Find the breaking change', 'search'], remember: ['Remember', 'bookmark'], ask_user: ['Question', 'info'],
 };
 const isShellTool = (n) => n === 'shell' || n === 'powershell';
 const toolInfo = (name) => TOOL_INFO[name] || (name.startsWith('mcp__') ? ['MCP', 'plug'] : [name, 'file']);
@@ -1088,7 +1088,7 @@ async function rewind(v, turnIndex) {
   renderHistory(v);
   showCurrent();
   $('#input').value = r.text; autosize(); updateComposer(); $('#input').focus();
-  toast(r.restored ? `Rewound · ${r.restored} file${r.restored > 1 ? 's' : ''} restored` : 'Rewound');
+  toast((r.restored ? `Rewound · ${r.restored} file${r.restored > 1 ? 's' : ''} restored` : 'Rewound') + (r.kept?.length ? ` · kept your own changes to ${r.kept.join(', ')}` : ''));
   Panels.refreshGitSoon();
 }
 async function retryTurn(v, turnIndex) {

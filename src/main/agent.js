@@ -118,6 +118,13 @@ const IMPACT_DEF = {
 };
 tools.registerDef(IMPACT_DEF);
 
+const FIND_BREAK_DEF = {
+  name: 'find_breaking_change',
+  description: 'When a check (tests, build, a script) fails after your changes in this request, find which changed file causes it: DROPs puts each changed file back to its state before this request, one at a time, runs the command, and then restores every file exactly as it is now. Use it before reverting anything, so you undo only the culprit. Give the failing command.',
+  input_schema: { type: 'object', properties: { command: { type: 'string', description: 'The failing check, e.g. npm test' } }, required: ['command'] },
+};
+tools.registerDef(FIND_BREAK_DEF);
+
 const WRAP_UP_DEF = {
   name: 'wrap_up',
   description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
@@ -414,7 +421,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -800,6 +807,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   makeCtx(turn, signal) {
     return {
       root: this.data.projectDir,
+      turn,
       signal,
       readFiles: this.readFiles,
       procs: this.procs,
@@ -937,6 +945,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
     if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
+    if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
     if (u.name === 'impact') {
       const target = String(u.input.target || '').trim();
       meta.summary = target; this.emit('tool-start', { id: u.id, name: 'impact', input: u.input, summary: target });
@@ -1010,6 +1019,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       run.guard.record(u.name, u.input, !isError);
       this.autoLesson(lessons.fromToolResult(u.name, u.input, text, !!this.procs.sandbox), u.name);
       if (isError) { run.errStreak = (run.errStreak || 0) + 1; if (run.errStreak >= 3) { run.errStreak = 0; run.escalate?.('it hit repeated tool errors'); } } else run.errStreak = 0;
+      if (prep.kind === 'edit' && !isError && ctx.turn && u.input.path) {
+        try { const abs = tools.resolveInRoot(this.data.projectDir, u.input.path); (ctx.turn.after ||= {})[abs] = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null; } catch { /* outside the project */ }
+      }
       if (prep.kind === 'edit') {
         run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false; run.editedFiles.add(u.input.path || brand.memoryFile(this.data.projectDir));
         if (guards.isUiFile(u.input.path || '')) run.uiDirty = true;
@@ -1087,6 +1099,51 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       this.emit('tool-end', { id: u.id, ok: false, output: e.message });
       return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: `Web search failed: ${e.message}` };
     }
+  }
+
+  // ---------- recovery: which of this request's changes breaks the check ----------
+  async runFindBreak(u, meta, ctx) {
+    const cmd = String(u.input.command || '').trim();
+    meta.summary = cmd; this.emit('tool-start', { id: u.id, name: 'find_breaking_change', input: u.input, summary: cmd });
+    const done = (text, ok = true) => { meta.status = ok ? 'done' : 'error'; meta.output = text; this.emit('tool-end', { id: u.id, ok, output: text }); return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }) }; };
+    if (!cmd) return done('Give the failing command.', false);
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return done('This read-only mode cannot run commands.', false);
+    if ((this.procs.sandbox ? shell.assessCommand(cmd, null) : shell.assessCommand(cmd, this.data.projectDir)).dangerous) return done('Refused: that command is flagged as dangerous.', false);
+    // It runs a command several times and swaps files for a moment: outside full auto, ask first.
+    if (this.data.mode !== 'yolo') {
+      const r = await this.askPermission(u, { kind: 'shell', summary: `${cmd} (run several times, putting this request's changed files back one at a time, then restoring them)` }, false, 'Finds which change breaks the check');
+      if (r.decision === 'deny') return done(`The user denied this.${r.feedback ? ` Their instructions: ${r.feedback}` : ''}`, false);
+    }
+    const changed = Object.entries(ctx.turn?.files || {});
+    if (!changed.length) return done('No files were changed in this request, so the failure is not from these changes.');
+    if (changed.length > 15) return done(`${changed.length} files changed: too many to test one by one. Narrow it down with the impact tool and the stack trace first.`, false);
+    const rel = (abs) => path.relative(this.data.projectDir, abs).replace(/\\/g, '/');
+    const runIt = async () => { const r = await shell.run(cmd, { cwd: this.data.projectDir, sandbox: this.procs.sandbox, signal: ctx.signal, timeoutMs: 150000 }); return r.code === 0; };
+    const now = new Map();
+    for (const [abs] of changed) now.set(abs, fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null);
+    const put = (abs, content) => { if (content === null) fs.rmSync(abs, { force: true }); else { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, content, 'utf8'); } };
+    const culprits = [];
+    let before = null, nowOk = null;
+    try {
+      nowOk = await runIt();
+      if (nowOk) return done(`${cmd} passes now; there is nothing to find.`);
+      for (const [abs, orig] of changed) put(abs, orig);
+      before = await runIt();
+      for (const [abs] of changed) put(abs, now.get(abs));
+      if (!before) return done(`${cmd} also fails with all ${changed.length} changed file(s) put back as they were before this request: the failure is not caused by these changes (it was already there, or comes from something else, such as installed packages or the environment).`);
+      for (const [abs, orig] of changed) {
+        put(abs, orig);
+        const ok = await runIt();
+        put(abs, now.get(abs));
+        if (ok) culprits.push(rel(abs));
+      }
+    } finally {
+      for (const [abs] of changed) { try { put(abs, now.get(abs)); } catch { /* best effort */ } }
+      this.readFiles.clear();
+    }
+    const files = changed.map(([abs]) => rel(abs));
+    if (culprits.length) return done(`Found it: ${cmd} passes again when ${culprits.length === 1 ? 'this change is' : 'any one of these changes is'} undone: ${culprits.join(', ')}. (Changed in this request: ${files.join(', ')}.) Every file is back exactly as it was before this check. Fix the culprit, or revert only that file.`);
+    return done(`No single file explains it: ${cmd} still fails with any one of ${files.join(', ')} undone, but passes with all of them undone. The changes break it together; look at how they interact. Every file is back exactly as it was before this check.`);
   }
 
   // ---------- the next-step box ----------
@@ -1608,10 +1665,17 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const t = turns[turnIndex];
     if (!t) throw new Error('Unknown turn');
     if (t.msgIndex == null) throw new Error('This message is from before the context was compacted and can no longer be rewound.');
-    const restored = new Set();
+    const restored = new Set(), kept = new Set();
     for (let i = turns.length - 1; i >= turnIndex; i--) {
       for (const [abs, orig] of Object.entries(turns[i].files)) {
+        if (kept.has(abs)) continue;
         try {
+          // A file the user changed after DROPs last wrote it is theirs now: keep it, say so.
+          const after = turns[i].after?.[abs];
+          if (after !== undefined) {
+            const now = await fsp.readFile(abs, 'utf8').catch(() => null);
+            if (now !== after && now !== orig) { kept.add(abs); continue; }
+          }
           if (orig === null) await fsp.rm(abs, { force: true });
           else await fsp.writeFile(abs, orig, 'utf8');
           restored.add(abs);
@@ -1623,7 +1687,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     this.rebuildChanges();
     this.readFiles.clear();
     this.save(true);
-    return { text: t.text, restored: restored.size };
+    return { text: t.text, restored: restored.size, kept: [...kept].map((a) => path.relative(this.data.projectDir, a).replace(/\\/g, '/')) };
   }
 
   rebuildChanges() {

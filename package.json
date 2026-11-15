@@ -8,7 +8,7 @@
     "dist": "electron-builder --win nsis portable zip",
     "check": "node scripts/check.js",
     "icon": "electron scripts/make-icon.js",
-    "test": "node --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js",
+    "test": "node --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js tests/recovery.test.js",
     "bench": "node bench/run.js",
     "headless": "node src/cli.js",
     "dist:mac": "electron-builder --mac",
