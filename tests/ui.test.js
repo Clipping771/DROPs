@@ -273,6 +273,16 @@ test('a turn shows a live task list, ends with a next-step box whose button repl
   } finally { srv.close(); }
 });
 
+test('typing / lists the GitHub commands /pr and /ci', async () => {
+  await win.fill('#input', '/');
+  await win.waitForSelector('#popup:not([hidden])', { timeout: 5000 });
+  const text = await win.textContent('#popup');
+  assert.match(text, /\/pr.*Open a pull request/s);
+  assert.match(text, /\/ci.*failing CI checks/s);
+  await win.keyboard.press('Escape');
+  await win.fill('#input', '');
+});
+
 test('Ctrl+Shift+L switches between light and dark themes', async () => {
   const theme = () => win.evaluate(() => document.documentElement.dataset.theme || document.body.dataset.theme || document.documentElement.className);
   const first = await theme();
