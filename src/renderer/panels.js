@@ -662,7 +662,7 @@ ${r.evidence.summary}` : 'No evidence yet';
   const SHORTCUTS = [
     ['Command palette', 'Ctrl K'], ['New session', 'Ctrl N'], ['Open project', 'Ctrl O'], ['Settings', 'Ctrl ,'],
     ['Toggle sidebar', 'Ctrl B'], ['Toggle right panel', 'Ctrl J'], ['Focus the message box', 'Ctrl L'], ['Light / dark theme', 'Ctrl Shift L'],
-    ['Cycle permission mode', 'Shift Tab'], ['New line in a message', 'Shift Enter'], ['Stop the agent', 'Esc'],
+    ['Cycle permission mode', 'Shift Tab'], ['New line in a message', 'Shift Enter'], ['Stop the agent', 'Esc'], ['While the agent works: tell it now (Enter queues)', 'Alt Enter'],
   ];
   // One settings row: label + description on the left, control on the right.
   const setItem = (label, desc, ctrl, cls = '') => `<div class="set-item ${cls}"><div class="set-label">${label}${desc ? `<small>${desc}</small>` : ''}</div><div class="set-ctrl">${ctrl}</div></div>`;

@@ -1,233 +1,330 @@
-# DROPs — complete feature overview (for a weakness review)
+# DROPs: every feature, in detail
 
-DROPs (formerly "H2O") is an autonomous AI coding agent for Windows: an **Electron desktop app** plus a **headless CLI**. You describe a task in plain words, and the agent plans it, edits files, runs commands, tests, checks web apps in a real browser, and reports what it did. It is also the build engine of a separate product, the "AI Software Company" platform, which turns a client's requirements into a working web app.
+DROPs (formerly "H2O") is an autonomous AI coding agent. It comes as two things:
+- a **Windows desktop app** (Electron);
+- a **headless command-line tool**, used by CI and by the "AI Software Company" factory.
+
+You describe a task in plain words, in any language. DROPs then plans it, edits files and runs commands. It also tests the result, opens web apps in a real browser and clicks through them like a user, and **proves** each requirement with a check it runs itself. Finally it reports back in your language, with a short recap and buttons for the next step.
 
 - Repository: https://github.com/Clipping771/DROPs (code in `src/`, tests in `tests/`)
-- Stack: Node.js 22, Electron 45, plain JavaScript (no frontend framework), Monaco editor, marked + DOMPurify, playwright-core, the MCP SDK, and the Anthropic / Google GenAI / OpenAI SDKs.
-- Size: about 4,300 lines of main-process code (`src/main`), about 4,300 lines of UI code (`src/renderer`), 81 automated tests (`npm test`), and 9 UI tests that drive the real app window (`npm run test:ui`).
+- Stack:
+  - Node.js 22 and Electron 45;
+  - plain JavaScript (no frontend framework);
+  - Monaco editor, marked and DOMPurify;
+  - playwright-core;
+  - the MCP SDK;
+  - the Anthropic, Google GenAI and OpenAI SDKs.
+- Size:
+  - about 6,000 lines in the main process and about 4,900 lines of UI (JS and CSS);
+  - 61 IPC handlers;
+  - 104 automated tests (`npm test`) and 13 tests that drive the real app window (`npm run test:ui`).
+
+Updated 2026-11-16.
 
 ---
 
-## 1. Architecture
+## 1. Models
 
-```
-Electron main process (src/main)
-  main.js        windows, IPC handlers (~45), theme, app data folder
-  agent.js       the agent loop: model call → tool calls → guards → final answer
-  tools.js       tool definitions and execution, background processes, file safety
-  providers.js   model routing: Anthropic, Gemini, OpenAI-compatible, Ollama; fallback chain
-  gemini.js / oai.js / ollama.js   provider adapters (streaming, tool calls, fallbacks)
-  shell.js       shell execution, Docker sandbox, dangerous-command checks, secret redaction
-  browser.js     real headless browser (playwright-core + installed Chrome/Edge)
-  guards.js      loop guard, verification detection, UI-file detection
-  lessons.js     cross-session lessons learned from mistakes
-  context.js     project profile (stack, verify commands), context helpers
-  mcp.js         MCP client (stdio, HTTP, SSE servers)
-  git.js         git status/log/commit, worktrees
-  store.js       settings (keys encrypted with OS safeStorage/DPAPI) and sessions on disk
-  media.js       images and PDF reading
-  report.js      session export (Markdown / HTML / JSON)
-  brand.js       product name, data folders, backward compatibility with the H2O names
-Renderer (src/renderer): app.js (chat, tool cards), panels.js (sidebar, inspector,
-  settings, palette), editor.js (Monaco), boot.js (wiring), styles.css (design system)
-CLI (src/cli.js): runs one task headless, used by CI and by the Software Factory
-```
+| Feature | What it does |
+|---|---|
+| Many providers | **Anthropic Claude** (Haiku, Sonnet, Opus); **Google Gemini** (Flash models, Gemini 4); OpenAI-compatible: **OpenAI, DeepSeek, Mistral, Groq, xAI, OpenRouter, Together, Fireworks, Cerebras**, plus any custom endpoint; **Ollama** and **LM Studio** for local models that run offline and free. |
+| Auto routing | With `model: auto`, DROPs starts on the cheapest model that fits the request and moves up when the agent struggles (repeated errors, failed checks). |
+| Effort levels | Low, medium, high, xhigh and max: how hard the model thinks. |
+| Fallback chain | When a model is out of quota, out of credit or unreachable, the next model in the list answers (`--fallback` or `DROPS_FALLBACK_MODELS`). A model that ran out is skipped for a while. Gemini also moves between its own models by itself. |
+| Retry on short outages | Overload, 5xx, network drops and per-minute limits are retried twice (after 2 s and 6 s), only when nothing has been shown yet, so you never see a reply twice. |
+| Cheap sub-agents | Research sub-tasks can use a cheaper model. |
+| Cost control | Tokens and dollars per session (where the price is known), with an optional maximum cost and maximum tokens per task. |
+| Context window per model | The context meter uses each model's own limit (for example 16K for a small local model). |
 
-## 2. Models and providers
-- **Anthropic Claude** (Haiku / Sonnet / Opus tiers), **Google Gemini** (several Flash models, Gemini 4), and the **OpenAI-compatible providers** OpenAI, DeepSeek, Mistral, Groq, xAI, OpenRouter, Together, Fireworks, Cerebras, LM Studio and a custom endpoint. **Ollama** runs local models offline.
-- **Auto routing** (`model: auto`) starts on the cheapest tier that fits the request and escalates when the agent struggles (repeated tool errors, failed verification).
-- **Effort levels:** low, medium, high, xhigh, max.
-- **Gemini fallback** moves between Gemini models on quota or overload, with waits for per-minute limits.
-- **Cross-provider fallback chain** (`--fallback` / `DROPS_FALLBACK_MODELS`): when a model is out of quota or credit, or unreachable, the next model answers. Exhausted models are skipped for a while.
-- **Cheap sub-agents:** research sub-tasks can use a cheaper model.
-- **Cost tracking** per session (tokens, cache, dollars where the price is known), with optional per-task cost and token budgets.
+## 2. The agent and its tools
 
-## 3. The agent loop and its tools
-The tools are:
-- **Files:** `read_file` (text, images, PDF pages), `write_file`, `edit_file`, `multi_edit`, `list_dir`, `glob`, `grep`.
-- **Commands:** `shell` (PowerShell on Windows, or bash in the sandbox), `start_process` / `process_output` / `stop_process` for dev servers.
-- **Web:** `web_search` (Gemini grounding or a keyless search), `fetch_url` (page as text), and `browser` (see §5).
+**Tools the agent can use:**
+- **Files:**
+  - `read_file` reads text, images and PDF pages;
+  - `write_file`, `edit_file` and `multi_edit` change files;
+  - `list_dir`, `glob` and `grep` find files and text.
+- **Commands:**
+  - `shell` runs PowerShell on Windows, or bash in the sandbox;
+  - `start_process`, `process_output` and `stop_process` handle dev servers that keep running.
+- **Web:**
+  - `web_search` searches the web;
+  - `fetch_url` reads a page as text;
+  - `browser` is a real browser (see §5).
 - **Planning and memory:**
-  - `todo_write` (a live task plan in the UI);
-  - `remember` (project facts saved to `DROPs.md`);
-  - `learn_lesson` (cross-project lessons);
-  - `ask_user` (asks a question mid-task);
-  - `task` (a sub-agent in research or edit mode, queued so they do not collide).
-- **MCP tools** from any configured MCP server appear as `mcp__<server>__<tool>`.
+  - `todo_write` keeps a live task list;
+  - `remember` saves project facts to `DROPs.md`;
+  - `learn_lesson` saves a rule learned from a mistake.
+- **Talking to you:**
+  - `ask_user` asks a question with options in the middle of a task;
+  - `wrap_up` fills the next-step box at the end (§7).
+- **Sub-agents:** `task` gives a piece of work its own fresh context.
+  - In research mode the sub-agent only reads.
+  - In edit mode it can change files and run commands, under the same rules as the main agent.
+  - Several can run in parallel, each on its own files.
+- **Proof:** `check_requirement` (§4).
+- **MCP:** tools from any MCP server appear as `mcp__<server>__<tool>`.
 
-How edits work:
-- **Instant diagnostics after every edit:** a syntax check for JS/TS and JSON validation. Errors are fed straight back to the agent.
-- **A checkpoint before every change:** the session can be rewound, or a single file reverted.
-- **Read-before-write protection:** the agent cannot overwrite a file it has not read in this session.
-- **Optional after-edit hook** (`afterEditCommand`, e.g. a formatter or linter).
+**How edits stay safe:**
+- An instant syntax check after every edit (JS/TS, JSON); errors go straight back to the agent.
+- A checkpoint before every change: rewind a whole turn, or revert one file.
+- The agent cannot overwrite a file it has not read in this session.
+- An optional after-edit command, for example a formatter.
 
-**Steering:** messages typed while the agent works are delivered at the next step as "[User steering]" and take priority.
+**Other features:**
+- **Context:** the conversation is summarized automatically near the limit, or on demand with `/compact`.
+- **Errors:** when a turn fails, the real reason is saved in the conversation ("Stopped by an error: …") and is shown again after a reload. A turn the app never finished says so too. "Stopped by you" appears only when you pressed Stop.
 
-**Context management:** automatic compaction into a summary near the limit, plus a manual `/compact`.
+## 3. Guards: no fake "done"
 
-## 4. Guards ("no fake done")
 Each guard sends the agent back with a specific instruction when it tries to finish too early.
 
-| Guard | Triggers when |
+| Guard | When it fires |
 |---|---|
-| Verification guard | Files changed but no real check (tests, build or type-check) ran after the last edit, or the last check failed, or edited files still have syntax/type errors |
-| Completion guard | The final answer itself admits work remains ("ready for the remaining features…"). This is a phrase list. |
-| Task-plan check | Items in the agent's own plan are still unfinished |
-| Completion audit | A separate, tool-less reviewer call compares the task, the documents it names and the project's file map with the final answer, and lists what is missing. It is on by default in yolo/headless mode. |
-| UI check | The agent changed web pages (`.tsx/.jsx/.vue/.html/.css`…) but never opened them in the browser |
-| UI-issue check | The browser showed a problem (a click or submit that changed nothing, console errors, failed requests, missing page code), and no later working interaction cleared it. Re-opening the page does not count. |
-| Loop guard | The same failing edit or command is repeated, or the agent ping-pongs between edits |
-| Report nudge | The agent finished without writing anything to the user |
+| Verification guard | Files changed, but no real check (tests, build, type-check) ran after the last edit, the last check failed, or syntax errors remain |
+| Completion guard | The final answer admits work remains ("ready for the remaining features…") |
+| Task-list check | Items on the agent's own task list are unfinished |
+| Completion audit | A separate reviewer call compares the task and its documents with the answer and lists what is missing (on by default in full-auto and headless runs) |
+| UI check | Web pages changed but were never opened in the browser |
+| UI-issue check | The browser showed a problem (a click that changed nothing, console errors, failed requests, missing page code) that no later working step cleared |
+| Evidence check | Requirements of the spec have no passing proof (§4). It keeps going while checks make progress, and stops after two fruitless tries in a row (eight in all). |
+| Loop guard | The same failing command or edit is repeated, or edits ping-pong |
+| Report nudge | The agent finished without writing anything to you |
 
-There is also a **spec plan note**: when the task names a requirements document (a SPEC.md with FR-n rows and journeys), the agent receives the full checklist up front and is asked to plan every item.
+## 4. Proof of every requirement (evidence engine)
+
+When a task names a requirements document (a `SPEC.md` with FR-n rows):
+
+1. **Checklist.** DROPs lists every requirement up front and asks the agent to plan all of them.
+2. **Independent QA agent.**
+   - A separate model call, with no tools and without ever seeing the code, writes one browser or HTTP check per requirement from the spec alone.
+   - It gets the spec's facts as a list it must copy exactly: demo accounts and passwords, routes, test ids and the app's address. So it never invents a login.
+3. **The agent proves each requirement with `check_requirement`.** DROPs runs the check itself:
+   - a test or script (exit code, plus expected text);
+   - browser steps that must end on a page showing the expected text, with no browser problem along the way;
+   - an HTTP call to the local app.
+4. **Only the QA check can verify** a requirement that has one. The agent's own passing check counts as "own check passed" and nothing more.
+5. **A stopped app is not a failure.** If nothing answers at the app's address, the result is "Not checked: start the app", and the requirement keeps its status.
+6. **Dispute, once.** If the agent believes a QA check contradicts the spec, it can dispute it once. The QA agent re-reads the spec (never the code) and keeps or revises the check.
+7. **Plain count at the end.** Every spec task ends with "Evidence: N of M requirements verified", listing the ones that are not.
+8. **Overview panel:** "Requirements N/M verified", one dot per requirement, and the evidence on hover.
+
+Commands that test nothing (`echo`, `true`…) are refused, and HTTP checks may only call the local app.
 
 ## 5. Real browser
-- A headless Chrome or Edge, already installed on the machine, is driven by playwright-core. No browser download is needed.
-- Actions: open, click, fill, select, check, press, wait, back, read, screenshot and close, plus a phone width (`width: 375`).
-- Each result reports:
-  - URL and HTTP status;
-  - on-screen messages;
-  - console errors, failed requests, and JS/CSS that failed to load;
-  - clicks that changed nothing;
-  - sideways scrolling;
-  - interactive elements, with `data-testid` where present;
-  - the visible text.
-- Targets are given as visible text or a label ("Save", "Email"), `testid=…`, or CSS. Buttons are preferred over links, and links over plain text.
-- Works with the Docker sandbox: dev-server ports (3000, 3001, 4173, 4321, 5000, 5173, 8000, 8080) are published to random localhost ports, and `localhost:<port>` is rewritten automatically.
-- Screenshots appear in the chat inside the tool card. Clicking one enlarges it.
-- The browser stays open per project (logins carry over) and closes after 10 idle minutes.
+
+- Uses the Chrome or Edge already installed on the machine, driven by playwright-core. Nothing extra is downloaded.
+- **Actions:** open, click, fill, select, check, press, wait, back, read and screenshot, plus a phone width (375 px).
+- **Each step reports:**
+  - the URL and HTTP status, and the messages on screen;
+  - console errors, failed requests, and page code that did not load;
+  - clicks that changed nothing, and sideways scrolling;
+  - the interactive elements (with `data-testid`) and the visible text.
+- Requests the page cancels itself (for example Next.js prefetches) are not counted as problems.
+- **Targets** can be visible text or a label ("Save", "Email"), `testid=…`, or CSS. Buttons win over links, and links over plain text.
+- **With the Docker sandbox,** dev-server ports are published to random local ports and addresses are rewritten automatically.
+- **Screenshots** appear inside the tool card; click to enlarge.
+- **Sessions:** one browser per project (logins carry over), closed after 10 idle minutes.
 
 ## 6. Safety
+
 - **Permission modes:**
-  - Plan: read-only plan.
+  - Plan: read-only, ends with a plan.
   - Review: read-only.
-  - Ask: asks before changes and commands.
-  - Auto-edit: edits freely, asks for commands.
-  - Full auto ("yolo"): asks for nothing.
-- **Approvals:** dangerous commands always ask, even in yolo. Allow and deny rules can be set per command pattern.
-- Sensitive files (credentials, keys, git hooks) are protected. Writes outside the project root are detected.
-- **Secret shield:** keys and tokens in tool output are masked before the model sees them.
-- **Docker sandbox (optional):** commands run in a container with the project mounted. Network can be on or off.
-- **Network approval per host** for `fetch_url`, the `browser` and `web_search` (automatic in yolo).
-- API keys are stored encrypted with OS safeStorage (DPAPI on Windows). Keys from the environment (`DROPS_*` / `H2O_*`) override saved ones in the CLI.
+  - Ask: asks before every change and command.
+  - Auto-edit: edits freely, asks before commands.
+  - Full auto: asks for nothing except dangerous commands.
+  - Shift+Tab cycles through the modes.
+- **Dangerous commands always ask,** even in full auto. Your own "always allow" and "never run" rules work per command pattern.
+- **Protected files:** credentials, keys and git hooks. Writes outside the project are detected.
+- **Secret shield:** keys and tokens in command output are masked before the model sees them.
+- **Docker sandbox (optional):** commands run in a container with the project mounted.
+  - Limits: 4 GB memory, 2 CPUs and 1,024 processes (adjustable).
+  - Network can be on or off.
+- **Network approval per website** for `fetch_url`, `browser` and `web_search` (automatic in full auto).
+- **MCP trust:** a project's own `.mcp.json` servers start only after you trust that exact project and configuration. Any change asks again.
+- **API keys** are encrypted with the operating system's protection (DPAPI on Windows). Keys from environment variables override saved ones in the CLI.
+- **GitHub:** the agent never asks for, reads or types a token.
 
-## 7. Memory and learning
-- **Project memory:** `DROPs.md` (or the older `H2O.md`), `AGENTS.md`, `CLAUDE.md`, `.drops/instructions.md`, and team rules in `.drops/rules/*.md`. All are loaded into every session.
-- **Lessons:** the agent records short rules from its mistakes, and some are recorded automatically when a guard fires or a command is missing. Near-duplicates are merged. Up to 60 lessons are kept and injected into the system prompt.
+## 7. The chat
 
-## 8. Desktop app (UI)
+- **Messages:**
+  - Markdown with code highlighting.
+  - Your messages and DROPs' answers in any language.
+  - Each paragraph takes its own direction, so Arabic, Urdu, Hebrew and Persian read right to left; code stays left to right.
+  - Fonts cover every writing system: Bangla, Devanagari, Arabic, Chinese, Japanese, Korean, Thai and more.
+- **Answer language: "Auto"** (the default). DROPs answers in the language **and** the writing system of your latest message:
+  - Banglish → Banglish, Hindi in Latin letters → the same;
+  - Bangla script → Bangla script, Arabic → Arabic.
+  - A fixed language can be chosen instead (11 languages), plus a teaching mode that explains each change.
+- **Answer style:** the outcome first, short, plain words, no internal mechanics (process ids, pipes) unless you need them.
+- **Tool cards:** compact, collapsible steps with live output, diffs, screenshots and **elapsed time** while a tool runs (for example "npm test · 14s").
+- **Live task list** under the latest message, updated as the agent works (done, in progress, waiting).
+- **Next-step box** at the end of a working turn: a two- or three-sentence recap and, when the next move is yours, one question with up to three buttons. A click sends that answer. It still works after a reload.
+- **Under each answer:** time, cost and context used, plus **Copy**, **Retry** and **Fork**.
+  - Retry undoes the answer and its file changes, then asks again.
+  - Fork starts a new session with this conversation so far.
+  - Every message of yours has **Rewind**, which restores the files as they were and puts your message back in the box to edit.
+- **Writing while the agent works:**
+  - **Enter** queues your message for after the current task.
+  - **Alt+Enter** tells the agent now, at its next step.
+  - Queued messages show **above the message box** with "Run now" (or "Tell agent now") and Cancel.
+  - Queued messages survive an app restart and wait for you; they never start by themselves.
+  - If you press Stop before the agent read your message, the text goes back into the box instead of being lost.
+- **Other:** thinking blocks, image attachments (paste or drop), approval prompts inside the chat, and questions from the agent with option buttons.
+- **Desktop notifications** when a task finishes, asks a question, or needs approval while the app is in the background.
+
+## 8. The app around the chat
+
 - **Home:**
-  - greeting;
-  - "Continue where you left off";
-  - project stats (sessions, this week, spend, git changes);
-  - four quick-start actions;
-  - other projects.
-- **Sidebar:** every project with its sessions (collapsible, with counts and a "+" for a new session in that project), search, rename and delete. There is also a file explorer with search, and source control (status, diff, AI-written commit messages, commit).
-- **Chat:**
-  - Markdown with code highlighting;
-  - collapsible tool cards with live output, diffs and screenshots;
-  - thinking blocks, steering, image attachments (paste or drop), and permission prompts inline.
+  - a greeting and "Continue where you left off";
+  - project numbers (sessions, this week, spend, git changes);
+  - four quick starts, and your other projects.
+- **Sidebar:**
+  - every project with its sessions (collapsible, with counts and a "+" for a new session), plus search, rename and delete;
+  - a file explorer with search;
+  - source control: status, diffs, AI-written commit messages, commit.
 - **Right panel:**
-  - Overview: environment (machine or sandbox, folder, branch, model, mode), context meter, usage, and outputs (files changed with +/−), plus the task plan;
-  - Changes: per-file diff and revert;
-  - Processes: running dev servers and their output;
-  - Usage.
+  - **Overview:** environment (this computer or the sandbox, folder, branch, model, mode), context meter, cost, requirements and their evidence, files changed (+/−), and the task plan.
+  - **Tasks:** running, queued and past tasks, with progress and Cancel.
+  - **Changes:** a diff per file, and revert.
+  - **Processes:** running dev servers and their output.
+  - **Usage:** tokens and cost.
 - **Editor:** Monaco with tabs, session diffs, and live reload when the agent edits a file.
-- **Navigation:**
-  - command palette (Ctrl+K) and keyboard shortcuts;
-  - quick buttons for Files, Changes and Processes;
-  - dark and light themes, compact density.
-- **Slash commands:** `/init /review /test /fix /explain /plan /compact /commit /new /export /report /share /worktree /mcp`, plus custom commands from `.drops/commands/*.md`.
-- **Git worktrees:** run a parallel session on its own branch, then merge it back or discard it.
-- **Session export:** Markdown, HTML report, or a shareable JSON that can be imported.
-- **Settings:** providers and keys (with a test button), Ollama (pull models, test), MCP servers, sandbox, language of explanations (11 languages plus an "explain like a teacher" mode), budgets, command rules and theme.
+- **Command palette (Ctrl+K):** every command, files and sessions.
+- **Keyboard shortcuts:**
 
-## 9. Headless CLI
-- `node src/cli.js --project <dir> --model <m> [--effort] [--mode] [--sandbox [image]] [--max-cost] [--max-steps] [--fallback m1,m2] [--mcp-config] [--lang] [--json] [--save session.json] "<task>"`
-- Used by CI (an example GitHub Action is in `docs/github-action.yml`) and by the Software Factory, which runs DROPs in yolo mode inside Docker.
+  | Keys | Action |
+  |---|---|
+  | Ctrl+K | Command palette |
+  | Ctrl+N | New session |
+  | Ctrl+O | Open project |
+  | Ctrl+, | Settings |
+  | Ctrl+B | Sidebar |
+  | Ctrl+J | Right panel |
+  | Ctrl+L | Message box |
+  | Ctrl+Shift+L | Theme |
+  | Shift+Tab | Permission mode |
+  | Esc | Stop |
+  | Alt+Enter | Tell the working agent now |
 
-## 10. Measured results (Software Factory benchmarks, hidden acceptance tests)
-| App | Result | Notes |
-|---|---|---|
-| Booking | 3/3 builds, 96% average, all critical journeys | meets the bar |
-| CRM (12 requirements) | 8/11, 10/11, 11/11 → 88% average | one run failed 3 of 4 critical journeys. Baseline before the guards: 6%. |
-| Inventory | latest run 9/15 on the smallest free models | below the bar |
+- **Slash commands:**
 
-These numbers come from free-tier Gemini models that switch as quotas run out, so they are not a single-model measurement.
+  | Command | What it does |
+  |---|---|
+  | `/init` | Write the project memory file |
+  | `/review` | Review uncommitted changes for bugs |
+  | `/test` | Run the tests and fix failures |
+  | `/fix` | Build or type-check, and fix every error |
+  | `/explain` | Explain how the codebase works |
+  | `/plan` | Switch to plan mode |
+  | `/compact` | Summarize the conversation now |
+  | `/pr` | Branch, commit, push, open a pull request and report its checks (never merges) |
+  | `/ci` | Read failing CI checks, fix, push, repeat |
+  | `/commit` | AI commit message and commit |
+  | `/new` | New session |
+  | `/export`, `/report`, `/share` | Markdown, HTML report, shareable session file |
+  | `/worktree` | Parallel session on its own git branch |
+  | `/mcp` | MCP servers |
 
-## 11. Tests
-There are 83 automated unit/integration tests (`npm test`) plus 10 real Electron UI tests (`npm run test:ui`). They cover:
-- the guards and the agent loop (with a scripted model);
-- MCP (with a test server) and security (dangerous commands, redaction, sensitive files);
+  Your own commands can live in `.drops/commands/*.md`. `/pr` and `/ci` need the GitHub CLI (`gh`) installed and signed in.
+- **Git worktrees:** run a session on its own branch next to your main work, then merge it back or discard it.
+- **Export and import:** Markdown, an HTML review report, or a `.drops.json` file that someone else can import.
+- **Lessons window** (command palette): every lesson with its status, each removable.
+- **Settings** has nine sections:
+  - **General:** default model, effort and mode; open the last project; notifications; send with Enter or Ctrl+Enter.
+  - **API keys and providers:** keys with a test button, LM Studio, custom endpoints.
+  - **Models and cost:** auto routing, cheap sub-agents, cost and token limits, Ollama (download models, test).
+  - **Agent:**
+    - verification guard and independent QA agent switches;
+    - auto-compact point and maximum steps;
+    - after-edit command;
+    - answer language and teaching mode;
+    - instructions for every session.
+  - **Tools and MCP:** MCP servers (JSON) and your own commands.
+  - **Safety and sandbox:** always-allow and never-run commands; the Docker sandbox, its image and its network.
+  - **Appearance:** theme, text size, conversation width and density.
+  - **Keyboard shortcuts.**
+  - **About:** version and where your data lives.
+- **First run:** with no API key, Settings opens so you can add one. Local models need no key.
+
+## 9. Memory and learning
+
+- **Project memory:**
+  - `DROPs.md` (or the older `H2O.md`), `AGENTS.md`, `CLAUDE.md`;
+  - `.drops/instructions.md` and team rules in `.drops/rules/*.md`.
+  - All of them are loaded into every session.
+- **Lessons:**
+  - **Active at once:** a lesson the agent writes after fixing its own mistake.
+  - **Pending:** a lesson DROPs noticed by itself stays out of the prompt until the same mistake happens again.
+  - Near-duplicates are merged, and up to 60 lessons are kept.
+
+## 10. Headless CLI
+
+```
+node src/cli.js --project <dir> --model <m> [--effort e] [--mode m] [--sandbox [image]]
+  [--max-cost usd] [--max-steps n] [--fallback m1,m2] [--mcp-config file] [--lang code]
+  [--json] [--save session.json] "<task>"
+```
+
+- Prints every step and notice, ends with the evidence count, and can write the whole session to a file.
+- Used by CI (an example GitHub Action is in `docs/github-action.yml`) and by the AI Software Company factory, which runs DROPs in full-auto mode inside Docker.
+
+## 11. Backward compatibility
+
+The old name still works:
+- `H2O_*` environment variables (new: `DROPS_*`);
+- the `%APPDATA%\H2O` data folder and `~/.h2o`;
+- `H2O.md` and `.h2o/` project files.
+
+Nobody loses settings, sessions, lessons or project memory.
+
+## 12. Tests
+
+104 automated tests and 13 real-window UI tests.
+
+**Automated tests** (`npm test`), using scripted fake models and real local servers:
+- the guards and the agent loop;
+- evidence: spec facts, a stopped app, a disputed QA check, the final count;
+- errors and retries, steering and Stop;
+- the task queue, including restart;
+- MCP and security;
 - worktrees, the CLI and media;
-- lessons, and the browser (real headless runs: a login journey, async form submissions, a dead button, missing page code, self-cancelled prefetch filtering);
-- the fallback chain (two fake servers) and backward compatibility of the rename;
-- full Electron window UI: first-run setup, navigation, palette, lessons dialog, settings panel and `qaAgent` toggle, themes, and a full chat turn with a mock model.
+- lessons;
+- the real browser (journeys, dead buttons, missing page code, cancelled prefetches);
+- the fallback chain and the H2O compatibility.
 
----
+**UI tests** (`npm run test:ui`) launch the real app with throwaway data and no keys, and check:
+- first-run Settings and the home screen;
+- the sidebar, every panel tab and the palette;
+- the lessons window, every Settings section and the theme;
+- a full chat turn;
+- queue and steer while the agent works;
+- the live task list, the next-step box and its buttons, Retry and Fork;
+- the `/pr` and `/ci` commands;
+- that no page error was logged.
 
-## 12. Known weaknesses (the author's honest list: start the review here)
+## 13. Measured results
 
-**Quality depends on the model**
-1. On small or free models the results vary a lot from run to run: 3/11 to 11/11 on the same spec. Guards reduce false "done", but they cannot make a weak model write correct details (wrong value formatting, missing fields).
-2. The completion guard is a phrase list (whack-a-mole). The completion audit uses the same model, so a weak model may also audit badly.
-3. Lessons are recorded automatically and never reviewed by a person. A wrong lesson stays in every future prompt until it is pushed out. There is no UI to view or delete lessons.
+From the AI Software Company factory: hidden acceptance tests that the agent never sees.
 
-**Browser and UI checking**
-4. The UI check runs automatically only in yolo/headless mode, or when the `uiCheck` setting is on. In normal desktop use it is off unless enabled.
-5. "Changed nothing" is detected by comparing the URL and the visible text. An action that only changes styling or an input value is not caught, and slow pages can cause false positives.
-6. There is no visual comparison (layout or design regressions), no accessibility audit inside the agent, and no multi-tab or file-download handling. OAuth and CAPTCHA flows are impossible by design.
-7. Screenshots are stored inside the session JSON as base64, so sessions with many screenshots grow large.
+| App | Result |
+|---|---|
+| Booking | 3/3 builds, 96% average, every critical journey: meets the bar |
+| Inventory | 98% average (44/45) with DeepSeek Flash, 11 of 12 critical journeys |
+| CRM | 79–88% on free Gemini models. The evidence engine now verifies requirements (11 of 12 in the latest run, versus 0 before). A new 3-run benchmark is in progress. |
 
-**Safety**
-8. Yolo mode runs any command that is not flagged as dangerous. Dangerous-command and secret detection are pattern-based, so new patterns slip through.
-9. MCP servers in a project's `.mcp.json` start local commands. A cloned repository could define a malicious server.
-10. The Docker sandbox has network access by default, and published ports bind to localhost only. There is no CPU or memory limit for the sandbox container.
+Free-tier runs mix models as quotas run out, so they are not single-model measurements.
 
-**Engineering**
-11. The renderer is large vanilla JS (`app.js` and `panels.js` are about 1,000 lines each) with no component structure. Automated UI tests (`npm run test:ui`) cover the main screens, modals, settings switches, and a full mock chat turn.
-12. The context limit is a single constant (1M tokens) for every model. Compaction quality depends on the model.
-13. Cost is unknown for models without a price entry. Free-tier fallbacks mix models silently except for notices.
-14. Windows-first: PowerShell versus bash differences, CRLF files, and a Windows-only data folder. macOS and Linux builds exist but are barely tested.
-15. There is no auto-update, crash reporting, signed installer or telemetry. Multi-user collaboration is not supported.
-16. The backward-compatibility layer for the rename (H2O → DROPs) adds two names for every folder, file and environment variable.
+## 14. Known limits (short)
 
-### Fixed after the first review (2026-11-15)
-- **#3 Lessons:**
-  - A lesson the loop noticed by itself now stays **pending**, out of the prompt, until the same mistake happens again.
-  - A lesson the agent writes after fixing its own mistake is active at once.
-  - A **"Lessons learned"** window (command palette) lists every lesson with its status and lets you remove it.
-- **#9 MCP:**
-  - A project's own `.mcp.json` servers start only after you **trust that exact project and configuration**. The review dialog shows the commands it would run.
-  - Any change to the file asks again. Servers from your own Settings are unaffected.
-- **#10 Sandbox:** containers now have **memory (4 GB), CPU (2) and process (1024) limits**, adjustable with `DROPS_SANDBOX_MEMORY`, `DROPS_SANDBOX_CPUS` and `DROPS_SANDBOX_PIDS`. Network access is still on by default, because installs need it.
-- **#12 Context:** the context meters now use **each model's own window** (for example, 16K for a local Ollama model) instead of one constant.
-- **README:** the leftover H2O names are fixed.
-- **#2 Evidence-based completion** (the review's top recommendation):
-  - When a task names a requirements document, DROPs keeps a checklist of every FR.
-  - The new `check_requirement` tool lets the agent describe a check, and **DROPs runs it itself**:
-    - a test or script (the exit code, plus expected text in the output);
-    - browser steps that must end on a page showing the expected text, with no browser problem on the way;
-    - an HTTP call to the local app (2xx plus the expected text).
-  - Commands that exercise nothing (`echo`, `true`…) are refused, and only the local app can be checked over HTTP.
-  - A requirement is **verified only by a passing check**. Its evidence is stored with it: kind, check, expected text, result and time.
-  - The **evidence check** guard refuses "done" while requirements lack evidence, and lists them.
-  - The Overview panel shows "Requirements N/M verified" with a dot per requirement and its evidence on hover.
-  - It can be turned off with the setting `evidenceCheck: false`.
-- **Independent QA agent** (fixes the limit above, where the agent chose its own check):
-  - Right after the checklist is made, a separate model call with no tools acts as a QA engineer. It sees **only the spec**, never the code, and writes one browser or HTTP check per requirement.
-  - When a requirement has a QA check, **only that check can verify it**. The coder's own passing check is recorded as "own check passed" but the requirement stays unverified until `check_requirement` with `use_qa: true` passes.
-  - The coder cannot edit the QA check; the evidence guard tells it to fix the app, never the check.
-  - Malformed QA checks (no steps, no expected text, a non-local URL) are dropped, and those requirements fall back to the coder's own checks.
-  - On by default in yolo/headless mode; setting `qaAgent: true` turns it on everywhere, `false` turns it off. Settings includes a user-toggleable switch under Agent → Reliability.
-  - Limit: the QA agent can guess a test id or route the spec does not name. A wrong QA check blocks verification of that requirement, so specs should name their routes and test ids.
-- **#11 UI tests:** `npm run test:ui` launches the real Electron app with empty, throwaway data and home folders (and no API keys), then checks: first-run Settings, the home screen, the sidebar (Ctrl+B), every right-panel tab, the Ctrl+K palette, the Lessons window, every Settings section and `qaAgent` switch persistence, the theme toggle, a full chat turn with mock tool calls, and that no page error was logged.
+- **Quality depends on the model.** Small free models vary a lot from run to run.
+- **Verification can go stale.** A requirement verified early stays "verified" even if a later edit breaks it.
+- **QA checks test the main path** and can miss "negative" cases (logged-out visitors, other users' data).
+- **Still missing:**
+  - in the app: session status and pins in the sidebar, chapters for long sessions, split view, a live browser pane;
+  - in the agent: scheduled tasks, skills, full hooks;
+  - for releasing DROPs: auto-update, crash reports, a signed installer;
+  - tested Mac and Linux builds.
+- The renderer is large vanilla JavaScript without components. The UI tests guard it.
 
-## 13. Questions for the reviewer
-1. Which guard would you trust least, and what would a non-phrase-based completion check look like?
-2. Is the browser's "issue" signal (no change, console errors, failed requests) the right definition of "broken", and what is missing?
-3. Where is the safety model weakest for yolo/headless use? Think of sandbox network, MCP and command patterns.
-4. How should lessons be validated before they influence every future session?
-5. What would make results on small, free models more consistent: a better plan, test-first generation, or smaller steps?
-6. Which UI parts most need tests, and what is the cheapest way to add them to a vanilla-JS Electron renderer?
-7. Which missing features matter most compared with Claude Code, Cursor and similar agents?
+The full list with priorities lives in the private AI Software Company repository (`docs/WEAKNESSES.md`).
