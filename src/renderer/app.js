@@ -139,6 +139,7 @@ function renderHistory(v) {
           const note = /^\[DROPs (plan|evidence check|completion guard|completion audit)\]/.exec(t.text);
           if (note) { place(v, noticeEl('shield', DROPS_NOTES[note[1]])); continue; }
           const steer = t.text.startsWith('[User steering] ');
+          if (!steer && v.histWrapUp) { place(v, wrapUpCard(v, v.histWrapUp, false)); v.histWrapUp = null; }
           appendUser(v, steer ? t.text.slice(16) : t.text, live && !steer ? turnAt.get(mi) : null, imgs, steer ? 'Steered mid-run' : null);
           group = null;
         }
@@ -154,6 +155,7 @@ function renderHistory(v) {
         } else if (b.type === 'thinking' && b.thinking) stepsHost(group).appendChild(thinkingEl(b.thinking, false));
         else if (b.type === 'tool_use') {
           if (b.name === 'todo_write') continue;
+          if (b.name === 'wrap_up') { v.histWrapUp = { recap: String(b.input?.recap || ''), ask: String(b.input?.ask || ''), options: b.input?.ask ? (b.input?.options || []).slice(0, 3) : [] }; continue; }
           const meta = d.toolMeta[b.id] || { status: 'done', input: b.input };
           const c = toolCard(v, b.id, b.name, group);
           v.lastCard = c;
@@ -176,6 +178,8 @@ function renderHistory(v) {
   };
   if (d.archive?.length) renderMsgs(d.archive, false);
   renderMsgs(d.messages, true);
+  // The last turn's next-step box stays usable after a reload.
+  if (v.histWrapUp) { place(v, wrapUpCard(v, v.histWrapUp, !v.busy)); v.histWrapUp = null; }
   if (d.messages.length) maybePlanCta(v);
 }
 
@@ -324,7 +328,7 @@ function toolCard(v, id, name, parent) {
   const [verb, ic] = toolInfo(name);
   const el = h('div', 'tool');
   const head = h('div', 'tool-head');
-  head.innerHTML = `<span class="ti">${icon(ic, 'sm')}</span><span class="tool-verb">${esc(verb)}</span><span class="tool-sum"></span><span class="tool-meta"></span><span class="tool-acts"></span><span class="st running"></span>`;
+  head.innerHTML = `<span class="ti">${icon(ic, 'sm')}</span><span class="tool-verb">${esc(verb)}</span><span class="tool-sum"></span><span class="tool-meta"></span><span class="tool-acts"></span><span class="tool-time"></span><span class="st running"></span>`;
   const body = h('div', 'tool-body');
   el.append(head, body);
   head.onclick = (e) => { if (!e.target.closest('.tool-acts')) el.classList.toggle('collapsed'); };
@@ -332,6 +336,14 @@ function toolCard(v, id, name, parent) {
   el.classList.add('collapsed');
   (parent ? stepsHost(parent) : v.el).appendChild(el);
   let out = null, raw = '', steps = null, file = null;
+  // Elapsed time while a tool runs (shown from 2 s), kept after it ends when it took a while.
+  let t0 = 0, timer = null;
+  const timeEl = $('.tool-time', head);
+  const fmt = (ms) => { const sec = Math.round(ms / 1000); return sec < 60 ? sec + 's' : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's'; };
+  const tickTime = (on) => {
+    if (on && !timer) { t0 = t0 || Date.now(); timer = setInterval(() => { const ms = Date.now() - t0; if (ms >= 2000) timeEl.textContent = fmt(ms); }, 1000); }
+    if (!on && timer) { clearInterval(timer); timer = null; const ms = Date.now() - t0; timeEl.textContent = ms >= 2000 ? fmt(ms) : ''; }
+  };
   const meta = $('.tool-meta', head), acts = $('.tool-acts', head);
   const copyBtn = h('button'); copyBtn.innerHTML = icon('copy', 'xs'); copyBtn.title = 'Copy output';
   copyBtn.onclick = () => {
@@ -345,6 +357,7 @@ function toolCard(v, id, name, parent) {
     el, name, body,
     setSummary: (s) => { const t = $('.tool-sum', head); t.textContent = s || ''; t.title = s || ''; el.dataset.sum = s || ''; },
     setStatus: (s) => {
+      tickTime(s === 'running' || s === 'composing');
       const st = $('.st', head);
       st.className = 'st ' + (s === 'composing' ? 'running' : s);
       st.innerHTML = s === 'done' ? icon('check', 'xs') : s === 'error' || s === 'denied' ? icon('x', 'xs') : s === 'waiting' ? icon('alert', 'xs') : '';
@@ -435,6 +448,7 @@ function onEvent(ev) {
   const cur = S.current === v.id;
   switch (ev.type) {
     case 'turn-start': {
+      v.lastTurnIndex = ev.turnIndex;
       const u = v.el.querySelector('.msg-user.pending');
       if (u) { u.classList.remove('pending'); u.querySelector('.tag')?.remove(); addRewind(v, u, ev.turnIndex); }
       v.data.title = ev.title;
@@ -483,7 +497,7 @@ function onEvent(ev) {
       if (ev.blockType === 'text') { rec.el = h('div', 'md cursor'); g.appendChild(rec.el); setWorking(v, true, 'Writing'); }
       else if (ev.blockType === 'thinking') { rec.el = thinkingEl('', true); rec.started = Date.now(); stepsHost(g).appendChild(rec.el); setWorking(v, true, 'Thinking'); }
       else if (ev.blockType === 'tool_use') {
-        if (ev.name !== 'todo_write') {
+        if (ev.name !== 'todo_write' && ev.name !== 'wrap_up') {
           rec.card = toolCard(v, ev.id, ev.name, g);
           rec.card.setStatus('composing'); rec.card.setSummary('');
         }
@@ -528,7 +542,7 @@ function onEvent(ev) {
       break;
     }
     case 'tool-start': {
-      if (ev.name === 'todo_write') break;
+      if (ev.name === 'todo_write' || ev.name === 'wrap_up') break;
       let c = v.tools.get(ev.id);
       if (!c) c = toolCard(v, ev.id, ev.name, v.group);
       c.clearLive();
@@ -561,7 +575,12 @@ function onEvent(ev) {
     }
     case 'permission': showPermission(v, ev); break;
     case 'question': showQuestion(v, ev); break;
-    case 'todos': v.data.todos = ev.todos; if (cur) { Panels.renderPlan(); Panels.switchTab('plan'); } break;
+    case 'todos': v.data.todos = ev.todos; renderTaskCard(v); if (cur) Panels.renderPlan(); break;
+    case 'wrap-up': {
+      v.el.querySelectorAll('.wrapup button').forEach((b) => { b.disabled = true; });
+      v.pendingWrapUp = { recap: ev.recap, ask: ev.ask, options: ev.options };
+      break;
+    }
     case 'changes': v.data.changes = ev.changes; if (cur) { Panels.renderChanges(); Panels.refreshTreeMarks(); Panels.refreshGitSoon(); } break;
     case 'requirements': v.data.requirements = ev.requirements; if (cur) Panels.renderPlan(); break;
     case 'usage': v.data.usage = ev.usage; if (cur) { Panels.renderUsage(); updateCtx(); Panels.renderStatus(); } break;
@@ -639,7 +658,21 @@ function onEvent(ev) {
           };
           f.appendChild(copyResp);
         }
+        // Retry: undo this turn (messages and files) and send the same request again.
+        const lastTurn = v.lastTurnIndex ?? v.data.turns.length - 1;
+        if (lastTurn >= 0) {
+          const retry = h('button', 'btn ghost sm'); retry.innerHTML = icon('refresh', 'xs') + 'Retry';
+          retry.title = 'Undo this answer and its file changes, then ask again';
+          retry.onclick = () => retryTurn(v, lastTurn);
+          f.appendChild(retry);
+        }
+        const fork = h('button', 'btn ghost sm'); fork.innerHTML = icon('branch', 'xs') + 'Fork';
+        fork.title = 'Start a new session with this conversation so far';
+        fork.onclick = () => forkSession(v);
+        f.appendChild(fork);
         place(v, f);
+        // The next-step box goes last, after the answer and its footer.
+        if (v.pendingWrapUp) { place(v, wrapUpCard(v, v.pendingWrapUp, true)); v.pendingWrapUp = null; }
         v.started = null;
         maybePlanCta(v);
         if (!document.hasFocus() && S.settings?.notifyApproval !== false) new Notification('DROPs', { body: `${v.data.title} — finished`, silent: true });
@@ -650,6 +683,43 @@ function onEvent(ev) {
       break;
     }
   }
+}
+
+/** The next-step box: recap, optional question, answer buttons (a click sends the answer). */
+function wrapUpCard(v, box, live) {
+  const card = h('div', 'wrapup');
+  card.setAttribute('role', 'group'); card.setAttribute('aria-label', 'Next step');
+  card.appendChild(h('div', 'wu-recap', box.recap));
+  if (box.ask) {
+    card.appendChild(h('div', 'wu-ask', box.ask));
+    if (box.options?.length) {
+      const row = h('div', 'wu-actions');
+      box.options.forEach((o, i) => {
+        const b = h('button', i === 0 ? 'btn primary sm' : 'btn sm', o);
+        b.disabled = !live;
+        b.onclick = () => { card.querySelectorAll('button').forEach((x) => { x.disabled = true; }); b.classList.add('chosen'); doSend(v, o, []); };
+        row.appendChild(b);
+      });
+      card.appendChild(row);
+    }
+  }
+  return card;
+}
+
+/** The task list under the latest message, updated live while the agent works. */
+function renderTaskCard(v) {
+  const todos = v.data.todos || [];
+  if (!todos.length) { v.taskCard?.remove(); v.taskCard = null; return; }
+  if (!v.taskCard) v.taskCard = h('div', 'task-card-inline');
+  const done = todos.filter((t) => t.status === 'completed').length;
+  v.taskCard.innerHTML = `<div class="tci-head"><span>Tasks</span><span class="tci-count">${done} / ${todos.length}</span></div>`;
+  for (const t of todos) {
+    const r = h('div', 'tci-row ' + t.status);
+    r.innerHTML = `<span class="tci-ic">${icon(t.status === 'completed' ? 'check' : t.status === 'in_progress' ? 'play' : 'square', 'xs')}</span>`;
+    r.appendChild(h('span', 'tci-t', t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content));
+    v.taskCard.appendChild(r);
+  }
+  place(v, v.taskCard); // moves it to the bottom of the thread, above the working indicator
 }
 
 function maybePlanCta(v) {
@@ -1018,6 +1088,23 @@ async function rewind(v, turnIndex) {
   $('#input').value = r.text; autosize(); updateComposer(); $('#input').focus();
   toast(r.restored ? `Rewound · ${r.restored} file${r.restored > 1 ? 's' : ''} restored` : 'Rewound');
   Panels.refreshGitSoon();
+}
+async function retryTurn(v, turnIndex) {
+  if (v.busy) { toast('Wait for the agent to finish'); return; }
+  if (turnIndex !== (v.lastTurnIndex ?? v.data.turns.length - 1)) { toast('Only the latest answer can be retried'); return; }
+  const r = await api.rewind(v.id, turnIndex);
+  if (r.error) { toast(r.error); return; }
+  v.data = r.session;
+  renderHistory(v);
+  showCurrent();
+  doSend(v, r.text, []);
+}
+async function forkSession(v) {
+  const r = await api.forkSession(v.id);
+  if (r?.error) { toast(r.error); return; }
+  await openSession(r.id);
+  Panels.renderSessions();
+  toast('Forked: a new session with this conversation');
 }
 async function compactNow() {
   const v = currentView();

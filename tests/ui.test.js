@@ -213,6 +213,66 @@ test('while the agent works: Enter queues above the composer (cancellable), Alt+
   } finally { srv.close(); }
 });
 
+test('a turn shows a live task list, ends with a next-step box whose button replies, and offers Retry and Fork', async () => {
+  const http = require('node:http');
+  let calls = 0; const bodies = [];
+  const reply = (n) => {
+    if (n === 1) return { message: { role: 'assistant', tool_calls: [{ function: { name: 'todo_write', arguments: { todos: [{ content: 'Read the file', status: 'completed' }, { content: 'Explain it', status: 'in_progress' }] } } }] } };
+    if (n === 2) return { message: { role: 'assistant', tool_calls: [{ function: { name: 'wrap_up', arguments: { recap: 'Ami file ta porechi. مرحبا بالعالم — the file says hello.', ask: 'Commit korbo?', options: ['Yes, commit', 'Not yet'] } } }] } };
+    return { message: { role: 'assistant', content: n === 3 ? 'File ta te **hello** lekha ache.' : `Reply ${n}.` } };
+  };
+  const srv = http.createServer((req, res) => {
+    let body = ''; req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'fake:latest', details: { parameter_size: '4B' } }] }));
+      if (req.url === '/api/show') return res.end(JSON.stringify({ capabilities: ['tools'] }));
+      if (req.url !== '/api/chat') return res.end('{}');
+      const n = ++calls; bodies.push(body);
+      setTimeout(() => res.end(JSON.stringify({ ...reply(n), done: true, prompt_eval_count: 5, eval_count: 5 }) + '\n'), 400);
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const proj = path.join(tmp, 'proj-wrap');
+  fs.mkdirSync(proj, { recursive: true });
+  try {
+    await win.evaluate(async ({ url, projDir }) => {
+      await window.drops.setSettings({ ollamaUrl: url, ollamaEnabled: true, defaultModel: 'ollama:fake:latest', recentProjects: [projDir], autoVerify: false, completionAudit: false });
+      await setProject(projDir); await reloadModels(); await newSession();
+      document.querySelector('#modelSel').value = 'ollama:fake:latest'; syncPills();
+    }, { url: `http://127.0.0.1:${srv.address().port}`, projDir: proj });
+    await win.fill('#input', 'file ta ki bole?');
+    await win.keyboard.press('Enter');
+    await win.waitForSelector('.task-card-inline', { state: 'visible', timeout: 15000 });
+    assert.match(await win.textContent('.task-card-inline'), /Tasks\s*1 \/ 2.*Read the file.*Explain it/s);
+    await win.waitForSelector('.wrapup', { state: 'visible', timeout: 15000 });
+    const box = await win.textContent('.wrapup');
+    assert.match(box, /Ami file ta porechi/);
+    assert.match(box, /Commit korbo\?/);
+    assert.equal(await win.locator('.wrapup .wu-actions button').count(), 2);
+    assert.equal(await win.locator('.tool[data-name="wrap_up"]').count(), 0, 'no tool card for the box');
+    // The recap paragraph with Arabic text gets its own direction; nothing overflows.
+    assert.equal(await win.evaluate(() => getComputedStyle(document.querySelector('.wu-recap')).unicodeBidi), 'plaintext');
+    await win.screenshot({ path: path.join(tmp, 'wrapup.png') });
+
+    // A button sends its label as the user's reply.
+    await win.click('.wrapup .wu-actions button:first-child');
+    await win.waitForFunction(() => !document.querySelector('#composer').classList.contains('is-busy') && /Reply 4\./.test(document.querySelector('#threads').textContent), null, { timeout: 15000 });
+    assert.ok(bodies[3].includes('Yes, commit'), 'the click was sent to the model');
+
+    // Retry undoes the last answer and asks again; Fork opens a new session with the conversation.
+    const before = calls;
+    await win.locator('.turn-footer').last().getByRole('button', { name: 'Retry' }).click();
+    await win.waitForFunction((n) => !document.querySelector('#composer').classList.contains('is-busy') && /Reply 5\./.test(document.querySelector('#threads').textContent), before, { timeout: 15000 });
+    assert.ok(!/Reply 4\./.test(await win.textContent('#threads')), 'the retried answer is gone');
+    const sessionsBefore = (await win.evaluate(() => window.drops.listSessions())).length;
+    await win.locator('.turn-footer').last().getByRole('button', { name: 'Fork' }).click();
+    await win.waitForFunction((n) => document.querySelector('#sessionTitle')?.textContent.startsWith('Fork:'), sessionsBefore, { timeout: 10000 });
+    assert.equal((await win.evaluate(() => window.drops.listSessions())).length, sessionsBefore + 1);
+    assert.match(await win.textContent('#threads'), /file ta ki bole\?/, 'the fork has the conversation');
+  } finally { srv.close(); }
+});
+
 test('Ctrl+Shift+L switches between light and dark themes', async () => {
   const theme = () => win.evaluate(() => document.documentElement.dataset.theme || document.body.dataset.theme || document.documentElement.className);
   const first = await theme();

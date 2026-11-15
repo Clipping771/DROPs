@@ -417,6 +417,23 @@ handle('session:import', async () => {
     return { id: data.id };
   } catch (e) { return { error: e.message }; }
 });
+// Fork: a new session that starts with this conversation so far (same project folder; files are shared).
+handle('session:fork', (id) => {
+  const a = getAgent(id);
+  if (!a) return { error: 'Session not found' };
+  if (a.busy) return { error: 'Wait for the agent to finish, then fork.' };
+  const src = JSON.parse(JSON.stringify(a.data));
+  const data = store.newSession(src.projectDir, { model: src.model, effort: src.effort, mode: src.mode });
+  Object.assign(data, {
+    title: `Fork: ${src.title}`.slice(0, 80), messages: src.messages, archive: src.archive || [], compactions: src.compactions || [],
+    toolMeta: src.toolMeta || {}, todos: src.todos || [], requirements: src.requirements, forkedFrom: id,
+    turns: (src.turns || []).map((t) => ({ ...t, files: {} })), // the original keeps the file checkpoints
+  });
+  if (src.worktree) data.worktree = src.worktree;
+  store.saveSession(data);
+  agents.set(data.id, new AgentSession(data, deps));
+  return { id: data.id };
+});
 handle('session:load', (id) => { const a = getAgent(id); return a ? { ...a.data, busy: a.busy, procs: a.procs.list() } : null; });
 handle('session:delete', (id) => { agents.get(id)?.dispose(); agents.delete(id); store.deleteSession(id); return true; });
 handle('session:rename', (id, title) => { const a = getAgent(id); if (!a) return false; a.data.title = title; a.save(true); return true; });

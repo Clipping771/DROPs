@@ -39,7 +39,7 @@ const DEFAULTS = {
   sandboxImage: 'node:22-bookworm',
   sandboxNetwork: true,
   // communication
-  responseLanguage: 'en',
+  responseLanguage: 'auto',
   explainMode: false,
   // OpenAI-compatible providers
   providerKeysEnc: {},
@@ -59,7 +59,12 @@ function writeJson(file, data) {
   fs.renameSync(tmp, file);
 }
 
-function getSettingsRaw() { return { ...DEFAULTS, ...readJson(settingsFile(), {}) }; }
+function getSettingsRaw() {
+  const saved = readJson(settingsFile(), {});
+  // "en" was the old default, not a choice: it becomes "auto" once (an explicit choice made later stays).
+  if (saved.responseLanguage === 'en' && !saved.languageMigrated) { saved.responseLanguage = 'auto'; saved.languageMigrated = true; }
+  return { ...DEFAULTS, ...saved };
+}
 const geminiEnv = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || null;
 function getSettings() {
   const s = getSettingsRaw();

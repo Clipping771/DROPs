@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('drops', {
   taskReorder: invoke('task:reorder'),
   taskRemove: invoke('task:remove'),
   taskQueue: invoke('task:queue'),
+  forkSession: invoke('session:fork'),
   taskQueued: invoke('task:queued'),
   taskRunNow: invoke('task:runNow'),
   onMcp: on('mcp:status'),

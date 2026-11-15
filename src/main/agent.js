@@ -99,6 +99,21 @@ tools.registerDef(TASK_DEF);
 tools.registerDef(WEB_SEARCH_DEF);
 tools.registerDef(ASK_USER_DEF);
 
+const WRAP_UP_DEF = {
+  name: 'wrap_up',
+  description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      recap: { type: 'string', description: 'Two or three short sentences: what is now true, what is not done or not verified.' },
+      ask: { type: 'string', description: 'One short question, only when the user must decide something.' },
+      options: { type: 'array', items: { type: 'string' }, description: '1-3 short answers (1-4 words each), recommended first. A click sends it as the user\'s reply.' },
+    },
+    required: ['recap'],
+  },
+};
+tools.registerDef(WRAP_UP_DEF);
+
 // Every request resends the whole history, so only the newest few images a tool read stay in it;
 // older ones become a short note (the agent can read the file again if it needs to).
 function dropOldToolImages(messages, keep) {
@@ -342,7 +357,8 @@ class AgentSession {
       `You are DROPs, an elite autonomous software engineer working inside the user's project. You plan, read and search code, edit files, run commands, and verify your work end to end. You are precise, fast, and honest about what you did and did not verify.`,
       `# Environment\n- OS: ${osName} ${os.release()}\n- ${shellNote}\n- Project root: ${root} (file tools take paths relative to it and cannot leave it)\n- Today: ${day}\n- Model: ${model}`,
       mcp.length ? `# Connected MCP servers\n${mcp.map((m) => `- ${m.name}: tools ${m.tools.map((t) => '`' + t + '`').join(', ')} (exposed as mcp__${m.name}__<tool>)`).join('\n')}` : '',
-      lang ? `# Language\nWrite all explanations, progress notes and the final report in ${lang}. Keep code, identifiers, file paths, commands and error messages in their original form.` : '',
+      lang ? `# Language\nWrite all explanations, progress notes and the final report in ${lang}. Keep code, identifiers, file paths, commands and error messages in their original form.`
+        : `# Language\nReply in the language AND the writing system of the user's latest message: English → English; Bangla, Hindi or Urdu typed in Latin letters (e.g. "kaj koro", "kya hai") → the same, in Latin letters; Bangla script → Bangla script; Devanagari → Devanagari; Arabic script → Arabic script; any other language → that language. Never switch writing systems inside an answer. Keep code, file names, commands and error messages as they are.`,
       s.explainMode ? `# Teaching mode is ON\nThe user is learning. After each meaningful change, explain briefly and plainly: what you changed, why it was needed, and the concept behind it (1-3 sentences, no jargon without a short definition). In the final report, add a "What you can learn from this" section with 2-4 bullet points.` : '',
       `# Project profile (auto-detected)\n${profile.text}${profile.verify.length ? `\n- Likely verification commands: ${profile.verify.map((v) => '`' + v + '`').join(', ')}` : ''}`,
       `# Operating procedure
@@ -362,7 +378,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
 - When you learn something that changes the plan, say it in one sentence.
 - Final answer: start with the outcome in one or two plain sentences (what is now true). Then, only if useful, a few short bullets: what changed (\`path:line\`), how it was verified (command and result), and anything not done or risky. No headings for short answers, no filler ("Great question", "I hope this helps"), no repeating the question.
 - Answer questions directly; give the explanation after the answer, not before.
-- If you could not finish or verify something, say so plainly at the top.`,
+- If you could not finish or verify something, say so plainly at the top.
+- Write for the person, not for another engineer: no process ids, pipes, ports or internal mechanics unless they asked or must act on it. Short sentences, plain words.
+- In a turn where you changed files or ran commands, call \`wrap_up\` last (recap, and a question with buttons only when the next move is theirs), then write the final message.`,
       `# Tools notes\n- Web: ${gem ? 'use `web_search` for current information and `fetch_url` to read pages.' : 'use the web_search / web_fetch tools for current information; `fetch_url` also reads pages.'}${require('./browser').available() ? '\n- Browser: `browser` is a real headless browser. To prove a web app works, start it with start_process, open http://localhost:<port>, and use it like a user (fill, click, read the result); each step reports console errors and failed requests. Use it also for sites that need JavaScript or clicks.' : ''}\n- Messages that start with "[User steering]" were typed by the user while you were working: follow them, they take priority over your plan.`,
       isPlanMode(this.data.mode)
         ? `# PLAN MODE IS ON\nInvestigate with read-only tools only and produce a precise implementation plan (files, changes, verification steps, risks). Do not modify files or run state-changing commands. End by asking the user to approve the plan.`
@@ -377,7 +395,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -891,6 +909,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'task') return u.input.mode === 'edit' ? this.runWorker(u, meta, opts, ctx, run) : this.runTask(u, meta, opts);
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
+    if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
     if (u.name === 'check_requirement') return this.runCheckRequirement(u, meta, ctx, run);
     if (isMcp) return this.runMcp(u, meta, ctx, run, fail);
 
@@ -1021,6 +1040,20 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       this.emit('tool-end', { id: u.id, ok: false, output: e.message });
       return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: `Web search failed: ${e.message}` };
     }
+  }
+
+  // ---------- the next-step box ----------
+  runWrapUp(u, meta) {
+    const box = {
+      recap: String(u.input.recap || '').trim().slice(0, 600),
+      ask: String(u.input.ask || '').trim().slice(0, 200),
+      options: (Array.isArray(u.input.options) ? u.input.options : []).map((o) => String(o).trim().slice(0, 40)).filter(Boolean).slice(0, 3),
+    };
+    if (!box.ask) box.options = [];
+    this.data.wrapUp = { ...box, at: Date.now() };
+    meta.summary = box.recap.slice(0, 80); meta.status = 'done'; meta.output = 'Shown to the user.';
+    this.emit('wrap-up', { id: u.id, ...box });
+    return { type: 'tool_result', tool_use_id: u.id, content: 'Shown to the user. Now write your final message (do not repeat the recap word for word).' };
   }
 
   // ---------- questions to the user ----------

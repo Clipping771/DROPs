@@ -2014,3 +2014,44 @@ code, pre { font-family: var(--mono); }
 .queue-item .q-ic { color: var(--dim); display: flex; }
 .queue-item .q-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue-item .q-note { color: var(--dim); font-size: 12px; white-space: nowrap; }
+
+/* Uncommitted-file count on the rail: information, not an alarm */
+.rail .count { background: var(--panel-3); color: var(--text-2, var(--dim)); font-weight: 600; }
+.tool-head .tool-time { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: 4px; white-space: nowrap; }
+
+/* Next-step box at the end of a turn */
+.wrapup { margin: 10px 0 4px; padding: 12px 14px; border: 1px solid var(--accent-line, var(--line)); border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+.wrapup .wu-recap { color: var(--text-2); line-height: 1.55; }
+.wrapup .wu-ask { font-weight: 600; }
+.wrapup .wu-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wrapup .btn.chosen { outline: 2px solid var(--accent); }
+
+/* Live task list under the latest message */
+.task-card-inline { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); font-size: 13px; }
+.task-card-inline .tci-head { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 6px; }
+.task-card-inline .tci-count { color: var(--dim); font-weight: 500; font-variant-numeric: tabular-nums; }
+.task-card-inline .tci-row { display: flex; gap: 8px; align-items: center; padding: 2px 0; color: var(--text-2); }
+.task-card-inline .tci-row.completed { color: var(--dim); }
+.task-card-inline .tci-row.completed .tci-t { text-decoration: line-through; text-decoration-color: var(--line); }
+.task-card-inline .tci-row.in_progress { color: var(--text); font-weight: 500; }
+.task-card-inline .tci-row.in_progress .tci-ic { color: var(--accent); }
+.task-card-inline .tci-ic { display: flex; width: 14px; justify-content: center; }
+
+/* Every writing system: Windows fonts first (one consistent family per script), Noto as fallback.
+   Each paragraph takes its own direction from its text, so Arabic, Urdu, Hebrew and Persian read
+   right to left next to English; code always stays left to right. */
+:root {
+  --sans: 'Segoe UI Variable Text', 'Segoe UI', Roboto, system-ui, -apple-system,
+    'Nirmala UI', 'Noto Sans Bengali', 'Noto Sans Devanagari', 'Noto Sans Tamil', 'Noto Sans Gurmukhi',
+    'Segoe UI Historic', 'Noto Sans Arabic', 'Noto Naskh Arabic', 'Noto Sans Hebrew',
+    'Leelawadee UI', 'Noto Sans Thai', 'Microsoft YaHei UI', 'Noto Sans SC', 'Yu Gothic UI', 'Noto Sans JP',
+    'Malgun Gothic', 'Noto Sans KR', sans-serif;
+}
+.md p, .md li, .md h1, .md h2, .md h3, .md h4, .md blockquote, .md td, .md th, .bubble, .wu-recap, .wu-ask, .tci-t, .q-text {
+  unicode-bidi: plaintext; text-align: start;
+}
+.md pre, .md code, .bubble code { direction: ltr; unicode-bidi: isolate; }
+.md, .bubble { line-height: 1.65; }
+/* Answer actions sit together on the right */
+.turn-footer .btn { margin-left: 0; }
+.turn-footer .btn:first-of-type { margin-left: auto; }

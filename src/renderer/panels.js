@@ -440,7 +440,6 @@ ${r.evidence.summary}` : 'No evidence yet';
     const todos = currentView()?.data.todos || [];
     box.appendChild(overviewPanel());
     if (!todos.length) { if (!Object.keys(currentView()?.data.changes || {}).length) box.appendChild(howPanel()); return; }
-    box.appendChild(h('div', 'glance-title plan-title', 'Task plan'));
     const done = todos.filter((t) => t.status === 'completed').length;
     const head = h('div', 'todo-head'); head.innerHTML = `<span>Task plan</span><span>${done}/${todos.length}</span>`;
     const pr = h('div', 'progress'); const bar = h('div'); bar.style.width = `${(done / todos.length) * 100}%`; pr.appendChild(bar);
@@ -572,7 +571,7 @@ ${r.evidence.summary}` : 'No evidence yet';
     const mcpOn = (S.mcp || []).filter((x) => x.status === 'connected').length;
     if ((S.mcp || []).length) item(`${icon('plug')}MCP ${mcpOn}/${S.mcp.length}`, (S.mcp || []).map((x) => `${x.name}: ${x.status}`).join('\n'), () => openSettings('tools'), mcpOn < S.mcp.length ? 'warn' : '');
     if (S.settings?.sandbox) item(`${icon('box')}Sandbox`, 'Commands run inside Docker', () => openSettings('tools'));
-    if (S.settings?.responseLanguage && S.settings.responseLanguage !== 'en') item(`${icon('languages')}${esc(S.settings.responseLanguage.toUpperCase())}${S.settings.explainMode ? ' · teach' : ''}`, 'Explanation language', () => openSettings('general'));
+    if (S.settings?.responseLanguage && !['en', 'auto'].includes(S.settings.responseLanguage)) item(`${icon('languages')}${esc(S.settings.responseLanguage.toUpperCase())}${S.settings.explainMode ? ' · teach' : ''}`, 'Explanation language', () => openSettings('general'));
     if (u) item(`${fmtTok(u.context)} ctx · ${u.costUnknown && !u.cost ? fmtTok(u.input + u.cacheRead + u.output) + ' tok' : fmtCost(u.cost)}`, 'Usage', () => switchTab('usage'));
     item(`${icon(S.theme === 'dark' ? 'moon' : 'sun')}`, 'Toggle theme', () => toggleTheme());
   }
@@ -654,7 +653,7 @@ ${r.evidence.summary}` : 'No evidence yet';
   }
 
   // ---------- settings ----------
-  const LANGS = [['en', 'English'], ['bn', 'বাংলা (Bengali)'], ['hi', 'हिन्दी (Hindi)'], ['ur', 'اردو (Urdu)'], ['ar', 'العربية (Arabic)'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'], ['zh', '中文'], ['ja', '日本語'], ['id', 'Bahasa Indonesia']];
+  const LANGS = [['auto', 'Auto: the language you write in'], ['en', 'English'], ['bn', 'বাংলা (Bengali)'], ['hi', 'हिन्दी (Hindi)'], ['ur', 'اردو (Urdu)'], ['ar', 'العربية (Arabic)'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'], ['zh', '中文'], ['ja', '日本語'], ['id', 'Bahasa Indonesia']];
   const MCP_EXAMPLE = `{
   "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/data"] },
   "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "…" } },
@@ -846,7 +845,7 @@ ${r.evidence.summary}` : 'No evidence yet';
     sel.value = usableModel(s.defaultModel);
     const val = (id, v) => { $(id, m).value = v ?? ''; };
     val('#setEffort', s.effort); val('#setMode', s.mode); val('#setCompact', s.compactAt); val('#setSteps', s.maxSteps); val('#setInstr', s.customInstructions);
-    val('#setLang', s.responseLanguage || 'en'); val('#setAutoProv', s.autoProvider || 'auto'); val('#setMaxCost', s.maxCostPerTask || 0); val('#setMaxTok', s.maxTokensPerTask || 0);
+    val('#setLang', s.responseLanguage || 'auto'); val('#setAutoProv', s.autoProvider || 'auto'); val('#setMaxCost', s.maxCostPerTask || 0); val('#setMaxTok', s.maxTokensPerTask || 0);
     val('#setOllamaUrl', s.ollamaUrl || 'http://localhost:11434'); val('#setOllamaCtx', s.ollamaCtx || 16384); val('#setSandboxImg', s.sandboxImage || 'node:22-bookworm');
     val('#setAllowCmds', (s.allowCommands || '')); val('#setDenyCmds', (s.denyCommands || '')); val('#setAfterEdit', s.afterEditCommand || '');
     $('#openUserCmds', m).onclick = () => api.openCommandsFolder('user');
@@ -1002,7 +1001,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const patch = {
         defaultModel: sel.value, effort: $('#setEffort', m).value, mode: $('#setMode', m).value,
         compactAt: num('#setCompact', 180000, 20000), maxSteps: num('#setSteps', 250, 10), customInstructions: $('#setInstr', m).value,
-        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value,
+        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value, languageMigrated: true,
         autoProvider: $('#setAutoProv', m).value, cheapSubagents: T.cheap.classList.contains('on'),
         maxCostPerTask: Math.max(0, Number($('#setMaxCost', m).value) || 0), maxTokensPerTask: Math.max(0, Number($('#setMaxTok', m).value) || 0),
         ollamaEnabled: T.ollama.classList.contains('on'), ollamaUrl: $('#setOllamaUrl', m).value.trim() || 'http://localhost:11434', ollamaCtx: num('#setOllamaCtx', 16384, 4096),
