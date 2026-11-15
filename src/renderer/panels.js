@@ -281,8 +281,10 @@ const Panels = (() => {
         const row = h('div', 'req-row ' + r.status);
         row.innerHTML = `<span class="rq-dot"></span><span class="rq-id mono"></span><span class="rq-t"></span>`;
         $('.rq-id', row).textContent = r.id; $('.rq-t', row).textContent = r.text;
-        row.title = r.evidence ? `${r.status === 'verified' ? 'Verified' : r.evidence.passed ? 'Own check passed (QA check still needed)' : 'Check failed'} by ${r.evidence.byQa ? 'independent QA ' : ''}${r.evidence.kind}: ${r.evidence.check}${r.evidence.expect ? ` (expects "${r.evidence.expect}")` : ''}
-${r.evidence.summary}` : 'No evidence yet';
+        const state = r.status === 'verified' ? 'Verified on the current code' : r.status === 'stale' ? 'Verified before a later change; waiting for a re-check' : r.evidence?.passed ? 'Own check passed (QA check still needed)' : 'Check failed';
+        const attacks = (r.evidence?.attacks || []).map((a) => `${a.passed ? '✓' : '✗'} ${a.label}`).join('\n');
+        row.title = r.evidence ? `${state} by ${r.evidence.byQa ? 'independent QA ' : ''}${r.evidence.kind}: ${r.evidence.check}${r.evidence.expect ? ` (expects "${r.evidence.expect}")` : ''}
+${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : ''}${r.evidence.at ? `\nChecked ${new Date(r.evidence.at).toLocaleString()}` : ''}` : 'No evidence yet';
         rows.appendChild(row);
       }
       wrap.appendChild(rows);

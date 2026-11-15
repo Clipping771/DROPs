@@ -46,6 +46,7 @@ function agentFor(dir, script, qa) {
   let i = 0;
   const notices = [];
   providers.callModel = async ({ tools, system, messages }) => {
+    if (!tools.length && /adversarial QA engineer/.test(system)) return { content: [{ type: 'text', text: JSON.stringify(qa.attacks || []) }], usage: {} };
     if (!tools.length && /independent QA engineer/.test(system)) {
       if (/disputes it/.test(system)) return { content: [{ type: 'text', text: JSON.stringify(qa.revision) }], usage: {} };
       qa.seenPrompt = messages[0].content[0].text;
@@ -109,5 +110,75 @@ test('a disputed QA check is re-read by the QA agent once; the revised check can
     assert.match(all, /already revised once/);
     assert.match(all, /FR-2 VERIFIED \(QA http\)/);
     assert.equal(data.requirements.find((r) => r.id === 'FR-2').status, 'verified');
+  } finally { agent.dispose(); srv.close(); providers.callModel = realCallModel; }
+});
+
+test('freshness: a requirement verified before a later change is re-checked by DROPs; if the app broke, it is no longer verified', async () => {
+  let healthy = true;
+  const srv = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/plain' }); r.end(q.url === '/api/items' && healthy ? 'Pen, Pencil' : 'oops'); });
+  await new Promise((r) => srv.listen(0, r));
+  const port = srv.address().port;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-ev-'));
+  fs.writeFileSync(path.join(dir, 'SPEC.md'), SPEC.replace('localhost:3000', `localhost:${port}`));
+  const qa = { checks: [{ id: 'FR-2', kind: 'http', url: `http://localhost:${port}/api/items`, expect: 'Pen' }] };
+  const { agent, data, notices } = agentFor(dir, [
+    { tool: 'write_file', input: { path: 'a.js', content: '1;\n' } },
+    { tool: 'check_requirement', input: { id: 'FR-2', use_qa: true } },
+    { tool: 'write_file', input: { path: 'b.js', content: '2;\n' } }, // a later change (it "breaks" the app)
+    { text: 'Done.' },
+    { text: 'Done again.' },
+  ], qa);
+  const realWrite = agent.runOne?.bind(agent);
+  try {
+    // The second edit breaks the app.
+    const origEmit = agent.emit.bind(agent);
+    agent.emit = (type, p) => { if (type === 'tool-end' && /Created b\.js/.test(p?.output || '')) healthy = false; return origEmit(type, p); };
+    await agent.send('Build the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    const fr2 = data.requirements.find((r) => r.id === 'FR-2');
+    assert.ok(notices.some((n) => /code changed after 1 requirement was verified/.test(n)), notices.join('\n'));
+    assert.equal(fr2.status, 'failed', 'the stale proof was re-run against the changed code and failed');
+    assert.ok(notices.some((n) => /no longer verified/.test(n)));
+    assert.ok(fr2.evidence.fingerprint, 'the proof records which code it belongs to');
+  } finally { agent.dispose(); srv.close(); providers.callModel = realCallModel; void realWrite; }
+});
+
+test('adversarial QA: an app that accepts misuse is not verified; once it refuses, the requirement is verified', async () => {
+  let refuses = false;
+  const srv = http.createServer((q, r) => {
+    if (q.url === '/api/admin') { r.writeHead(refuses ? 403 : 200, { 'content-type': 'text/plain' }); return r.end(refuses ? 'forbidden' : 'all users: ada, rita'); }
+    r.writeHead(200, { 'content-type': 'text/plain' }); r.end('Pen, Pencil');
+  });
+  await new Promise((r) => srv.listen(0, r));
+  const port = srv.address().port;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-ev-'));
+  fs.writeFileSync(path.join(dir, 'SPEC.md'), SPEC.replace('localhost:3000', `localhost:${port}`));
+  const qa = {
+    checks: [{ id: 'FR-2', kind: 'http', url: `http://localhost:${port}/api/items`, expect: 'Pen' }],
+    attacks: [
+      { id: 'FR-2', kind: 'http', url: `http://localhost:${port}/api/admin`, expect_status: 403, forbid: 'rita', why: 'a visitor must not list users' },
+      { id: 'FR-2', kind: 'http', url: 'http://evil.example/x', expect_status: 403 }, // not the local app: dropped
+      { id: 'FR-9', kind: 'http', url: `http://localhost:${port}/x`, expect_status: 401 }, // unknown requirement: dropped
+    ],
+  };
+  const { agent, data, notices } = agentFor(dir, [
+    { tool: 'write_file', input: { path: 'a.js', content: '1;\n' } },
+    { tool: 'check_requirement', input: { id: 'FR-2', use_qa: true } },
+    { tool: 'check_requirement', input: { id: 'FR-2', use_qa: true } },
+    { text: 'Done.' },
+  ], qa);
+  const origEmit = agent.emit.bind(agent);
+  let checksRun = 0;
+  agent.emit = (type, p) => { if (type === 'tool-end' && /FR-2 (NOT verified|VERIFIED)/.test(p?.output || '') && ++checksRun === 1) refuses = true; return origEmit(type, p); };
+  try {
+    await agent.send('Build the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    const fr2 = data.requirements.find((r) => r.id === 'FR-2');
+    assert.equal(fr2.qaNeg.length, 1, 'only the valid attack is kept');
+    assert.ok(notices.some((n) => /Adversarial QA wrote 1 attack check/.test(n)));
+    const all = JSON.stringify(data.messages);
+    assert.match(all, /attack 1: a visitor must not list users: FAILED/);
+    assert.match(all, /The app accepted misuse it must refuse/);
+    assert.match(all, /FR-2 VERIFIED \(QA http \+ 1 adversarial\)/);
+    assert.equal(fr2.status, 'verified');
+    assert.deepEqual(fr2.evidence.attacks.map((a) => a.passed), [true]);
   } finally { agent.dispose(); srv.close(); providers.callModel = realCallModel; }
 });

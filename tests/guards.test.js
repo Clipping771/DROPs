@@ -338,6 +338,7 @@ test('QA agent: independent checks from the spec alone are the only ones that ca
     { id: 'FR-2', kind: 'browser', steps: [], expect: 'x' }, // invalid: no steps, dropped
   ]);
   providers.callModel = async ({ tools, system }) => {
+    if (!tools.length && /adversarial QA engineer/.test(system)) return { content: [{ type: 'text', text: '[]' }], usage: {} };
     if (!tools.length && /independent QA engineer/.test(system)) { qaCalls++; return { content: [{ type: 'text', text: 'Here you go:\n' + qaJson }], usage: {} }; }
     const st = script[i++] || { text: 'done' };
     return { content: st.tool ? [{ type: 'tool_use', id: 't' + i, name: st.tool, input: st.input }] : [{ type: 'text', text: st.text }], model: 'fake', stop_reason: st.tool ? 'tool_use' : 'end_turn', usage: {} };

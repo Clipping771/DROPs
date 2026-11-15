@@ -2055,3 +2055,4 @@ code, pre { font-family: var(--mono); }
 /* Answer actions sit together on the right */
 .turn-footer .btn { margin-left: 0; }
 .turn-footer .btn:first-of-type { margin-left: auto; }
+.req-row.stale .rq-dot { background: transparent; box-shadow: inset 0 0 0 2px var(--ok); } /* verified earlier, re-check pending */
