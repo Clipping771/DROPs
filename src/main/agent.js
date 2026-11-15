@@ -18,6 +18,8 @@ const shell = require('./shell');
 const lessons = require('./lessons');
 
 const INTERRUPTED = '[Request interrupted by user]';
+const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app closed or the request failed).';
+const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
 
 const TASK_DEF = {
@@ -344,10 +346,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   pushUser(content) {
     const msgs = this.data.messages;
     const last = msgs[msgs.length - 1];
-    if (last && last.role === 'user') msgs.push({ role: 'assistant', content: [{ type: 'text', text: INTERRUPTED }] });
+    // The previous turn ended with no answer (the app closed or crashed): say so, never "interrupted by user".
+    if (last && last.role === 'user') msgs.push({ role: 'assistant', content: [{ type: 'text', text: NO_REPLY }] });
     msgs.push({ role: 'user', content });
   }
-  sealTranscript() {
+  /** Leaves the transcript valid after a turn ends early. `note` says why: the user's stop (default) or an error. */
+  sealTranscript(note = INTERRUPTED) {
     const msgs = this.data.messages;
     const last = msgs[msgs.length - 1];
     if (!last) return;
@@ -355,9 +359,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       const uses = (Array.isArray(last.content) ? last.content : []).filter((b) => b.type === 'tool_use');
       if (uses.length) {
         msgs.push({ role: 'user', content: uses.map((u) => ({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: 'Interrupted before this tool ran.' })) });
-        msgs.push({ role: 'assistant', content: [{ type: 'text', text: INTERRUPTED }] });
-      }
-    } else msgs.push({ role: 'assistant', content: [{ type: 'text', text: INTERRUPTED }] });
+        msgs.push({ role: 'assistant', content: [{ type: 'text', text: note }] });
+      } else if (note !== INTERRUPTED) msgs.push({ role: 'user', content: [{ type: 'text', text: '[DROPs] The turn stopped early.' }] }, { role: 'assistant', content: [{ type: 'text', text: note }] });
+    } else msgs.push({ role: 'assistant', content: [{ type: 'text', text: note }] });
   }
 
   // ---------- steering ----------
@@ -649,19 +653,23 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         const toolImages = results.flatMap((r) => r?._images || []);
         for (const r of results) if (r) delete r._images;
         if (toolImages.length) dropOldToolImages(this.data.messages, 3 - toolImages.length);
-        if (steer.length) {
-          this.data.messages.push({ role: 'user', content: [...results, ...toolImages] });
-          this.data.messages.push({ role: 'user', content: steer });
-        } else {
-          this.data.messages.push({ role: 'user', content: [...results, ...toolImages] });
-        }
+        // A message the user typed meanwhile rides in the same user turn as the tool results (tool
+        // results first): two user turns in a row are refused by some model APIs.
+        this.data.messages.push({ role: 'user', content: [...results, ...toolImages, ...steer] });
         this.save();
         if (signal.aborted) throw new Error('aborted');
       }
     } catch (err) {
-      this.sealTranscript();
-      if (signal.aborted) this.emit('notice', { message: 'Stopped.' });
-      else this.emit('error', providers.friendlyError(err, opts.model));
+      if (signal.aborted) {
+        this.sealTranscript();
+        this.emit('notice', { message: 'Stopped.' });
+      } else {
+        // Keep the real reason in the transcript, so it is visible later and the next turn knows.
+        const fe = providers.friendlyError(err, opts.model);
+        this.sealTranscript(`${STOPPED_BY_ERROR} ${String(fe.message || err).split('\n')[0].slice(0, 300)}`);
+        this.data.lastError = { message: String(fe.message || err).slice(0, 500), at: Date.now(), model: opts.model };
+        this.emit('error', fe);
+      }
     }
     this.finish(opts);
   }
@@ -1375,4 +1383,4 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   dispose() { this.stop(); this.procs.stopAll(); }
 }
 
-module.exports = { admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, SUMMARY_PREFIX };
+module.exports = { admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };

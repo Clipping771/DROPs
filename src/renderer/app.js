@@ -12,6 +12,8 @@ const timeAgo = (t) => { const s = (Date.now() - t) / 1000; return s < 60 ? 'jus
 
 const S = { info: null, settings: null, theme: 'dark', project: null, sessions: [], current: null, views: new Map(), git: null, attachments: [] };
 const INTERRUPTED = '[Request interrupted by user]';
+const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
+const DROPS_NOTES = { plan: 'DROPs gave the agent the requirement checklist', 'evidence check': 'Evidence check: some requirements still need proof', 'completion guard': 'Completion guard: the task list still has open items', 'completion audit': 'Completion audit: a reviewer found missing work' };
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation';
 const CONTEXT_MAX = 1_000_000; // fallback when a model's own window is unknown
 /** The context window of the chosen model (each model has its own; 'auto' and unknown models fall back). */
@@ -132,7 +134,10 @@ function renderHistory(v) {
         if (m._summary) { place(v, compactCard(texts[0]?.text || '')); group = null; return; }
         for (const t of texts) {
           if (t.text.startsWith('[DROPs verification guard]')) { place(v, noticeEl('shield', 'Verification guard asked the agent to check its work')); continue; }
-          if (t.text.startsWith('[DROPs report]')) continue;
+          if (t.text.startsWith('[DROPs report]') || t.text.startsWith('[DROPs] The turn stopped early.')) continue;
+          // Other notes DROPs added for the agent are not the user's words: show them as a quiet line.
+          const note = /^\[DROPs (plan|evidence check|completion guard|completion audit)\]/.exec(t.text);
+          if (note) { place(v, noticeEl('shield', DROPS_NOTES[note[1]])); continue; }
           const steer = t.text.startsWith('[User steering] ');
           appendUser(v, steer ? t.text.slice(16) : t.text, live && !steer ? turnAt.get(mi) : null, imgs, steer ? 'Steered mid-run' : null);
           group = null;
@@ -142,7 +147,9 @@ function renderHistory(v) {
       if (!group) group = place(v, h('div', 'assistant'));
       for (const b of m.content || []) {
         if (b.type === 'text') {
-          if (b.text === INTERRUPTED) { place(v, noticeEl('info', 'Interrupted')); continue; }
+          if (b.text === INTERRUPTED) { place(v, noticeEl('info', 'Stopped by you')); continue; }
+          if (b.text.startsWith('[DROPs] The previous turn ended without an answer')) { place(v, noticeEl('info', 'The previous turn ended without an answer')); continue; }
+          if (b.text.startsWith(STOPPED_BY_ERROR)) { place(v, noticeEl('alert', 'Stopped by an error: ' + b.text.slice(STOPPED_BY_ERROR.length).trim())); continue; }
           const md = h('div', 'md'); renderMd(md, b.text, true); group.appendChild(md);
         } else if (b.type === 'thinking' && b.thinking) stepsHost(group).appendChild(thinkingEl(b.thinking, false));
         else if (b.type === 'tool_use') {
@@ -448,9 +455,22 @@ function onEvent(ev) {
     case 'task-queued':
     case 'task-ended':
     case 'task-cancelled':
-    case 'task-event':
+    case 'task-event': {
+      // A message that waited in the queue: when it starts, it moves below the previous answer;
+      // if it is cancelled, it says so.
+      const u = ev.task_id && v.el.querySelector(`.msg-user[data-task="${CSS.escape(ev.task_id)}"]`);
+      if (u && ev.type === 'task-started') {
+        u.querySelector('.tag')?.remove();
+        u.classList.add('pending'); // its turn-start adds the Rewind button
+        v.group = null;
+        place(v, u);
+      } else if (u && ev.type === 'task-cancelled') {
+        const t = u.querySelector('.tag');
+        if (t) t.innerHTML = icon('x', 'xs') + 'Cancelled — not sent';
+      }
       Panels.renderTasks?.();
       break;
+    }
     case 'iteration-start':
       v.group = place(v, h('div', 'assistant'));
       v.blocks.clear();
@@ -929,6 +949,7 @@ async function doSend(v, text, images, action = 'queue') {
   if (!isRunning) v.data.messages.push({ role: 'user', content: text });
   const r = await api.send(v.id, text, opts, images, { action });
   if (r?.queued) {
+    if (r.task?.task_id) u.dataset.task = r.task.task_id;
     toast(`Message queued (#${r.position})`);
     Panels.renderTasks?.();
   } else if (r?.steered) {

@@ -167,16 +167,45 @@ function cooldownMs(e) {
   return /daily|per.?day|credits?|\b402\b|quota/i.test(String(e?.message || e)) || e?.status === 402 ? 6 * 3600_000 : 2 * 60_000;
 }
 
+// A short outage (overloaded, 5xx, dropped connection, a per-minute rate limit) should not end the turn.
+// Retried only when nothing has streamed yet, so the user never sees a reply twice. Quota and credit
+// errors are not retried here: they go to the fallback chain.
+const RETRY_DELAYS = [2000, 6000];
+function isTransientError(e) {
+  const msg = String(e?.message || e);
+  if (/quota|daily|per.?day|credits?|billing|api.?key|unauthori[sz]ed|invalid/i.test(msg) || [400, 401, 402, 403, 404].includes(e?.status)) return false;
+  return [408, 429, 500, 502, 503, 504, 529].includes(e?.status)
+    || /overloaded|temporarily|try again|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network|terminated|timed? ?out|no response/i.test(msg);
+}
+async function callWithRetry(opts) {
+  for (let attempt = 0; ; attempt++) {
+    let streamed = false;
+    const emit = (type, p) => { if (/delta|block-start/.test(type)) streamed = true; opts.emit?.(type, p); };
+    try {
+      return await callOne({ ...opts, emit });
+    } catch (e) {
+      if (opts.signal?.aborted || streamed || attempt >= RETRY_DELAYS.length || !isTransientError(e)) throw e;
+      const wait = RETRY_DELAYS[attempt];
+      opts.emit?.('notice', { message: `${opts.model}: ${String(e.message || e).split('\n')[0].slice(0, 100)}. Trying again in ${wait / 1000}s…` });
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, wait);
+        opts.signal?.addEventListener?.('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      if (opts.signal?.aborted) throw e;
+    }
+  }
+}
+
 async function callModel(opts) {
   const fallbacks = (opts.deps?.getSettings?.()?.fallbackModels || []).filter((m) => m && m !== opts.model);
-  if (!fallbacks.length) return callOne(opts);
+  if (!fallbacks.length) return callWithRetry(opts);
   const chain = [opts.model, ...fallbacks];
   let lastErr;
   for (let i = 0; i < chain.length; i++) {
     const model = chain[i], last = i === chain.length - 1;
     if (!last && (exhaustedUntil.get(model) || 0) > Date.now()) continue;
     try {
-      const res = await callOne({ ...opts, model });
+      const res = await callWithRetry({ ...opts, model });
       if (!res.model) res.model = model;
       return res;
     } catch (e) {
@@ -235,4 +264,4 @@ function friendlyError(err, model) {
   return { message: msg, needsKey: !!err?.needsKey };
 }
 
-module.exports = { TIERS, autoProvider, initialTier, resolveAuto, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, exhaustedUntil };
+module.exports = { TIERS, autoProvider, initialTier, resolveAuto, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, isTransientError, exhaustedUntil };

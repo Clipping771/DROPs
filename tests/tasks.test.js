@@ -4,7 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+// Task files go to a throwaway app data folder, never the user's real DROPs folder.
+process.env.APPDATA = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-tasks-test-'));
 const { TaskManager, STATUS } = require('../src/main/tasks');
+test('task tests write to a throwaway folder, not the user\'s DROPs data', () => {
+  assert.ok(require('../src/main/brand').appDataDir().startsWith(os.tmpdir()));
+});
 
 // Helper to create a fake agent
 function createFakeAgent(sessionId) {
