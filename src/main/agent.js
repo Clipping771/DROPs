@@ -18,6 +18,49 @@ const shell = require('./shell');
 const lessons = require('./lessons');
 
 const INTERRUPTED = '[Request interrupted by user]';
+// ---- evidence helpers ----
+const verifiedCount = (reqs) => (reqs || []).filter((r) => r.status === 'verified').length;
+function evidenceNudgeAllowed(run, reqs) {
+  if (!(reqs || []).some((r) => r.status !== 'verified')) return false;
+  if ((run.evidenceTotalNudges || 0) >= 8) return false;
+  // A nudge that led to a new verified requirement resets the count of fruitless nudges.
+  if (run.evidenceNudges && verifiedCount(reqs) > (run.evidenceVerifiedAtNudge ?? -1)) run.evidenceNudges = 0;
+  return (run.evidenceNudges || 0) < 2;
+}
+/** Facts a QA check must copy exactly: demo accounts, routes, test ids and the app's base URL. */
+function specFacts(doc) {
+  const text = String(doc || '');
+  const emails = [...new Set(text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) || [])].slice(0, 12);
+  const accounts = emails.map((email) => {
+    const i = text.indexOf(email);
+    const near = text.slice(i, i + 160);
+    // A password is either labelled ("password: x") or the very next quoted token after the email,
+    // with letters and digits ("`a@b.test` – `Admin12345`"). An email with no password is not an account.
+    const pw = /\b(?:password|pwd)\b(?:\s*(?:[:=]|is)\s*[`"']?|\s*[`"'])([^\s`"'|,;)]{4,40})/i.exec(text.slice(Math.max(0, i - 60), i + 160))
+      || /^[`"']?\s*[–:|,/-]\s*[`"']((?=[^\s`"']*\d)(?=[^\s`"']*[a-z])[^\s`"']{6,40})[`"']/i.exec(near.slice(email.length));
+    return { email, password: pw ? pw[1] : null };
+  }).filter((a) => a.password);
+  const routes = [...new Set((text.match(/(?<![\w:/.])\/[a-z0-9][\w\-/[\]:]*/gi) || []).filter((r) => !/\.(md|ts|tsx|js|json|css)$/i.test(r)))].slice(0, 40);
+  const testIds = [...new Set([...text.matchAll(/data-testid=["'`]?([\w-]+)|testid=([\w-]+)|`([a-z]+(?:-[a-z0-9]+)+)`/g)].map((m) => m[1] || m[2] || m[3]).filter(Boolean))].slice(0, 80);
+  const port = /localhost:(\d{2,5})/.exec(text)?.[1] || '3000';
+  return { accounts, routes, testIds, base: `http://localhost:${port}` };
+}
+function factsText(f) {
+  return [
+    `Base URL: ${f.base}`,
+    `Demo accounts named in the specification: ${f.accounts.length ? f.accounts.map((a) => `${a.email}${a.password ? ` / ${a.password}` : ''}`).join('; ') : 'none (sign up a new account where one is needed)'}`,
+    `Routes named: ${f.routes.join(', ') || 'none'}`,
+    `Test ids named: ${f.testIds.join(', ') || 'none (use labels and visible text)'}`,
+  ].join('\n');
+}
+/** The app's origin when nothing answers there (connection refused or no reply in 3 s); null when it is up. */
+async function appDown(url, sandbox) {
+  let target;
+  try { target = new URL(sandbox ? sandbox.mapUrl(String(url)) : String(url)); } catch { return null; }
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(target.hostname)) return null;
+  try { await fetch(target.origin + '/', { signal: AbortSignal.timeout(3000), redirect: 'manual' }); return null; } catch { return target.origin; }
+}
+
 const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app closed or the request failed).';
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
@@ -136,6 +179,7 @@ const CHECK_REQUIREMENT_DEF = {
       body: { type: 'string', description: 'kind=http, JSON text for POST/PUT' },
       expect: { type: 'string', description: 'Text that must appear in the output / final page / response. Required for browser and http.' },
       use_qa: { type: 'boolean', description: 'Run the independent QA check written for this requirement (when one exists, only it can verify the requirement).' },
+      dispute: { type: 'string', description: 'Only with use_qa, once per requirement: say why the QA check itself is wrong (e.g. it logs in with an account the spec does not name, or expects text the spec does not ask for). The QA agent re-reads the spec and decides; it never sees your code.' },
     },
     required: ['id'],
   },
@@ -451,6 +495,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
 
     const ctx = this.makeCtx(turn, signal);
     const run = {
+      model: opts.model,
       edited: false, verifiedAfterEdit: true, lastVerify: null, nudges: 0, steps: 0,
       editedFiles: new Set(), diagErrors: new Map(), guard: new guards.LoopGuard(3), verify: ctxEngine.projectProfile(this.data.projectDir).verify,
     };
@@ -591,10 +636,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
               msg = `[DROPs completion guard] Your final answer says part of the task is not done ("${admitsUnfinished(replyText)}"). The task asks for all of it. Do the remaining work now, verify it, and only then finish. If something truly cannot be done here, say exactly what and why in one line.`;
               this.emit('notice', { message: 'Completion guard: the agent said work is still remaining; sending it back to finish.' });
               this.autoLesson('Do not end with a progress report while parts of the task remain: keep working until every requirement is implemented and verified, then give one final answer.', 'completion-guard');
-            } else if (run.edited && s.evidenceCheck !== false && (run.evidenceNudges || 0) < 2
-              && (this.data.requirements || []).some((r) => r.status !== 'verified')) {
+            } else if (run.edited && s.evidenceCheck !== false && evidenceNudgeAllowed(run, this.data.requirements)) {
               // Evidence check: every requirement of the spec needs a passing check that DROPs ran itself.
+              // It gives up only after two nudges in a row with no new requirement verified (or eight in all).
               run.evidenceNudges = (run.evidenceNudges || 0) + 1;
+              run.evidenceTotalNudges = (run.evidenceTotalNudges || 0) + 1;
+              run.evidenceVerifiedAtNudge = verifiedCount(this.data.requirements);
               const reqs = this.data.requirements, open = reqs.filter((r) => r.status !== 'verified');
               msg = `[DROPs evidence check] ${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence.${open.some((r) => r.qa) ? ' These have independent QA checks: start the app and run check_requirement with use_qa: true for each; fix the app (never the check) until they pass.' : ' Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app).'} Fix and re-check any that fail.`;
               this.emit('notice', { message: `Evidence check: ${open.length} of ${reqs.length} requirements are not verified yet; sending the agent back.` });
@@ -675,6 +722,14 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   finish(opts) {
+    // A task on a requirements document always ends with the plain count, whatever the agent said.
+    const reqs = this.data.requirements || [];
+    if (reqs.length && this.settings().evidenceCheck !== false) {
+      const ok = verifiedCount(reqs);
+      this.data.evidenceSummary = { verified: ok, total: reqs.length, at: Date.now() };
+      const open = reqs.filter((r) => r.status !== 'verified').map((r) => r.id);
+      this.emit('notice', { message: `Evidence: ${ok} of ${reqs.length} requirements verified by a check DROPs ran${open.length ? ` (not verified: ${open.slice(0, 15).join(', ')}${open.length > 15 ? ', …' : ''})` : ''}.` });
+    }
     for (const [, r] of this.pending) r({ decision: 'deny', feedback: 'Stopped.' });
     this.pending.clear();
     this.busy = false;
@@ -985,8 +1040,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   async writeQaChecks(specText, model) {
     if (!specText) return;
     const reqs = this.data.requirements;
-    const system = 'You are an independent QA engineer. You have NOT seen the code and you do not trust the developer. From the specification alone, write one acceptance check per functional requirement, the way a careful user would test it. Use the routes, data-testid attributes, field labels and demo accounts the specification names; the app runs at http://localhost:3000. Prefer kind "browser": steps for a real browser ({"action":"open","url":...}, {"action":"fill","target":"testid=..." or a label,"value":...}, {"action":"click","target":...}, {"action":"select",...}, {"action":"press","key":"Enter"}), ending on a page that must show the "expect" text, which only a working feature shows. Use kind "http" ({"url","method","body","expect"}) only for pure API requirements. Log in first in each check that needs an account. Reply with JSON only: [{"id":"FR-1","kind":"browser","steps":[...],"expect":"..."}, ...].';
-    const prompt = `Specification:\n${String(specText).slice(0, 24000)}\n\nRequirements to cover: ${reqs.map((r) => r.id).join(', ')}`;
+    const system = 'You are an independent QA engineer. You have NOT seen the code and you do not trust the developer. From the specification alone, write one acceptance check per functional requirement, the way a careful user would test it. Use ONLY the routes, data-testid attributes, field labels and demo accounts the specification names, copied exactly (the list after the specification has them); never invent an email, password, route or test id. If a check needs an account and the specification names none, sign up a new account with a unique email in that check first. The app runs at the base URL given after the specification. Prefer kind "browser": steps for a real browser ({"action":"open","url":...}, {"action":"fill","target":"testid=..." or a label,"value":...}, {"action":"click","target":...}, {"action":"select",...}, {"action":"press","key":"Enter"}), ending on a page that must show the "expect" text, which only a working feature shows. Use kind "http" ({"url","method","body","expect"}) only for pure API requirements. Log in first in each check that needs an account. Reply with JSON only: [{"id":"FR-1","kind":"browser","steps":[...],"expect":"..."}, ...].';
+    const facts = specFacts(specText);
+    const prompt = `Specification:\n${String(specText).slice(0, 24000)}\n\n${factsText(facts)}\n\nRequirements to cover: ${reqs.map((r) => r.id).join(', ')}`;
     const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
     const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
     const start = text.indexOf('['), end = text.lastIndexOf(']');
@@ -994,6 +1050,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     let list;
     try { list = JSON.parse(text.slice(start, end + 1)); } catch { throw new Error('the reply was not valid JSON'); }
     let n = 0;
+    this.data.qaBase = facts.base;
     for (const c of Array.isArray(list) ? list : []) {
       const r = reqs.find((x) => x.id === c?.id);
       if (!r || !['browser', 'http'].includes(c.kind) || !String(c.expect || '').trim()) continue;
@@ -1004,6 +1061,25 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     }
     this.emit('notice', { message: `QA agent wrote independent checks for ${n} of ${reqs.length} requirements.` });
     this.save();
+  }
+
+  async reviseQaCheck(req, dispute, model) {
+    const specText = specRequirements(this.data.projectDir, 'SPEC.md').doc || '';
+    const facts = specFacts(specText);
+    const system = 'You are the independent QA engineer who wrote this acceptance check. The developer disputes it. You have NOT seen the code and you do not trust the developer: change the check only if it contradicts the specification (an account, route, test id, label or text the specification does not name, or a wrong order of steps). Never weaken it to accept behaviour the specification does not describe. Reply with JSON only: {"decision":"keep"|"revise","reason":"...","check":{...same shape as before...}}.';
+    const prompt = `Specification:\n${String(specText).slice(0, 20000)}\n\n${factsText(facts)}\n\nRequirement ${req.id}: ${req.text}\nYour check: ${JSON.stringify(req.qa)}\nLast result: ${req.evidence?.summary || 'not run'}\nDeveloper's dispute: ${dispute}`;
+    const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
+    const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const a = text.indexOf('{'), b = text.lastIndexOf('}');
+    let out; try { out = JSON.parse(text.slice(a, b + 1)); } catch { throw new Error('the QA reply was not valid JSON'); }
+    req.qaRevised = true;
+    const c = out.check || {};
+    const valid = out.decision === 'revise' && ['browser', 'http'].includes(c.kind) && String(c.expect || '').trim()
+      && (c.kind === 'http' ? /^http:\/\/localhost:\d+\//.test(String(c.url || '')) : Array.isArray(c.steps) && c.steps.length && c.steps.every((st) => st && typeof st.action === 'string'));
+    if (valid) req.qa = c.kind === 'browser' ? { kind: 'browser', steps: c.steps.slice(0, 25), expect: String(c.expect).slice(0, 200) } : { kind: 'http', url: c.url, method: c.method || 'GET', body: c.body, expect: String(c.expect).slice(0, 200) };
+    this.emit('notice', { message: `QA agent ${valid ? 'revised' : 'kept'} its check for ${req.id}: ${String(out.reason || '').slice(0, 160)}` });
+    this.save();
+    return valid ? `revised (${String(out.reason || '').slice(0, 200)})` : `kept the check (${String(out.reason || 'it matches the specification').slice(0, 200)})`;
   }
 
   // ---------- evidence: run a requirement check and record the real result ----------
@@ -1019,9 +1095,25 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return finish('Checks run commands and a browser, which this read-only mode does not allow.', false);
     // The independent QA check, when one exists, is the only check that can verify the requirement.
     const useQa = !!req.qa && (u.input.use_qa === true || !u.input.kind);
+    const dispute = useQa ? String(u.input.dispute || '').trim() : '';
     if (useQa) u = { ...u, input: { ...req.qa, id: req.id } };
     if (!u.input.kind) return finish(`Say how to check ${req.id}: kind command, browser or http${req.qa ? ', or use_qa: true to run its QA check' : ''}.`, false);
     const kind = u.input.kind, expect = String(u.input.expect || '').trim();
+    // A disputed QA check is re-read by the QA agent (spec only, never the code), once per requirement.
+    if (dispute) {
+      if (req.qaRevised) return finish(`The QA check for ${req.id} was already revised once. Make the app match the specification so this check passes.`, false);
+      const why = dispute.slice(0, 600);
+      const changed = await this.reviseQaCheck(req, why, run.model).catch((e) => `could not revise: ${String(e.message || e).slice(0, 120)}`);
+      return finish(`QA agent reviewed the dispute on ${req.id}: ${changed}. Run check_requirement with use_qa: true again.`, true);
+    }
+    if (kind === 'browser' || kind === 'http') {
+      const first = kind === 'http' ? u.input.url : (Array.isArray(u.input.steps) ? u.input.steps.find((st) => st && st.url) : null)?.url;
+      const down = first ? await appDown(first, this.procs.sandbox) : null;
+      if (down) {
+        run.appDownChecks = (run.appDownChecks || 0) + 1;
+        return finish(`Not checked: the app is not running at ${down}. Start it with start_process (and wait until it says it is ready), then run this check again. ${req.id} keeps its status.`, false);
+      }
+    }
     let passed = false, detail = '', check = '';
     try {
       if (kind === 'command') {
@@ -1383,4 +1475,4 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   dispose() { this.stop(); this.procs.stopAll(); }
 }
 
-module.exports = { admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
+module.exports = { specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
