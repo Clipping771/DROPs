@@ -21,7 +21,7 @@ async function launch() {
 }
 
 class BrowserSession {
-  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; }
+  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.api = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; }
 
   async ensure(viewport) {
     this.touch();
@@ -39,6 +39,11 @@ class BrowserSession {
     this.page.on('requestfinished', (q) => this.inflight.delete(q));
     this.page.on('response', (r) => {
       const t = r.request().resourceType();
+      // The app's own API calls (what a click really did on the server), not page loads or prefetches.
+      if (['fetch', 'xhr'].includes(t) && !/[?&]_rsc=/.test(r.url())) {
+        try { const u = new URL(r.url()); this.api.push(`${r.request().method()} ${u.pathname}${u.search.length > 1 && u.search.length < 60 ? u.search : ''} → ${r.status()}`); } catch { /* ignore */ }
+        if (this.api.length > 30) this.api.shift();
+      }
       if (r.status() >= 400 && ['document', 'fetch', 'xhr'].includes(t)) this.events.push(`HTTP ${r.status()} ${r.request().method()} ${r.url().slice(0, 200)}`);
       // The page's own code or styles missing: buttons and forms will not work. Usual cause: the app
       // was rebuilt while the old server kept running.
@@ -70,6 +75,7 @@ class BrowserSession {
   }
 
   takeEvents() { const e = this.events; this.events = []; return e; }
+  takeApi() { const a = this.api; this.api = []; return a; }
 }
 
 function sessionFor(key) {
@@ -127,12 +133,14 @@ async function snapshot(page, s, { full = false } = {}) {
   }, full ? 20000 : 3000);
   const events = s.takeEvents();
   s.lastEvents = events;
+  const api = s.takeApi();
   return [
     `URL: ${page.url()}${s.lastStatus ? ` (HTTP ${s.lastStatus})` : ''}`,
     `Title: ${info.title || '(none)'}`,
     info.alerts.length ? `Messages shown: ${info.alerts.join(' | ')}` : '',
     info.wide ? 'Layout: the page scrolls sideways at this width.' : '',
     events.length ? `Problems since the last step:\n- ${events.slice(0, 12).join('\n- ')}` : 'Problems since the last step: none',
+    api.length ? `API calls since the last step: ${api.slice(-10).join('; ')}` : '',
     `Interactive elements (${info.items.length}):\n${info.items.map((i) => '- ' + i).join('\n') || '(none)'}`,
     `Visible text:\n${info.text || '(empty page)'}`,
   ].filter(Boolean).join('\n');
@@ -201,13 +209,15 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
       break;
     }
     case 'back': await page.goBack().catch(() => {}); await settle(); break;
+    // Reload: does what was saved survive a fresh load (it is in the database, not only on screen)?
+    case 'reload': { const r = await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null); s.lastStatus = r ? r.status() : null; await settle(); break; }
     case 'read': break;
     case 'screenshot': {
       const png = await page.screenshot({ fullPage: !!input.full, type: 'png' });
       const text = await snapshot(page, s);
       return { text: `${text}\n\n[screenshot of ${page.url()}: shown below]`, images: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } }] };
     }
-    default: throw new Error(`Unknown browser action "${action}". Use open, click, fill, select, check, press, wait, back, read, screenshot or close.`);
+    default: throw new Error(`Unknown browser action "${action}". Use open, click, fill, select, check, press, wait, back, reload, read, screenshot or close.`);
   }
   const text = await snapshot(page, s, { full: !!input.full });
   // Problems a user would hit, for the agent's UI check: errors since this step, or a click/Enter that

@@ -152,3 +152,26 @@ test('sandbox URL mapping: localhost ports go to the published ports, other URLs
   assert.equal(s.mapUrl('http://localhost:9999/'), 'http://localhost:9999/');
   assert.equal(s.mapUrl('https://example.com/'), 'https://example.com/');
 });
+
+test('browser: each step lists the API calls it made, and reload shows whether saved data survived', { timeout: 120_000 }, async (t) => {
+  if (!browser.available()) return t.skip('playwright-core not installed');
+  const saved = [];
+  const s = http.createServer((req, res) => {
+    if (req.url === '/api/items' && req.method === 'POST') { saved.push('Pen'); res.writeHead(201, { 'content-type': 'application/json' }); return res.end('{"ok":true}'); }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<title>Items</title><ul id="l">${saved.map((x) => `<li>${x}</li>`).join('')}</ul><button id="b">Add pen</button>
+<script>document.getElementById('b').onclick = async () => { await fetch('/api/items', { method: 'POST' }); const li = document.createElement('li'); li.textContent = 'Pen (unsaved view)'; document.getElementById('l').appendChild(li); };</script>`);
+  });
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const k = 'api-' + process.pid;
+  try {
+    let r;
+    try { r = await browser.act(k, { action: 'open', url: `http://127.0.0.1:${s.address().port}/` }); } catch (e) { if (/No browser/.test(e.message)) return t.skip(e.message); throw e; }
+    r = await browser.act(k, { action: 'click', target: 'Add pen' });
+    assert.match(r.text, /API calls since the last step: POST \/api\/items → 201/);
+    r = await browser.act(k, { action: 'reload' });
+    assert.match(r.text, /URL: .*\(HTTP 200\)/);
+    assert.match(r.text, /Pen/);
+    assert.doesNotMatch(r.text, /unsaved view/, 'after a reload only what the server stored is shown');
+  } finally { await browser.act(k, { action: 'close' }).catch(() => {}); s.close(); }
+});

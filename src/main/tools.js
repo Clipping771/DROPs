@@ -145,11 +145,11 @@ const TOOL_DEFS = [
   },
   {
     name: 'browser',
-    description: 'A real web browser (headless Chrome). Use it to check a web app you built the way a user would, and to work with sites that need clicks or JavaScript. One page that stays open between calls (logins and form state carry over). Every result shows the URL, any messages on screen, console errors and failed requests since the last step, the clickable/typable elements (with data-testid where present) and the visible text.\nActions: open {url}; click {target}; fill {target, value}; select {target, value}; check {target}; press {key, target?}; wait {target? | seconds}; back; read {full?}; screenshot {full?}; close. Optional width/height on any action (e.g. width 375 for a phone).\ntarget = visible text or label ("Save", "Email"), "testid=<id>", or a CSS selector. An app running inside the sandbox is reached at http://localhost:<port> (start it first with start_process).',
+    description: 'A real web browser (headless Chrome). Use it to check a web app you built the way a user would, and to work with sites that need clicks or JavaScript. One page that stays open between calls (logins and form state carry over). Every result shows the URL, any messages on screen, console errors and failed requests since the last step, the API calls the page made with their status (what a click really did on the server), the clickable/typable elements (with data-testid where present) and the visible text.\nActions: open {url}; click {target}; fill {target, value}; select {target, value}; check {target}; press {key, target?}; wait {target? | seconds}; back; reload (does saved data survive a fresh load?); read {full?}; screenshot {full?}; close. Optional width/height on any action (e.g. width 375 for a phone).\ntarget = visible text or label ("Save", "Email"), "testid=<id>", or a CSS selector. An app running inside the sandbox is reached at http://localhost:<port> (start it first with start_process).',
     input_schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['open', 'click', 'fill', 'select', 'check', 'press', 'wait', 'back', 'read', 'screenshot', 'close'] },
+        action: { type: 'string', enum: ['open', 'click', 'fill', 'select', 'check', 'press', 'wait', 'back', 'reload', 'read', 'screenshot', 'close'] },
         url: { type: 'string' }, target: { type: 'string' }, value: { type: 'string' }, key: { type: 'string', description: 'e.g. Enter, Tab, Escape' },
         seconds: { type: 'number' }, full: { type: 'boolean' }, width: { type: 'integer' }, height: { type: 'integer' },
       },
