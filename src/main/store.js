@@ -144,7 +144,18 @@ function getProviderKey(id) {
   const enc = (getSettingsRaw().providerKeysEnc || {})[id];
   if (enc) return decrypt(enc);
   const { PROVIDERS } = require('./oai');
-  return PROVIDERS[id]?.env ? process.env[PROVIDERS[id].env] || null : null;
+  const envKey = PROVIDERS[id]?.env ? process.env[PROVIDERS[id].env] || null : null;
+  if (envKey) return envKey;
+  if (id === 'openrouter') {
+    const keyFile = path.join(os.homedir(), '.h2o', 'openrouter.key');
+    if (fs.existsSync(keyFile)) {
+      try {
+        const k = fs.readFileSync(keyFile, 'utf8').trim();
+        if (k) return k;
+      } catch {}
+    }
+  }
+  return null;
 }
 function addRecentProject(p) {
   const s = getSettingsRaw();
