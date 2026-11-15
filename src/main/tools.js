@@ -158,8 +158,8 @@ const TOOL_DEFS = [
   },
   {
     name: 'remember',
-    description: 'Save a durable fact about this project to DROPs.md (loaded into every future session): build/test commands, conventions, architecture notes, user preferences. Keep notes short and specific.',
-    input_schema: { type: 'object', properties: { note: { type: 'string' } }, required: ['note'] },
+    description: 'Save durable project knowledge to DROPs.md (loaded into every future session). kind "fact" (default): build/test commands, conventions, architecture notes, user preferences. kind "decision": a design decision and why it was made (e.g. "Prices are stored in cents" because "floats lost money in rounding"), so later work does not undo it. Keep notes short and specific.',
+    input_schema: { type: 'object', properties: { note: { type: 'string' }, kind: { type: 'string', enum: ['fact', 'decision'] }, why: { type: 'string', description: 'For a decision: the reason' } }, required: ['note'] },
   },
   {
     name: 'learn_lesson',
@@ -753,11 +753,22 @@ async function prepare(ctx, name, input) {
       const abs = path.join(root, mem);
       const orig = await fsp.readFile(abs, 'utf8').catch(() => null);
       const base = orig ?? '# Project notes for DROPs\n';
-      const content = base.includes('## Memory') ? base.replace(/\s*$/, '') + `\n- ${input.note.trim()}\n` : base.replace(/\s*$/, '') + `\n\n## Memory\n- ${input.note.trim()}\n`;
+      const decision = input.kind === 'decision';
+      const section = decision ? '## Decisions' : '## Memory';
+      const line = decision ? `- ${new Date().toISOString().slice(0, 10)}: ${input.note.trim()}${input.why ? ` (why: ${String(input.why).trim()})` : ''}` : `- ${input.note.trim()}`;
+      // Add to the end of its own section (creating it at the end of the file if needed).
+      const at = base.indexOf(section);
+      let content;
+      if (at < 0) content = base.replace(/\s*$/, '') + `\n\n${section}\n${line}\n`;
+      else {
+        const next = base.indexOf('\n## ', at + section.length);
+        const end = next < 0 ? base.length : next;
+        content = base.slice(0, end).replace(/\s*$/, '') + `\n${line}\n` + (next < 0 ? '' : '\n' + base.slice(next + 1));
+      }
       const preview = makeDiff(mem, orig, content);
       return {
         kind: 'edit', summary: input.note.slice(0, 80), preview, abs,
-        run: async () => { await ctx.snapshot(abs); await atomicWrite(abs, content); await markWritten(ctx, abs); ctx.onChange(mem, preview); return 'Saved to H2O.md.'; },
+        run: async () => { await ctx.snapshot(abs); await atomicWrite(abs, content); await markWritten(ctx, abs); ctx.onChange(mem, preview); return `Saved to ${mem}${decision ? ' (decisions)' : ''}.`; },
       };
     }
     case 'start_process': {

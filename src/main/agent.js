@@ -18,6 +18,26 @@ const shell = require('./shell');
 const lessons = require('./lessons');
 
 const INTERRUPTED = '[Request interrupted by user]';
+// ---- unfinished work, kept per project in DROPs' own data folder (never in the user's repository) ----
+const progressFile = (root) => path.join(brand.appDataDir(), 'progress', require('crypto').createHash('sha1').update(path.resolve(root || '').toLowerCase()).digest('hex').slice(0, 16) + '.json');
+function readProgress(root) { try { return JSON.parse(fs.readFileSync(progressFile(root), 'utf8')); } catch { return { sessions: {} }; } }
+/** Records what this session left open (or clears it when nothing is open). */
+function writeProgress(root, session) {
+  const p = readProgress(root);
+  const open = (session.todos || []).filter((t) => t.status !== 'completed').map((t) => t.content);
+  const reqs = (session.requirements || []).filter((r) => r.status !== 'verified').map((r) => `${r.id} ${r.text}`.slice(0, 120));
+  if (!open.length && !reqs.length) delete p.sessions[session.id];
+  else p.sessions[session.id] = { title: session.title, at: Date.now(), open, reqs };
+  try { fs.mkdirSync(path.dirname(progressFile(root)), { recursive: true }); fs.writeFileSync(progressFile(root), JSON.stringify(p, null, 2)); } catch { /* best effort */ }
+}
+/** Other sessions' unfinished work in this project, for the system prompt. */
+function progressSection(root, currentId) {
+  const items = Object.entries(readProgress(root).sessions).filter(([id]) => id !== currentId).sort((a, b) => b[1].at - a[1].at).slice(0, 4);
+  if (!items.length) return '';
+  const body = items.map(([, s]) => `- "${s.title}" (${new Date(s.at).toISOString().slice(0, 10)}):${s.open.length ? ` open tasks: ${s.open.slice(0, 8).join('; ')}.` : ''}${s.reqs.length ? ` Requirements not verified: ${s.reqs.slice(0, 8).join('; ')}.` : ''}`).join('\n');
+  return `# Unfinished work from earlier sessions in this project\nThis was open when those sessions ended. It may be out of date: check it against the current code before relying on it, and continue it only if the user's request is about it.\n${body}`.slice(0, 2500);
+}
+
 // ---- evidence helpers ----
 /** A cheap fingerprint of the project's source files (path, size, modified time). Any change, by an
  *  edit tool or by a command, gives a different value. Installed packages and build output are ignored. */
@@ -395,7 +415,7 @@ class AgentSession {
 5. Verify for real: run the project's type-checker, tests, linter or build with \`shell\`, read the output, and fix failures. For servers/watchers use start_process + process_output (never block \`shell\` on a command that does not exit), and stop_process when done.
 6. Batch independent read-only calls in parallel in a single turn — it is much faster.
 7. If a tool call is denied or fails twice the same way, change approach instead of retrying. If truly blocked on a decision that is the user's, ask with \`ask_user\` (offer concrete options) instead of guessing.
-8. Record durable project knowledge (build/test commands, conventions, gotchas) with \`remember\` when you discover it. When you make a mistake and find the fix (a wrong assumption, a command that does not exist, a framework pitfall, stopping too early), record one short, general rule with \`learn_lesson\` so you never repeat it in any project.
+8. Record durable project knowledge (build/test commands, conventions, gotchas) with \`remember\` when you discover it, and design decisions with \`remember\` kind "decision" plus why. Memory and lessons are hints from the past: check them against the current code before relying on them. When you make a mistake and find the fix (a wrong assumption, a command that does not exist, a framework pitfall, stopping too early), record one short, general rule with \`learn_lesson\` so you never repeat it in any project.
 9. Never run destructive or irreversible operations (deleting data, force-push, publishing, dropping databases) unless the user explicitly asked.
 10. Finish with a short report (see "How to talk to the user"). Never claim tests pass unless you ran them.`,
       `# How to talk to the user
@@ -415,6 +435,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
           : '',
       s.customInstructions ? `# User's global instructions\n${s.customInstructions}` : '',
       proj ? `# Project instructions (DROPs.md etc.)\n${proj}` : '',
+      progressSection(root, this.data.id),
       s.lessons !== false ? lessons.promptSection() : '',
       map ? `# Repository map (auto-generated at the start of this request; files with their top-level symbols)\n${map}` : '',
     ].filter(Boolean).join('\n\n');
@@ -774,6 +795,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   finish(opts) {
+    if (this.data.projectDir) writeProgress(this.data.projectDir, this.data);
     // A task on a requirements document always ends with the plain count, whatever the agent said.
     const reqs = this.data.requirements || [];
     if (reqs.length && this.settings().evidenceCheck !== false) {
@@ -1727,4 +1749,4 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   dispose() { this.stop(); this.procs.stopAll(); }
 }
 
-module.exports = { sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
+module.exports = { readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
