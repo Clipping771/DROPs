@@ -17,7 +17,7 @@ You describe a task in plain words, in any language. DROPs then plans it, edits 
 - Size:
   - about 6,000 lines in the main process and about 4,900 lines of UI (JS and CSS);
   - 61 IPC handlers;
-  - 104 automated tests (`npm test`) and 13 tests that drive the real app window (`npm run test:ui`).
+  - 123 automated tests (`npm test`) and 13 tests that drive the real app window (`npm run test:ui`).
 
 Updated 2026-11-16.
 
@@ -315,11 +315,25 @@ From the AI Software Company factory: hidden acceptance tests that the agent nev
 
 Free-tier runs mix models as quotas run out, so they are not single-model measurements.
 
-## 14. Known limits (short)
+## 14. Engineer features added on 2026-11-16 (evening)
+
+| Feature | What it does |
+|---|---|
+| **Verification freshness** | Every proof records a fingerprint of the project's source files, the files edited and the check that was run. If the code changed after a requirement was verified, DROPs re-runs that check itself before the agent may finish. "Verified" means verified on the current code. |
+| **Adversarial QA** | A second QA call, which never sees the code, writes up to two attacks per requirement from the spec: wrong password, logged-out access, another user's data, a lower role, invalid input, duplicates. Checks can require a final page (`expect_url`), forbid text (`forbid`) or an HTTP status (`expect_status`). A requirement is verified only when its main check **and** every attack pass. Each browser check runs in a fresh browser, so no login leaks between checks. |
+| **Root-cause debugging** | A failed command shows where it failed in the project's own code (file:line from Node, TypeScript and Python output). When the same check fails twice, the agent gets an engineer's procedure: reproduce, follow the first project frame, list 2–3 possible causes, test each with evidence, fix the cause, add a regression test, re-run. Finishing without a regression test after such a failure is sent back once. |
+| **Codebase intelligence** (`impact` tool) | An import graph of the project (JS/TS with `@/` aliases, Python). For a file: direct and indirect dependents, what it imports, the tests to run, the frontend files calling its API route, import cycles. For a name: where it is defined and used. For a Prisma model: the files using it and related models. The agent runs it before changing anything shared. |
+| **Smarter context** | The repository map in the prompt ranks files connected by imports to the task's words, not only files named like them. |
+| **Find the breaking change** (`find_breaking_change`) | When a check fails after this request's changes, DROPs puts each changed file back one at a time, runs the check, names the culprit, and restores every file exactly as it was. It also says when the failure was already there. |
+| **Safe rewind** | Rewind and Retry undo DROPs' changes but keep a file you edited afterwards, and say which. |
+| **Decision and task memory** | `remember` with kind "decision" stores design decisions with their reason. What a session leaves open (tasks, unverified requirements) is kept in DROPs' own data folder and shown to later sessions in the same project, marked as possibly out of date. |
+| **Runtime checks** | Every browser step lists the API calls the page made with their status ("POST /api/items → 201"). A `reload` action shows whether saved data survives; QA checks for requirements that save something end with a reload. |
+| **Audit** (`audit` tool) | Fixed-rule security and performance audit with file:line: secrets, SQL built from strings, eval, raw HTML, shell commands from request data, open CORS, cookie flags, plain passwords, TLS off, open redirects; database calls in loops (N+1), blocking file calls, unpaginated queries, very large files. Secret values are never printed. |
+| **Benchmarks B–E** (factory) | `factory scenario --type debug | change | adversarial | long`: seeded logic bugs with user-style reports; a change request scored on regressions; seeded security holes with no reports; one app built over three sessions. |
+
+## 15. Known limits (short)
 
 - **Quality depends on the model.** Small free models vary a lot from run to run.
-- **Verification can go stale.** A requirement verified early stays "verified" even if a later edit breaks it.
-- **QA checks test the main path** and can miss "negative" cases (logged-out visitors, other users' data).
 - **Still missing:**
   - in the app: session status and pins in the sidebar, chapters for long sessions, split view, a live browser pane;
   - in the agent: scheduled tasks, skills, full hooks;
