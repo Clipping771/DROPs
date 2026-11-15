@@ -74,9 +74,23 @@ function add(text, source = 'agent', context = '') {
   return hit;
 }
 
-/** The lessons section of the system prompt (empty string when there are none). */
+/**
+ * Governance: a lesson the loop inferred by itself (source 'auto') stays pending until the same mistake
+ * happens again (count ≥ 2); one the agent wrote after fixing its own mistake is active at once. Pending
+ * and removed lessons never reach the prompt, so one odd event cannot steer every future session.
+ */
+const isActive = (l) => !l.disabled && (l.source === 'agent' || (l.count || 1) >= 2);
+function list() { return load().sort((a, b) => score(b) - score(a)).map((l) => ({ ...l, active: isActive(l) })); }
+function remove(text) {
+  const lessons = load();
+  const i = lessons.findIndex((l) => l.text === text);
+  if (i >= 0) { lessons.splice(i, 1); save(lessons); }
+  return list();
+}
+
+/** The lessons section of the system prompt: active lessons only (empty string when there are none). */
 function promptSection() {
-  const lessons = load().sort((a, b) => score(b) - score(a));
+  const lessons = load().filter(isActive).sort((a, b) => score(b) - score(a));
   if (!lessons.length) return '';
   const lines = [];
   let used = 0;
@@ -99,4 +113,4 @@ function fromToolResult(name, input, output, sandboxed) {
   return null;
 }
 
-module.exports = { file, load, add, promptSection, fromToolResult, keyOf, similar };
+module.exports = { file, load, add, list, remove, isActive, promptSection, fromToolResult, keyOf, similar };

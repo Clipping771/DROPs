@@ -94,6 +94,51 @@ const isCodeAutoMode = (mode) => mode === 'auto-edit' || mode === 'code';
 
 /** For a task that names a requirements document (e.g. "build the app in SPEC.md"), a note listing every
  *  requirement and journey in it, asking for a plan that covers all of them. Null when there is none. */
+// ---- Evidence-based completion -------------------------------------------------------------------
+// For a task built on a requirements document, every functional requirement must be proven by a check
+// that DROPs itself runs (a command, browser steps, or an HTTP call). The agent describes the check; the
+// system executes it and decides pass/fail from the real result. The agent's own words never count.
+
+/** The functional requirements of the first requirements document named in the task (≥ 4), or []. */
+function specRequirements(root, task) {
+  const names = [...new Set((String(task).match(/[\w./-]+\.(?:md|txt)\b/gi) || []))].slice(0, 3);
+  for (const n of names) {
+    let doc;
+    try { doc = fs.readFileSync(path.resolve(root, n), 'utf8'); } catch { continue; }
+    const fr = [...doc.matchAll(/^\|\s*(FR-\d+)\s*\|\s*([^|\n]+)/gm)].map((m) => ({ id: m[1], text: m[2].trim() }));
+    if (fr.length >= 4) return fr;
+  }
+  return [];
+}
+
+/** Keeps earlier evidence for requirements that are unchanged; new or reworded ones start unverified. */
+function mergeRequirements(old = [], fresh = []) {
+  return fresh.map((r) => {
+    const prev = old.find((o) => o.id === r.id && o.text === r.text);
+    return prev ? prev : { id: r.id, text: r.text, status: 'unverified', evidence: null };
+  });
+}
+
+const CHECK_REQUIREMENT_DEF = {
+  name: 'check_requirement',
+  description: 'Prove that one requirement from the spec works. You describe a check; DROPs runs it itself and records VERIFIED or NOT verified from the real result (your own statement is never evidence). Kinds: "command" — a test or script that exercises this requirement (exit code 0, and `expect` text in its output if given); "browser" — browser steps like the browser tool ({action, url|target|value|key}) ending on a page that must show `expect`; "http" — a request to the running app whose response must be 2xx and contain `expect`. Check each requirement after building it; re-check after fixing it.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Requirement id, e.g. FR-3' },
+      kind: { type: 'string', enum: ['command', 'browser', 'http'] },
+      command: { type: 'string', description: 'kind=command: the test or script to run' },
+      steps: { type: 'array', items: { type: 'object' }, description: 'kind=browser: steps, e.g. [{"action":"open","url":"http://localhost:3000/login"},{"action":"fill","target":"Email","value":"a@b.co"},{"action":"click","target":"Log in"}]' },
+      url: { type: 'string', description: 'kind=http' },
+      method: { type: 'string', description: 'kind=http, default GET' },
+      body: { type: 'string', description: 'kind=http, JSON text for POST/PUT' },
+      expect: { type: 'string', description: 'Text that must appear in the output / final page / response. Required for browser and http.' },
+    },
+    required: ['id', 'kind'],
+  },
+};
+tools.registerDef(CHECK_REQUIREMENT_DEF);
+
 function specPlanNote(root, task) {
   const names = [...new Set((String(task).match(/[\w./-]+\.(?:md|txt)\b/gi) || []))].slice(0, 3);
   for (const n of names) {
@@ -107,7 +152,7 @@ function specPlanNote(root, task) {
     const lines = [...fr, ...reqs.filter((r) => r.id.startsWith('NFR')), ...journeys].map((r) => `- ${r.id}: ${short(r.text)}`);
     let body = lines.join('\n');
     if (body.length > 4000) body = body.slice(0, 4000) + '\n- … (see the document for the rest)';
-    return `[DROPs plan] ${n} lists ${fr.length} functional requirements${journeys.length ? ` and ${journeys.length} key journeys` : ''}. The task is all of them, not a first part. Before writing code, make a todo_write plan that covers every requirement (group related ones, e.g. "Contacts: FR-3, FR-4, FR-5"), then work through it one item at a time and mark an item completed only when it is built and checked:\n${body}`;
+    return `[DROPs plan] ${n} lists ${fr.length} functional requirements${journeys.length ? ` and ${journeys.length} key journeys` : ''}. The task is all of them, not a first part. Before writing code, make a todo_write plan that covers every requirement (group related ones, e.g. "Contacts: FR-3, FR-4, FR-5"), then work through it one item at a time. Each functional requirement counts as done only when check_requirement has VERIFIED it (DROPs runs the check itself; your word is not evidence):\n${body}`;
   }
   return null;
 }
@@ -285,7 +330,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WEB_SEARCH_DEF];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -380,6 +425,10 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     // smaller model plans the whole job instead of stopping after the first part.
     const planNote = s.specPlan === false ? null : specPlanNote(this.data.projectDir, text);
     if (planNote) userBlocks.push({ type: 'text', text: planNote });
+    if (s.evidenceCheck !== false) {
+      const reqs = specRequirements(this.data.projectDir, text);
+      if (reqs.length) { this.data.requirements = mergeRequirements(this.data.requirements, reqs); this.emit('requirements', { requirements: this.data.requirements }); }
+    }
     this.pushUser(userBlocks);
     const turn = { msgIndex: this.data.messages.length - 1, text, files: {}, at: Date.now() };
     this.data.turns.push(turn);
@@ -528,6 +577,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
               msg = `[DROPs completion guard] Your final answer says part of the task is not done ("${admitsUnfinished(replyText)}"). The task asks for all of it. Do the remaining work now, verify it, and only then finish. If something truly cannot be done here, say exactly what and why in one line.`;
               this.emit('notice', { message: 'Completion guard: the agent said work is still remaining; sending it back to finish.' });
               this.autoLesson('Do not end with a progress report while parts of the task remain: keep working until every requirement is implemented and verified, then give one final answer.', 'completion-guard');
+            } else if (run.edited && s.evidenceCheck !== false && (run.evidenceNudges || 0) < 2
+              && (this.data.requirements || []).some((r) => r.status !== 'verified')) {
+              // Evidence check: every requirement of the spec needs a passing check that DROPs ran itself.
+              run.evidenceNudges = (run.evidenceNudges || 0) + 1;
+              const reqs = this.data.requirements, open = reqs.filter((r) => r.status !== 'verified');
+              msg = `[DROPs evidence check] ${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence. Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app). Fix and re-check any that fail.`;
+              this.emit('notice', { message: `Evidence check: ${open.length} of ${reqs.length} requirements are not verified yet; sending the agent back.` });
             } else if (run.uiIssue && (run.uiIssueNudges || 0) < 2 && this.uiCheckOn(s)) {
               // The browser showed a problem and the agent is finishing anyway ("verified").
               run.uiIssueNudges = (run.uiIssueNudges || 0) + 1;
@@ -752,6 +808,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'task') return u.input.mode === 'edit' ? this.runWorker(u, meta, opts, ctx, run) : this.runTask(u, meta, opts);
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
+    if (u.name === 'check_requirement') return this.runCheckRequirement(u, meta, ctx, run);
     if (isMcp) return this.runMcp(u, meta, ctx, run, fail);
 
     let prep;
@@ -838,8 +895,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       }
       meta.status = isError ? 'error' : 'done';
       meta.output = text.length > 20000 ? text.slice(0, 20000) + '\n…' : text;
-      this.emit('tool-end', { id: u.id, ok: !isError, output: meta.output, diff: prep.preview });
       const images = typeof res === 'object' && Array.isArray(res.images) ? res.images : null;
+      // Screenshots (browser) and pictures (read_file) are shown in the tool's card in the app.
+      this.emit('tool-end', { id: u.id, ok: !isError, output: meta.output, diff: prep.preview, ...(images ? { images: images.map((b) => ({ source: b.source })) } : {}) });
       return { type: 'tool_result', tool_use_id: u.id, content: text, ...(isError ? { is_error: true } : {}), ...(images ? { _images: images } : {}) };
     } catch (e) { return fail(e.message); }
   }
@@ -898,6 +956,71 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     meta.status = 'done'; meta.output = answer ? `Answer: ${answer}` : 'No answer';
     this.emit('tool-end', { id: u.id, ok: true, output: meta.output });
     return { type: 'tool_result', tool_use_id: u.id, content };
+  }
+
+  // ---------- evidence: run a requirement check and record the real result ----------
+  async runCheckRequirement(u, meta, ctx, run) {
+    const finish = (text, ok) => {
+      meta.status = ok ? 'done' : 'error'; meta.output = text;
+      this.emit('tool-end', { id: u.id, ok, output: text });
+      return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }) };
+    };
+    const reqs = this.data.requirements || [];
+    const req = reqs.find((r) => r.id === String(u.input.id || '').trim());
+    if (!req) return finish(`Unknown requirement "${u.input.id}". Requirements: ${reqs.map((r) => r.id).join(', ') || 'none'}.`, false);
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return finish('Checks run commands and a browser, which this read-only mode does not allow.', false);
+    const kind = u.input.kind, expect = String(u.input.expect || '').trim();
+    let passed = false, detail = '', check = '';
+    try {
+      if (kind === 'command') {
+        const cmd = String(u.input.command || '').trim();
+        check = cmd;
+        if (!cmd) return finish('kind=command needs a command.', false);
+        // A command that exercises nothing (echo, true, exit 0) proves nothing.
+        if (/^(echo|printf|true|exit\s+0|:|Write-(Host|Output))\b/i.test(cmd) || (!expect && !guards.isVerificationCommand(cmd, run.verify, [...run.editedFiles]))) {
+          return finish('That command does not exercise the requirement. Use a test (npm test -- <name>, a script that calls the code) or add `expect` text that only the working feature prints.', false);
+        }
+        if ((this.procs.sandbox ? shell.assessCommand(cmd, null) : shell.assessCommand(cmd, this.data.projectDir)).dangerous) return finish('Refused: that command is flagged as dangerous.', false);
+        const r = await shell.run(cmd, { cwd: this.data.projectDir, sandbox: this.procs.sandbox, signal: ctx.signal, timeoutMs: 180000 });
+        const out = shell.redact(shell.stripAnsi(r.output || '')).text;
+        const found = !expect || out.includes(expect);
+        passed = r.code === 0 && found;
+        detail = `exit ${r.code}${expect ? `, expected text ${found ? 'found' : 'NOT found'}` : ''}\n${out.trim().slice(-1500)}`;
+        // A real test run here also counts for the verification guard.
+        if (guards.isVerificationCommand(cmd, run.verify, [...run.editedFiles])) { run.verifiedAfterEdit = true; run.lastVerify = r.code === 0 ? 'pass' : 'fail'; }
+      } else if (kind === 'browser') {
+        const steps = Array.isArray(u.input.steps) ? u.input.steps.slice(0, 25) : [];
+        check = `${steps.length} browser step(s)`;
+        if (!steps.length || !expect) return finish('kind=browser needs steps and `expect` text that the final page must show.', false);
+        const browser = require('./browser');
+        const sb = this.procs.sandbox;
+        let last = null, issue = null;
+        for (const st of steps) {
+          last = await browser.act(this.data.projectDir, st, { mapUrl: (x) => (sb ? sb.mapUrl(x) : x), signal: ctx.signal });
+          if (last.issue) { issue = last.issue; break; }
+        }
+        const found = !!last && last.text.includes(expect);
+        passed = !issue && found;
+        detail = issue ? `the browser showed a problem: ${issue}` : `${steps.length} step(s) ran; expected text ${found ? 'found' : 'NOT found'} on the final page\n${(last?.text || '').slice(0, 1200)}`;
+      } else if (kind === 'http') {
+        const sb = this.procs.sandbox;
+        const url = sb ? sb.mapUrl(String(u.input.url || '')) : String(u.input.url || '');
+        check = `${(u.input.method || 'GET').toUpperCase()} ${u.input.url}`;
+        if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//i.test(url) || !expect) return finish('kind=http needs a local URL of the running app (http://localhost:<port>/…) and `expect` text.', false);
+        const res = await fetch(url, { method: (u.input.method || 'GET').toUpperCase(), headers: u.input.body ? { 'content-type': 'application/json' } : {}, body: u.input.body || undefined, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(30000)]) });
+        const body = await res.text();
+        const found = body.includes(expect);
+        passed = res.ok && found;
+        detail = `HTTP ${res.status}, expected text ${found ? 'found' : 'NOT found'}\n${body.slice(0, 1200)}`;
+      } else return finish('kind must be command, browser or http.', false);
+    } catch (e) {
+      passed = false; detail = `the check could not run: ${String(e.message || e).split('\n')[0]}`;
+    }
+    req.status = passed ? 'verified' : 'failed';
+    req.evidence = { kind, check: check.slice(0, 200), expect: expect.slice(0, 120), passed, summary: detail.split('\n')[0].slice(0, 200), at: Date.now() };
+    this.emit('requirements', { requirements: reqs });
+    this.save();
+    return finish(`${req.id} ${passed ? 'VERIFIED' : 'NOT verified'} (${kind}): ${detail}`, passed);
   }
 
   // ---------- user command rules (Settings → Safety) ----------

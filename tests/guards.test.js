@@ -273,6 +273,49 @@ test('agent: UI check refuses a "verified" claim while the browser shows a dead 
   }
 });
 
+test('evidence: a spec task is not done until DROPs itself verified every requirement', async () => {
+  const t = scriptedAgent([
+    { tool: 'write_file', input: { path: 'b.js', content: 'module.exports = 2;\n' } },
+    { tool: 'check_requirement', input: { id: 'FR-1', kind: 'command', command: 'echo it works' } }, // proves nothing: refused
+    { tool: 'check_requirement', input: { id: 'FR-1', kind: 'command', command: 'npm test' } },
+    { text: 'Everything is done.' }, // FR-2..FR-4 have no evidence: sent back
+    { tool: 'check_requirement', input: { id: 'FR-2', kind: 'command', command: 'node -e "process.exit(1)"', expect: 'never' } }, // a failing check
+    { tool: 'check_requirement', input: { id: 'FR-2', kind: 'command', command: 'npm test' } },
+    { tool: 'check_requirement', input: { id: 'FR-3', kind: 'command', command: 'node -e "console.log(require(\'./b.js\'))"', expect: '2' } },
+    { tool: 'check_requirement', input: { id: 'FR-4', kind: 'command', command: 'npm test' } },
+    { text: 'All four requirements are verified.' },
+  ]);
+  fs.writeFileSync(path.join(t.dir, 'SPEC.md'), '| ID | Requirement |\n|---|---|\n| FR-1 | One |\n| FR-2 | Two |\n| FR-3 | Three |\n| FR-4 | Four |\n');
+  await t.agent.send('Build the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'auto-edit' });
+  const all = JSON.stringify(t.data.messages);
+  assert.match(all, /does not exercise the requirement/, 'echo is not evidence');
+  assert.match(all, /DROPs evidence check\] 3 of 4 requirements have no passing evidence: FR-2, FR-3, FR-4/);
+  assert.match(all, /FR-2 NOT verified/);
+  assert.deepEqual(t.data.requirements.map((r) => r.status), ['verified', 'verified', 'verified', 'verified']);
+  assert.equal(t.data.requirements[2].evidence.kind, 'command');
+  assert.strictEqual(t.calls(), 9, 'finished once every requirement had evidence');
+  t.agent.dispose();
+});
+
+test('evidence: an HTTP check passes only on a 2xx response that contains the expected text', async () => {
+  const http = require('node:http');
+  const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end('{"orders":3,"status":"Orders loaded"}'); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${srv.address().port}/api/orders`;
+  const t = scriptedAgent([
+    { tool: 'check_requirement', input: { id: 'FR-1', kind: 'http', url, expect: 'Orders loaded' } },
+    { tool: 'check_requirement', input: { id: 'FR-2', kind: 'http', url, expect: 'Invoice sent' } },
+    { tool: 'check_requirement', input: { id: 'FR-3', kind: 'http', url: 'https://example.com/', expect: 'x' } },
+    { text: 'Checked.' },
+  ]);
+  fs.writeFileSync(path.join(t.dir, 'SPEC.md'), '| FR-1 | a |\n| FR-2 | b |\n| FR-3 | c |\n| FR-4 | d |\n');
+  try {
+    await t.agent.send('Check the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'auto-edit' });
+    assert.deepEqual(t.data.requirements.map((r) => r.status), ['verified', 'failed', 'unverified', 'unverified']);
+    assert.match(JSON.stringify(t.data.messages), /needs a local URL of the running app/, 'only the local app can be checked');
+  } finally { t.agent.dispose(); srv.close(); }
+});
+
 test('specPlanNote: a task on a requirements document gets the full checklist; other tasks do not', () => {
   const { specPlanNote } = require('../src/main/agent');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-spec-'));

@@ -107,4 +107,33 @@ function withTimeout(p, ms, what) {
   return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`MCP ${what} timed out after ${ms / 1000}s`)), ms); })]).finally(() => clearTimeout(t));
 }
 
-module.exports = { McpManager, projectServers, toolName };
+// ---- Trust for a project's own .mcp.json ----------------------------------------------------------
+// A cloned repository can name local programs to start. They run only after the user trusted this exact
+// project and this exact configuration; any change to the file asks again.
+const crypto = require('crypto');
+function trustFile() {
+  const brand = require('./brand');
+  if (brand.env('MCP_TRUST_FILE')) return brand.env('MCP_TRUST_FILE');
+  if (process.env.NODE_TEST_CONTEXT) return path.join(require('os').tmpdir(), `drops-mcp-trust-test-${process.pid}.json`);
+  return path.join(brand.homeDir(), 'mcp-trust.json');
+}
+const trustKey = (root) => path.resolve(root).toLowerCase();
+const configHash = (servers) => crypto.createHash('sha256').update(JSON.stringify(servers)).digest('hex');
+function loadTrust() { try { return JSON.parse(fs.readFileSync(trustFile(), 'utf8')); } catch { return {}; } }
+function isProjectTrusted(root, servers) { return !!root && loadTrust()[trustKey(root)] === configHash(servers); }
+function trustProject(root, servers) {
+  const t = loadTrust();
+  t[trustKey(root)] = configHash(servers);
+  fs.mkdirSync(path.dirname(trustFile()), { recursive: true });
+  fs.writeFileSync(trustFile(), JSON.stringify(t, null, 2));
+}
+/** Status rows for project servers that wait for the user's trust (nothing is started). */
+function untrustedRows(servers) {
+  return Object.entries(servers).map(([name, c]) => ({
+    name, status: 'needs trust', untrusted: true, tools: [], kind: c?.url ? 'http' : 'stdio', trusted: false,
+    command: c?.url ? c.url : [c?.command, ...(c?.args || [])].filter(Boolean).join(' '),
+    error: "This project's .mcp.json wants to start this server. Review it, then trust it.",
+  }));
+}
+
+module.exports = { McpManager, projectServers, toolName, isProjectTrusted, trustProject, untrustedRows, configHash };

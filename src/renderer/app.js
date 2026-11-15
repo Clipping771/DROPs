@@ -13,7 +13,9 @@ const timeAgo = (t) => { const s = (Date.now() - t) / 1000; return s < 60 ? 'jus
 const S = { info: null, settings: null, theme: 'dark', project: null, sessions: [], current: null, views: new Map(), git: null, attachments: [] };
 const INTERRUPTED = '[Request interrupted by user]';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation';
-const CONTEXT_MAX = 1_000_000;
+const CONTEXT_MAX = 1_000_000; // fallback when a model's own window is unknown
+/** The context window of the chosen model (each model has its own; 'auto' and unknown models fall back). */
+function contextMax() { const id = $('#modelSel')?.value; return S.info?.models.find((x) => x.id === id)?.context || CONTEXT_MAX; }
 
 // ---------- markdown ----------
 marked.use({ gfm: true, breaks: false });
@@ -41,9 +43,9 @@ function renderMd(el, text, final) {
 
 // ---------- tools metadata ----------
 const TOOL_INFO = {
-  read_file: ['Read', 'fileCode'], write_file: ['Write', 'filePlus'], edit_file: ['Edit', 'pencil'], multi_edit: ['Edit', 'pencil'],
+  read_file: ['Read', 'fileCode'], browser: ['Browser', 'globe'], write_file: ['Write', 'filePlus'], edit_file: ['Edit', 'pencil'], multi_edit: ['Edit', 'pencil'],
   list_dir: ['List', 'folder'], glob: ['Find', 'search'], grep: ['Search', 'textSearch'], powershell: ['Run', 'terminal'], shell: ['Run', 'terminal'],
-  todo_write: ['Plan', 'list'], web_search: ['Web search', 'globe'], web_fetch: ['Fetch', 'globe'], fetch_url: ['Fetch', 'globe'],
+  todo_write: ['Plan', 'list'], check_requirement: ['Verify', 'shield'], web_search: ['Web search', 'globe'], web_fetch: ['Fetch', 'globe'], fetch_url: ['Fetch', 'globe'],
   start_process: ['Start process', 'play'], process_output: ['Process output', 'terminal'], stop_process: ['Stop process', 'square'],
   task: ['Sub-agent', 'bot'], remember: ['Remember', 'bookmark'], ask_user: ['Question', 'info'],
 };
@@ -125,6 +127,8 @@ function renderHistory(v) {
         const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content;
         const texts = blocks.filter((b) => b.type === 'text');
         const imgs = blocks.filter((b) => b.type === 'image' && !b._toolImage);
+        const shots = blocks.filter((b) => b.type === 'image' && b._toolImage);
+        if (shots.length && v.lastCard) v.lastCard.setImages(shots);
         if (m._summary) { place(v, compactCard(texts[0]?.text || '')); group = null; return; }
         for (const t of texts) {
           if (t.text.startsWith('[DROPs verification guard]')) { place(v, noticeEl('shield', 'Verification guard asked the agent to check its work')); continue; }
@@ -145,6 +149,7 @@ function renderHistory(v) {
           if (b.name === 'todo_write') continue;
           const meta = d.toolMeta[b.id] || { status: 'done', input: b.input };
           const c = toolCard(v, b.id, b.name, group);
+          v.lastCard = c;
           c.setSummary(meta.summary || summarize(b.name, b.input));
           if (isShellTool(b.name) || b.name === 'start_process') c.setCommand(b.input.command);
           if (b.name.startsWith('mcp__')) c.setCommand(JSON.stringify(b.input));
@@ -342,6 +347,18 @@ function toolCard(v, id, name, parent) {
       el.classList.toggle('waiting', s === 'waiting');
     },
     collapse: (on) => el.classList.toggle('collapsed', on),
+    setImages: (imgs) => {
+      el.querySelector('.tool-shots')?.remove();
+      if (!imgs?.length) return;
+      const box = h('div', 'tool-shots');
+      for (const b of imgs.slice(-2)) {
+        const i = h('img'); i.src = `data:${b.source.media_type};base64,${b.source.data}`; i.alt = 'Screenshot'; i.loading = 'lazy';
+        i.title = 'Click to enlarge';
+        i.onclick = (e) => { e.stopPropagation(); box.classList.toggle('zoom'); };
+        box.appendChild(i);
+      }
+      head.after(box);
+    },
     setCommand: (cmd) => { body.querySelector('.cmd')?.remove(); const p = h('pre', 'tool-out cmd', cmd); body.prepend(p); },
     liveInput: (chunk) => {
       raw += chunk;
@@ -507,6 +524,7 @@ function onEvent(ev) {
       else if (ev.diff && ev.ok) { c.body.querySelectorAll('.tool-out:not(.cmd)').forEach((x) => x.remove()); const note = (ev.output.match(/Diagnostics:[\s\S]*/) || [])[0]; if (note) c.setOutput(note); }
       else c.setOutput(ev.output);
       if (ev.sources) c.setSources(ev.sources);
+      if (ev.images) c.setImages(ev.images);
       if (ev.diff && ev.ok) Editor.reloadFile(ev.diff.path);
       c.collapse(ev.ok);
       Panels.markSession(v);
@@ -516,6 +534,7 @@ function onEvent(ev) {
     case 'question': showQuestion(v, ev); break;
     case 'todos': v.data.todos = ev.todos; if (cur) { Panels.renderPlan(); Panels.switchTab('plan'); } break;
     case 'changes': v.data.changes = ev.changes; if (cur) { Panels.renderChanges(); Panels.refreshTreeMarks(); Panels.refreshGitSoon(); } break;
+    case 'requirements': v.data.requirements = ev.requirements; if (cur) Panels.renderPlan(); break;
     case 'usage': v.data.usage = ev.usage; if (cur) { Panels.renderUsage(); updateCtx(); Panels.renderStatus(); } break;
     case 'notice': place(v, noticeEl('info', ev.message)); break;
     case 'auto-model': {
@@ -804,7 +823,7 @@ function insertAtCursor(s) {
 function updateCtx() {
   const u = currentView()?.data.usage;
   const limit = S.settings?.compactAt || 180000;
-  const pct = u ? Math.min(1, u.context / CONTEXT_MAX) : 0;
+  const pct = u ? Math.min(1, u.context / contextMax()) : 0;
   $('#ctxArc').style.strokeDashoffset = String(94.25 * (1 - pct));
   $('#ctxArc').style.stroke = u && u.context > limit * 0.85 ? 'var(--warn)' : 'var(--accent)';
   $('#ctxText').textContent = u ? fmtTok(u.context) : '0';
@@ -969,11 +988,39 @@ function promptText(title, placeholder) {
 }
 
 // ---------- dialogs ----------
+/** Lessons learned: what DROPs remembers from past mistakes. Pending ones are not used until confirmed. */
+async function lessonsBox() {
+  const o = h('div', 'overlay center');
+  const m = h('div', 'modal'); m.style.width = 'min(620px, 94vw)';
+  m.innerHTML = '<div class="modal-head"><h2>Lessons learned</h2></div><div class="modal-body lessons-body"></div>';
+  const body = $('.lessons-body', m);
+  const paint = (list) => {
+    body.innerHTML = '';
+    body.appendChild(h('p', 'muted', 'DROPs remembers these rules from its past mistakes and applies them in every project. A lesson it noticed by itself stays pending until the same mistake happens again. Remove any rule that is wrong.'));
+    if (!list.length) { body.appendChild(h('div', 'empty', 'No lessons yet.')); return; }
+    for (const l of list) {
+      const r = h('div', 'lesson-row');
+      r.innerHTML = `<span class="chip-st ${l.active ? 'on' : ''}"></span><span class="lt"></span><span class="lm"></span><button class="icon-btn" title="Remove">${icon('trash', 'xs')}</button>`;
+      $('.chip-st', r).textContent = l.active ? 'Active' : 'Pending';
+      $('.lt', r).textContent = l.text;
+      $('.lm', r).textContent = `${l.source === 'agent' ? 'written by the agent' : 'noticed automatically'} · seen ${l.count || 1}×`;
+      $('button', r).onclick = async () => paint(await api.lessonsRemove(l.text));
+      body.appendChild(r);
+    }
+  };
+  paint(await api.lessonsList());
+  const f = h('div', 'modal-foot'); const close = h('button', 'btn primary', 'Done'); f.appendChild(close); m.appendChild(f);
+  o.appendChild(m); document.body.appendChild(o);
+  const done = () => o.remove();
+  close.onclick = done; o.onclick = (e) => { if (e.target === o) done(); }; o.onkeydown = (e) => { if (e.key === 'Escape') done(); };
+  close.focus();
+}
+
 function confirmBox(title, text, okLabel = 'Continue') {
   return new Promise((res) => {
     const o = h('div', 'overlay center');
     const m = h('div', 'modal'); m.style.width = 'min(460px, 92vw)';
-    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2></div><div class="modal-body" style="padding-top:14px;color:var(--text-2)">${esc(text)}</div>`;
+    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2></div><div class="modal-body" style="padding-top:14px;color:var(--text-2);white-space:pre-line">${esc(text)}</div>`;
     const f = h('div', 'modal-foot'); const no = h('button', 'btn', 'Cancel'); const yes = h('button', 'btn primary', okLabel);
     f.append(no, yes); m.appendChild(f); o.appendChild(m); document.body.appendChild(o);
     const done = (r) => { o.remove(); res(r); };

@@ -24,7 +24,7 @@ const git = require('./git');
 const ollama = require('./ollama');
 const oai = require('./oai');
 const report = require('./report');
-const { McpManager, projectServers } = require('./mcp');
+const { McpManager, projectServers, isProjectTrusted, trustProject, untrustedRows } = require('./mcp');
 const { IGNORE, resolveInRoot } = require('./tools');
 const { listCommands } = require('./commands');
 
@@ -36,8 +36,11 @@ let currentProject = null;
 // Connects the MCP servers from Settings, plus the project's .mcp.json when the user allowed it.
 async function syncMcp() {
   const s = store.getSettings();
-  const configs = { ...(s.allowProjectMcp && currentProject ? projectServers(currentProject) : {}), ...(s.mcpServers || {}) };
-  const status = await mcp.sync(configs);
+  // A project's own servers run only when project MCP is allowed AND this exact config was trusted.
+  const proj = s.allowProjectMcp && currentProject ? projectServers(currentProject) : {};
+  const trusted = Object.keys(proj).length > 0 && isProjectTrusted(currentProject, proj);
+  const configs = { ...(trusted ? proj : {}), ...(s.mcpServers || {}) };
+  const status = [...await mcp.sync(configs), ...(Object.keys(proj).length && !trusted ? untrustedRows(proj) : [])];
   if (win && !win.isDestroyed()) win.webContents.send('mcp:status', status);
   return status;
 }
@@ -197,7 +200,8 @@ handle('app:info', async () => {
   if (!local.length && OLLAMA_HINT[ollamaState]) local.push({ id: '__ollama:' + ollamaState, label: OLLAMA_HINT[ollamaState], provider: 'Local (Ollama)', disabled: ollamaState !== 'stopped', action: ollamaState === 'stopped' ? 'start-ollama' : null });
   else if (local.length && local.every((m) => m.cloud)) local.push({ id: '__ollama:onlycloud', label: 'Only cloud models installed — download a free local model in Settings', provider: 'Local (Ollama)', disabled: true });
   const other = await getOaiModels(s);
-  return { models: [...auto, ...claude, ...gem, ...other, ...local], efforts: providers.EFFORTS, version: app.getVersion(), theme: effectiveTheme(), platform: process.platform };
+  const withCtx = (m) => (m.id && !m.id.startsWith('__') && m.id !== 'auto' ? { ...m, context: providers.contextWindow(m.id, s) } : m);
+  return { models: [...auto, ...claude, ...gem, ...other, ...local].map(withCtx), efforts: providers.EFFORTS, version: app.getVersion(), theme: effectiveTheme(), platform: process.platform };
 });
 
 // OpenAI-compatible providers: live model lists for every provider that has a key.
@@ -268,6 +272,9 @@ handle('ollama:test', async () => {
 handle('ollama:start', () => startOllama());
 handle('mcp:status', () => mcp.status());
 handle('mcp:reconnect', async () => { await mcp.closeAll(); return syncMcp(); });
+handle('lessons:list', () => require('./lessons').list());
+handle('lessons:remove', (text) => require('./lessons').remove(String(text || '')));
+handle('mcp:trustProject', async () => { if (!currentProject) return { error: 'No project open.' }; trustProject(currentProject, projectServers(currentProject)); return syncMcp(); });
 handle('theme:set', (mode) => { store.setSettings({ theme: mode }); return applyTheme(mode); });
 handle('settings:testKey', async (provider) => {
   try {

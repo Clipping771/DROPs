@@ -15,6 +15,11 @@
       <button class="tb-btn" id="branchBtn" title="Source control" hidden><span data-icon="branch" class="sm"></span><span id="branchName"></span></button>
       <div class="tb-title" id="sessionTitle"></div>
       <button class="tb-btn" id="paletteBtn" title="Command palette"><span data-icon="search" class="sm"></span><span class="muted">Search or run a command</span><kbd>Ctrl K</kbd></button>
+      <div class="tb-quick">
+        <button class="icon-btn" id="qbFiles" title="Files (explorer)"><span data-icon="files"></span></button>
+        <button class="icon-btn" id="qbChanges" title="Changes in this session"><span data-icon="diff"></span></button>
+        <button class="icon-btn" id="qbProcs" title="Running processes and terminal output"><span data-icon="terminal"></span></button>
+      </div>
       <button class="icon-btn" id="themeBtn" title="Toggle light/dark (Ctrl+Shift+L)"><span data-icon="sun"></span></button>
       <button class="icon-btn" id="inspToggle" title="Toggle right panel (Ctrl+J)"><span data-icon="panelRight"></span></button>
     </header>
@@ -82,7 +87,7 @@
 
       <aside class="inspector" id="inspector">
         <div class="tabs" id="inspTabs">
-          <button data-tab="plan" class="on">Plan</button>
+          <button data-tab="plan" class="on">Overview</button>
           <button data-tab="changes">Changes <span class="badge" id="changesBadge" hidden></span></button>
           <button data-tab="terminal">Processes <span class="badge" id="procBadge" hidden></span></button>
           <button data-tab="usage">Usage</button>

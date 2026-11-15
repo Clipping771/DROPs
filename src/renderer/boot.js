@@ -108,6 +108,11 @@ async function init() {
   $('#branchBtn').onclick = () => Panels.showSide('scm');
   $('#paletteBtn').onclick = () => Panels.openPalette();
   $('#themeBtn').onclick = toggleTheme;
+  // Quick buttons in the title bar: open the right place in one click (the inspector opens if hidden).
+  const openInsp = (tab) => { const b = $('#body'); const hidden = window.innerWidth <= 1280 ? !b.classList.contains('force-insp') : b.classList.contains('no-insp'); if (hidden) toggleInspector(); Panels.switchTab(tab); };
+  $('#qbFiles').onclick = () => Panels.showSide('explorer');
+  $('#qbChanges').onclick = () => openInsp('changes');
+  $('#qbProcs').onclick = () => openInsp('terminal');
   $('#inspToggle').onclick = toggleInspector;
   $('#inspToggle').classList.add('on');
   $('#railSettings').onclick = () => Panels.openSettings();

@@ -45,8 +45,8 @@ npm run bench -- --model auto   # benchmark (needs an API key with quota)
 - **Headless CLI** (`src/cli.js`) with JSON output and exit codes for CI. See `docs/github-action.yml`.
 
 ## Team and learning
-- Team rules in `.h2o/rules/*.md` and project memory in `H2O.md` (also reads AGENTS.md, CLAUDE.md, .cursorrules).
-- Share a session as an **HTML review report** or a **.h2o.json** file that teammates can import.
+- Team rules in `.drops/rules/*.md` and project memory in `DROPs.md` (also reads AGENTS.md, CLAUDE.md, .cursorrules, and the older `.h2o/` and `H2O.md` names).
+- Share a session as an **HTML review report** or a **.drops.json** file that teammates can import.
 - **Explanations language** (বাংলা, Hindi and more) and **Teaching mode**, which explains each change and the concept behind it.
 
 ## Platforms

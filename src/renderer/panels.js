@@ -23,25 +23,34 @@ const Panels = (() => {
     const q = (search?.value || '').trim().toLowerCase();
     const list = $('#sessionList');
     list.innerHTML = '';
-    const projectSessions = S.sessions.filter((s) => !S.project || s.projectDir === S.project);
-    const shown = q ? projectSessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : projectSessions;
-    if (!shown.length) {
-      const e = h('div', 'empty');
-      if (q) { e.textContent = 'No matching sessions.'; }
-      else {
-        e.innerHTML = 'No sessions in this project yet.<br>';
-        const b = h('button', 'btn sm'); b.innerHTML = icon('plus', 'xs') + 'New session'; b.onclick = () => newSession();
-        e.appendChild(b);
-      }
-      list.appendChild(e); return;
+    // Every project with its sessions, the open project first (like a workspace sidebar).
+    const all = q ? S.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : S.sessions;
+    const byProject = new Map();
+    for (const s of [...all].sort((a, b) => b.updated - a.updated)) {
+      if (!byProject.has(s.projectDir)) byProject.set(s.projectDir, []);
+      byProject.get(s.projectDir).push(s);
     }
-    const groups = { Today: [], 'Previous 7 days': [], Older: [] };
-    const day = 86400000;
-    for (const s of shown) groups[Date.now() - s.updated < day ? 'Today' : Date.now() - s.updated < 7 * day ? 'Previous 7 days' : 'Older'].push(s);
-    for (const [label, items] of Object.entries(groups)) {
-      if (!items.length) continue;
-      list.appendChild(h('div', 'group-label', label));
-      for (const s of items) {
+    if (S.project && !byProject.has(S.project) && !q) byProject.set(S.project, []);
+    const projects = [...byProject.keys()].sort((a, b) => (a === S.project ? -1 : b === S.project ? 1 : 0));
+    if (!projects.length) { list.appendChild(h('div', 'empty', q ? 'No matching sessions.' : 'No sessions yet.')); return; }
+    let open = new Set();
+    try { open = new Set(JSON.parse(localStorage.getItem('drops.sidebar.open') || '[]')); } catch { /* storage blocked */ }
+    const saveOpen = () => { try { localStorage.setItem('drops.sidebar.open', JSON.stringify([...open])); } catch { /* ignore */ } };
+    for (const p of projects) {
+      const items = byProject.get(p);
+      const isOpen = !!q || p === S.project || open.has(p);
+      const head = h('div', 'proj-head' + (p === S.project ? ' current' : ''));
+      head.innerHTML = `<span class="ph-chev">${icon(isOpen ? 'chevronDown' : 'chevronRight', 'xs')}</span>${icon('folder', 'sm')}<span class="ph-name"></span><span class="ph-count"></span><button class="icon-btn ph-new" title="New session in this project">${icon('plus', 'xs')}</button>`;
+      $('.ph-name', head).textContent = baseName(p || 'No project');
+      $('.ph-count', head).textContent = items.length ? String(items.length) : '';
+      head.title = p;
+      head.onclick = () => { if (p === S.project) return; if (open.has(p)) open.delete(p); else open.add(p); saveOpen(); renderSessions(false); };
+      $('.ph-new', head).onclick = async (e) => { e.stopPropagation(); if (p !== S.project) await setProject(p); newSession(); };
+      list.appendChild(head);
+      if (!isOpen) continue;
+      if (!items.length) { const e = h('div', 'proj-empty', 'No sessions yet'); list.appendChild(e); continue; }
+      const limit = p === S.project || q ? items.length : 8;
+      for (const s of items.slice(0, limit)) {
         const it = h('div', 'row session' + (s.id === S.current ? ' on' : ''));
         it.dataset.id = s.id;
         it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${timeAgo(s.updated)}${s.cost ? ' · ' + fmtCost(s.cost) : ''}</span></span><span class="acts"><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
@@ -65,6 +74,7 @@ const Panels = (() => {
         list.appendChild(it);
         const v = S.views.get(s.id); if (v) markSession(v);
       }
+      if (items.length > limit) { const more = h('button', 'proj-more', `Show ${items.length - limit} more`); more.onclick = async () => { await setProject(p); }; list.appendChild(more); }
     }
   }
   function markSession(v) {
@@ -222,10 +232,108 @@ const Panels = (() => {
     $$('#inspTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
     $$('.tab-body').forEach((b) => (b.hidden = b.dataset.body !== name));
   }
+  /** The right panel's overview: where this session runs, how full its context is, what it produced. */
+  function overviewPanel() {
+    const wrap = h('div', 'glance');
+    const v = currentView();
+    const o = currentOpts();
+    const m = S.info?.models.find((x) => x.id === o.model);
+    const modeLabel = { plan: 'Plan only', ask: 'Asks before changes', 'auto-edit': 'Edits on its own', yolo: 'Full auto' }[o.mode] || o.mode;
+    const u = v?.data.usage;
+    const section = (title) => { wrap.appendChild(h('div', 'glance-title', title)); const rows = h('div', 'glance-rows'); wrap.appendChild(rows); return rows; };
+    const row = (rows, ic, label, value, onclick) => {
+      const r = h(onclick ? 'button' : 'div', 'glance-row' + (onclick ? ' link' : ''));
+      r.innerHTML = `${icon(ic, 'sm')}<span class="gl"></span><span class="gv"></span>`;
+      $('.gl', r).textContent = label; $('.gv', r).textContent = value;
+      if (onclick) r.onclick = onclick;
+      rows.appendChild(r);
+    };
+
+    const env = section('Environment');
+    row(env, S.settings?.sandbox ? 'box' : 'monitor', 'Runs on', S.settings?.sandbox ? 'Docker sandbox' : 'This computer');
+    if (S.project) row(env, 'folder', 'Folder', baseName(S.project), () => showSide('explorer'));
+    if (S.git?.isRepo) row(env, 'branch', 'Branch', `${S.git.branch}${S.git.files.length ? ` · ${S.git.files.length} changed` : ''}`, () => showSide('scm'));
+    row(env, 'cpu', 'Model', m?.label || o.model || '—');
+    row(env, 'shield', 'Mode', modeLabel);
+
+    // Context: how much of the model's window this conversation uses.
+    const pct = u ? Math.min(1, u.context / contextMax()) : 0;
+    const ctx = h('div', 'ctx-line');
+    ctx.innerHTML = `<div class="ctx-top"><span>Context</span><span class="gv"></span></div><div class="meter"><div></div></div>`;
+    $('.gv', ctx).textContent = u?.context ? `${Math.max(1, Math.round(pct * 100))}% · ${fmtTok(u.context)} tokens` : 'empty';
+    $('.meter div', ctx).style.width = `${Math.max(pct * 100, u?.context ? 1 : 0)}%`;
+    if (u?.context && u.context > (S.settings?.compactAt || 180000) * 0.85) ctx.classList.add('warn');
+    wrap.appendChild(ctx);
+    const spend = section('Usage');
+    row(spend, 'gauge', 'Spent', u && u.cost ? fmtCost(u.cost) : '$0.00', () => switchTab('usage'));
+
+    // Requirements: verified only by checks DROPs ran itself.
+    const reqs = v?.data.requirements || [];
+    if (reqs.length) {
+      const ok = reqs.filter((r) => r.status === 'verified').length;
+      const t = h('div', 'glance-title out-title');
+      t.innerHTML = `<span>Requirements</span><span class="${ok === reqs.length ? 'add-n' : ''}">${ok}/${reqs.length} verified</span>`;
+      wrap.appendChild(t);
+      const bar = h('div', 'meter'); const fill = h('div'); fill.style.width = `${(ok / reqs.length) * 100}%`; bar.appendChild(fill); wrap.appendChild(bar);
+      const rows = h('div', 'glance-rows req-rows');
+      for (const r of reqs) {
+        const row = h('div', 'req-row ' + r.status);
+        row.innerHTML = `<span class="rq-dot"></span><span class="rq-id mono"></span><span class="rq-t"></span>`;
+        $('.rq-id', row).textContent = r.id; $('.rq-t', row).textContent = r.text;
+        row.title = r.evidence ? `${r.evidence.passed ? 'Verified' : 'Check failed'} by ${r.evidence.kind}: ${r.evidence.check}${r.evidence.expect ? ` (expects "${r.evidence.expect}")` : ''}
+${r.evidence.summary}` : 'No evidence yet';
+        rows.appendChild(row);
+      }
+      wrap.appendChild(rows);
+    }
+
+    // Outputs: the files this session changed, newest work first.
+    const ch = v?.data.changes || {};
+    const keys = Object.keys(ch);
+    if (keys.length) {
+      let A = 0, D = 0;
+      for (const k of keys) { A += ch[k].added; D += ch[k].removed; }
+      const t = h('div', 'glance-title out-title');
+      t.innerHTML = `<span>Outputs</span><span class="mono"><span class="add-n">+${A}</span> <span class="del-n">−${D}</span></span>`;
+      wrap.appendChild(t);
+      const rows = h('div', 'glance-rows');
+      for (const k of keys.slice(-6).reverse()) {
+        const r = h('button', 'glance-row link out-row');
+        r.innerHTML = `${icon('file', 'sm')}<span class="gl mono"></span><span class="gv mono"><span class="add-n">+${ch[k].added}</span> <span class="del-n">−${ch[k].removed}</span></span>`;
+        $('.gl', r).textContent = baseName(k); r.title = k;
+        r.onclick = () => Editor.openSessionDiff(k);
+        rows.appendChild(r);
+      }
+      wrap.appendChild(rows);
+      const all = h('button', 'btn sm ghost-btn'); all.innerHTML = `${icon('diff', 'xs')} Review all ${keys.length} change${keys.length === 1 ? '' : 's'}`;
+      all.onclick = () => switchTab('changes');
+      wrap.appendChild(all);
+    }
+    return wrap;
+  }
+
+  /** For a fresh session: the steps DROPs will go through. */
+  function howPanel() {
+    const wrap = h('div', 'glance');
+    wrap.appendChild(h('div', 'glance-title', 'How DROPs works'));
+    const steps = h('ol', 'how');
+    for (const [t, d] of [
+      ['Plans', 'Breaks your request into a checklist you can follow here'],
+      ['Writes the code', 'With a checkpoint before every change'],
+      ['Runs it', 'Builds and tests until they pass'],
+      ['Checks it like a user', 'Opens web apps in a real browser and clicks through'],
+      ['Reports honestly', 'What changed, how it was verified, what is left'],
+    ]) { const li = h('li'); li.innerHTML = '<span><b></b><span></span></span>'; $('b', li).textContent = t; $('span > span', li).textContent = d; steps.appendChild(li); }
+    wrap.appendChild(steps);
+    return wrap;
+  }
+
   function renderPlan() {
     const box = $('#planBody'); box.innerHTML = '';
     const todos = currentView()?.data.todos || [];
-    if (!todos.length) { box.appendChild(h('div', 'empty', 'For multi-step work the agent keeps a live task plan here.')); return; }
+    box.appendChild(overviewPanel());
+    if (!todos.length) { if (!Object.keys(currentView()?.data.changes || {}).length) box.appendChild(howPanel()); return; }
+    box.appendChild(h('div', 'glance-title plan-title', 'Task plan'));
     const done = todos.filter((t) => t.status === 'completed').length;
     const head = h('div', 'todo-head'); head.innerHTML = `<span>Task plan</span><span>${done}/${todos.length}</span>`;
     const pr = h('div', 'progress'); const bar = h('div'); bar.style.width = `${(done / todos.length) * 100}%`; pr.appendChild(bar);
@@ -233,6 +341,7 @@ const Panels = (() => {
     for (const t of todos) { const r = h('div', 'todo ' + t.status); r.innerHTML = `<span class="box">${t.status === 'completed' ? icon('check', 'xs') : ''}</span>`; r.appendChild(h('span', 't', t.content)); box.appendChild(r); }
   }
   function renderChanges() {
+    if (!$('#planBody').hidden) renderPlan();
     const box = $('#changesBody'); box.innerHTML = '';
     const v = currentView();
     const ch = v?.data.changes || {};
@@ -281,6 +390,7 @@ const Panels = (() => {
     }
   }
   function renderUsage() {
+    if (!$('#planBody').hidden) renderPlan();
     const box = $('#usageBody');
     const u = currentView()?.data.usage;
     if (!u) { box.innerHTML = '<div class="empty">Token usage and cost for the session appear here.</div>'; return; }
@@ -360,35 +470,78 @@ const Panels = (() => {
     item(`${icon(S.theme === 'dark' ? 'moon' : 'sun')}`, 'Toggle theme', () => toggleTheme());
   }
 
-  // ---------- hero ----------
+  // ---------- hero (home) ----------
+  // A welcome that is about the person's own work: their last session to pick up, their project at a
+  // glance, a few quick starts, and what is new in DROPs. Generic suggestions come last.
+  const greeting = () => { const hr = new Date().getHours(); return hr < 5 ? 'Working late' : hr < 12 ? 'Good morning' : hr < 18 ? 'Good afternoon' : 'Good evening'; };
   function renderHero() {
     const el = $('#hero'); el.innerHTML = '';
-    el.insertAdjacentHTML('beforeend', `<svg class="hero-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6c-.3 0-.6.15-.8.4C9.4 5.3 5.6 10.2 5.6 14a6.4 6.4 0 0 0 12.8 0c0-3.8-3.8-8.7-5.6-11-.2-.25-.5-.4-.8-.4Z" fill="var(--accent)"/><path d="M9.2 14.6a2.9 2.9 0 0 0 2.6 2.8" stroke="var(--bg)" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>`);
-    el.appendChild(h('h1', '', S.project ? `What should we build in ${baseName(S.project)}?` : 'DROPs'));
-    el.appendChild(h('p', '', S.project ? 'DROPs plans, edits, runs and verifies — with a checkpoint before every change, so nothing is ever lost.' : 'An autonomous coding agent for your desktop. Open a project folder to begin.'));
+    const name = S.project ? baseName(S.project) : '';
+    const top = h('div', 'hero-top');
+    top.insertAdjacentHTML('beforeend', `<svg class="hero-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6c-.3 0-.6.15-.8.4C9.4 5.3 5.6 10.2 5.6 14a6.4 6.4 0 0 0 12.8 0c0-3.8-3.8-8.7-5.6-11-.2-.25-.5-.4-.8-.4Z" fill="var(--accent)"/><path d="M9.2 14.6a2.9 2.9 0 0 0 2.6 2.8" stroke="var(--bg)" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>`);
+    const titles = h('div', 'hero-titles');
+    titles.appendChild(h('div', 'hero-hello', S.project ? greeting() : 'Welcome to DROPs'));
+    titles.appendChild(h('h1', '', S.project ? `What should we build in ${name}?` : 'Your autonomous coding engineer'));
+    titles.appendChild(h('p', '', S.project ? 'Describe it in plain words. DROPs plans, writes the code, runs it, checks it in a real browser, and saves a checkpoint before every change.' : 'Open a project folder and tell DROPs what you want. It plans, codes, tests and checks its own work.'));
+    top.appendChild(titles);
+    el.appendChild(top);
+
     const acts = h('div', 'hero-actions');
     if (!S.settings.hasKey) { const b = h('button', 'btn primary'); b.innerHTML = icon('key', 'sm') + 'Add an API key'; b.onclick = () => openSettings('providers'); acts.appendChild(b); }
     if (!S.project) { const b = h('button', S.settings.hasKey ? 'btn primary' : 'btn'); b.innerHTML = icon('folderOpen', 'sm') + 'Open project folder'; b.onclick = pickProject; acts.appendChild(b); }
     if (acts.childElementCount) el.appendChild(acts);
+
     if (S.project) {
-      const cards = h('div', 'cards');
-      const items = [
-        ['compass', 'Explain this codebase', 'Architecture, data flow and entry points', '/explain'],
-        ['bug', 'Find and fix bugs', 'Hunt down defects and verify the fixes', 'Find the most likely bugs in this project (read the code, run the tests/build), fix them, and verify each fix.'],
-        ['flask', 'Run tests and fix failures', 'Iterate until the suite is green', '/test'],
-        ['bookmark', 'Create project memory', 'Generate DROPs.md for future sessions', '/init'],
-      ];
-      for (const [ic, t, d, prompt] of items) {
-        const c = h('button', 'card'); c.innerHTML = `${icon(ic)}<div><b>${esc(t)}</b><span>${esc(d)}</span></div>`;
-        c.onclick = () => { if (prompt.startsWith('/')) sendText(prompt); else { $('#input').value = prompt; autosize(); updateComposer(); $('#input').focus(); } };
-        cards.appendChild(c);
+      // Pick up where you left off.
+      const mine = S.sessions.filter((s) => s.projectDir === S.project).sort((a, b) => b.updated - a.updated);
+      if (mine.length) {
+        const last = mine[0];
+        const cont = h('button', 'continue-card');
+        cont.innerHTML = `<span class="cc-icon">${icon('history')}</span><span class="cc-body"><span class="cc-label">Continue where you left off · <span class="cc-when"></span></span><span class="cc-title"></span><span class="cc-meta"></span></span><span class="cc-go">Open ${icon('chevronRight', 'xs')}</span>`;
+        $('.cc-title', cont).textContent = last.title || 'Untitled session';
+        $('.cc-when', cont).textContent = timeAgo(last.updated);
+        cont.onclick = () => openSession(last.id);
+        el.appendChild(cont);
+        // The project at a glance.
+        const week = mine.filter((s) => Date.now() - s.updated < 7 * 86400000).length;
+        const spent = mine.reduce((sum, s) => sum + (s.cost || 0), 0);
+        const meta = h('div', 'hero-meta');
+        const part = (t) => meta.appendChild(h('span', '', t));
+        part(`${mine.length} session${mine.length === 1 ? '' : 's'}`);
+        if (week) part(`${week} this week`);
+        if (spent) part(`${fmtCost(spent)} spent`);
+        if (S.git?.isRepo) part(`${S.git.branch}${S.git.files.length ? ` · ${S.git.files.length} changed` : ''}`);
+        el.appendChild(meta);
       }
-      el.appendChild(cards);
+
+      // Quick starts: short, one click.
+      el.appendChild(h('div', 'group-label hero-label', 'Start with'));
+      const chips = h('div', 'chips');
+      const items = [
+        ['globe', 'Build a web page and check it in the browser', 'Build a simple, good-looking landing page for this project, run it, open it in the browser tool, and fix anything that looks broken.'],
+        ['bug', 'Find and fix bugs', 'Find the most likely bugs in this project (read the code, run the tests/build), fix them, and verify each fix.'],
+        ['flask', 'Run tests and fix failures', '/test'],
+        ['compass', 'Explain this codebase', '/explain'],
+      ];
+      for (const [ic, t, prompt] of items) {
+        const c = h('button', 'chip'); c.innerHTML = `${icon(ic, 'sm')}<span></span>`; $('span', c).textContent = t;
+        c.onclick = () => { if (prompt.startsWith('/')) sendText(prompt); else { $('#input').value = prompt; autosize(); updateComposer(); $('#input').focus(); } };
+        chips.appendChild(c);
+      }
+      el.appendChild(chips);
+
     }
-    const recent = (S.settings.recentProjects || []).filter((p) => p !== S.project).slice(0, 5);
+
+    const recent = (S.settings.recentProjects || []).filter((p) => p !== S.project).slice(0, 4);
     if (recent.length) {
-      const r = h('div', 'recent'); r.appendChild(h('div', 'group-label', 'Recent projects'));
-      for (const p of recent) { const row = h('div', 'row'); row.innerHTML = `${icon('folder', 'ficon')}<span class="t"></span><span class="meta"></span>`; $('.t', row).textContent = baseName(p); $('.meta', row).textContent = p; row.onclick = () => setProject(p); r.appendChild(row); }
+      const r = h('div', 'recent'); r.appendChild(h('div', 'group-label hero-label', 'Other projects'));
+      const grid = h('div', 'project-tiles');
+      for (const p of recent) {
+        const tile = h('button', 'project-tile'); tile.innerHTML = `<span class="pt-ic">${icon('folder')}</span><span class="pt-t"></span><span class="pt-p"></span>`;
+        $('.pt-t', tile).textContent = baseName(p); $('.pt-p', tile).textContent = p; tile.title = p; tile.onclick = () => setProject(p);
+        grid.appendChild(tile);
+      }
+      r.appendChild(grid);
       el.appendChild(r);
     }
   }
@@ -515,7 +668,7 @@ const Panels = (() => {
             ${setItem('Density', 'Compact fits more rows in lists and tool output.', selectOf('setDensity', [['default', 'Comfortable'], ['compact', 'Compact']]))}
           </div>
         </section>
-        <section class="set-sec" data-sp="shortcuts"><h2>Keyboard shortcuts</h2><p class="set-desc">Available everywhere in H2O.</p>
+        <section class="set-sec" data-sp="shortcuts"><h2>Keyboard shortcuts</h2><p class="set-desc">Available everywhere in DROPs.</p>
           <div class="set-card"><div class="kbd-list">${SHORTCUTS.map(([d, k]) => `<div>${d}</div><div>${k.split(' ').map((x) => `<kbd>${x}</kbd>`).join(' ')}</div>`).join('')}</div></div>
         </section>
         <section class="set-sec" data-sp="about"><h2>About</h2>
@@ -632,7 +785,20 @@ const Panels = (() => {
         r.innerHTML = `<span class="state ${x.status === 'connected' ? 'on' : x.status === 'error' ? 'bad' : ''}"></span><b></b><span class="muted"></span>`;
         $('b', r).textContent = x.name;
         $('.muted', r).textContent = x.status === 'connected' ? `${x.tools.length} tools${x.trusted ? ' · trusted' : ''}` : x.status === 'error' ? x.error : x.status;
-        r.title = x.tools.join(', ');
+        r.title = x.untrusted ? x.command : x.tools.join(', ');
+        if (x.untrusted) {
+          const b = h('button', 'btn sm'); b.innerHTML = icon('shield', 'xs') + 'Review and trust';
+          b.onclick = async () => {
+            const cmds = (list || []).filter((y) => y.untrusted).map((y) => `${y.name}: ${y.command}`).join('\n');
+            if (!(await confirmBox("Trust this project's MCP servers?", `These programs will start on your computer with your permissions:
+
+${cmds}
+
+Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and start'))) return;
+            paintMcp(await api.mcpTrustProject());
+          };
+          r.appendChild(b);
+        }
         box.appendChild(r);
       }
     };
@@ -781,6 +947,7 @@ const Panels = (() => {
       ['New session in its own git worktree (parallel agent)', '', () => newWorktreeSession(), 'branch'],
       ['Settings: models, Auto routing & budget', '', () => openSettings('models'), 'cpu'],
       ['Settings: MCP servers & sandbox', '', () => openSettings('tools'), 'plug'],
+      ['Lessons learned', '', () => lessonsBox(), 'brain'],
       ['Reconnect MCP servers', '', async () => { const st = await api.mcpReconnect(); toast(`MCP: ${st.filter((x) => x.status === 'connected').length}/${st.length} connected`); }, 'refresh'],
       ['Generate commit message', '/commit', () => generateCommitMessage(), 'sparkles'],
       ['Switch to Plan mode', '', () => { setMode('plan'); persistOpts(); }, 'list'],

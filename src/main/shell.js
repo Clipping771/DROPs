@@ -31,6 +31,10 @@ function hostArgs(cmd) {
 
 // ---------- Docker sandbox ----------
 const SANDBOX_PORTS = [3000, 3001, 4173, 4321, 5000, 5173, 8000, 8080];
+function sandboxLimitArgs() {
+  const env = require('./brand').env;
+  return ['--memory', env('SANDBOX_MEMORY') || '4g', '--cpus', env('SANDBOX_CPUS') || '2', '--pids-limit', env('SANDBOX_PIDS') || '1024'];
+}
 // One long-lived container per project; the project folder is mounted at /workspace.
 function docker(args, timeout = 120000) {
   return new Promise((resolve) => {
@@ -53,11 +57,15 @@ class Sandbox {
         'if [ -d /golden/node_modules ] && [ ! -d /workspace/node_modules/.bin ]; then cp -a /golden/node_modules/. /workspace/node_modules/; fi'], 60000);
       // A container from before ports were published cannot get them later: recreate it (the project
       // folder is a mount, so nothing in it is lost).
-      const hasPorts = !this.network || (await docker(['inspect', '-f', '{{index .Config.Labels "drops.ports"}}', this.name], 15000)).out.trim() === '1';
+      // Containers from before ports and resource limits existed cannot get them later: recreate them.
+      const labels = (await docker(['inspect', '-f', '{{index .Config.Labels "drops.ports"}}/{{index .Config.Labels "drops.limits"}}', this.name], 15000)).out.trim();
+      const hasPorts = (!this.network || labels.startsWith('1/')) && labels.endsWith('/1');
       if (st.ok && !hasPorts) { await docker(['rm', '-f', this.name], 60000); }
       else if (st.ok && st.out.trim() === 'true') { await seedGolden(); await this.readPorts(); return true; }
       else if (st.ok) { const s = await docker(['start', this.name]); if (s.ok) { await seedGolden(); await this.readPorts(); return true; } await docker(['rm', '-f', this.name]); }
-      const args = ['run', '-d', '--name', this.name, '-v', `${this.root}:/workspace`, '-w', '/workspace', '--label', 'drops.sandbox=1'];
+      const args = ['run', '-d', '--name', this.name, '-v', `${this.root}:/workspace`, '-w', '/workspace', '--label', 'drops.sandbox=1',
+        // Resource limits so runaway code cannot freeze the machine (DROPS_SANDBOX_MEMORY / _CPUS / _PIDS).
+        '--label', 'drops.limits=1', ...sandboxLimitArgs()];
       if (fs.existsSync(path.join(this.root, 'package.json')) && !fs.existsSync(path.join(this.root, 'node_modules'))) args.push('-v', '/workspace/node_modules', '-v', '/workspace/.next');
       if (!this.network) args.push('--network', 'none');
       // Common dev-server ports, published on random free ports of this machine (localhost only), so
@@ -216,4 +224,4 @@ function redact(text) {
   return { text, count };
 }
 
-module.exports = { IS_WIN, detectHostShell, spawnShell, run, killTree, Sandbox, docker, assessCommand, isSafeCommand, writesOutsideRoot, redact, stripAnsi, parseRules, matchRule };
+module.exports = { sandboxLimitArgs, IS_WIN, detectHostShell, spawnShell, run, killTree, Sandbox, docker, assessCommand, isSafeCommand, writesOutsideRoot, redact, stripAnsi, parseRules, matchRule };
