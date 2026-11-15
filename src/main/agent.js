@@ -111,6 +111,13 @@ tools.registerDef(TASK_DEF);
 tools.registerDef(WEB_SEARCH_DEF);
 tools.registerDef(ASK_USER_DEF);
 
+const IMPACT_DEF = {
+  name: 'impact',
+  description: 'Before changing something shared, see what depends on it: target is a file path (relative to the project), a function/component/class name, a database model name (Prisma), or "cycles" for import cycles. Returns the files that import it (directly and through others), where a name is used, the API route callers, and the tests to run afterwards. A static map from imports and names, not proof: still run those tests.',
+  input_schema: { type: 'object', properties: { target: { type: 'string', description: 'File path, symbol name, model name, or "cycles"' } }, required: ['target'] },
+};
+tools.registerDef(IMPACT_DEF);
+
 const WRAP_UP_DEF = {
   name: 'wrap_up',
   description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
@@ -374,7 +381,7 @@ class AgentSession {
       s.explainMode ? `# Teaching mode is ON\nThe user is learning. After each meaningful change, explain briefly and plainly: what you changed, why it was needed, and the concept behind it (1-3 sentences, no jargon without a short definition). In the final report, add a "What you can learn from this" section with 2-4 bullet points.` : '',
       `# Project profile (auto-detected)\n${profile.text}${profile.verify.length ? `\n- Likely verification commands: ${profile.verify.map((v) => '`' + v + '`').join(', ')}` : ''}`,
       `# Operating procedure
-1. Understand first. For anything non-trivial, find the relevant code with grep/glob/read_file before changing it. For broad questions or large codebases, delegate parallel investigations with the \`task\` tool (several calls in one turn) so file dumps stay out of your context.
+1. Understand first. For anything non-trivial, find the relevant code with grep/glob/read_file before changing it. Before changing a shared file, function, API route or database model, run \`impact\` on it to see what depends on it, and run the tests it lists afterwards. For broad questions or large codebases, delegate parallel investigations with the \`task\` tool (several calls in one turn) so file dumps stay out of your context.
 2. Plan. For work with 3+ steps, write a todo list with todo_write and keep it updated (exactly one in_progress).
 3. Make minimal, surgical, idiomatic changes that match the surrounding style. Use edit_file / multi_edit for existing files (read them first); write_file only for new files or full rewrites. Never leave placeholders like "// rest of code here".
 4. Every edit reports instant diagnostics (syntax checks). If they show an error, fix it immediately.
@@ -407,7 +414,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -930,6 +937,15 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
     if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
+    if (u.name === 'impact') {
+      const target = String(u.input.target || '').trim();
+      meta.summary = target; this.emit('tool-start', { id: u.id, name: 'impact', input: u.input, summary: target });
+      let out;
+      try { out = require('./codegraph').impactReport(this.data.projectDir, target); } catch (e) { out = `Could not map the project: ${e.message}`; }
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
     if (u.name === 'check_requirement') return this.runCheckRequirement(u, meta, ctx, run);
     if (isMcp) return this.runMcp(u, meta, ctx, run, fail);
 

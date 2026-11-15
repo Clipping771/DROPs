@@ -71,7 +71,22 @@ function repoMap(root, budget = 14000, query = '') {
     if (/^(tests?|__tests__|bench|docs|examples)\//i.test(low)) score -= 15;
     return score;
   };
-  entries.sort((a, b) => scoreEntry(b) - scoreEntry(a) || (b.stats?.mtimeMs || 0) - (a.stats?.mtimeMs || 0) || a.path.localeCompare(b.path));
+  // Dependency-aware: files that import or are imported by a keyword match are relevant too
+  // ("fix the auth problem" brings in what auth.ts uses and what uses it).
+  const related = new Map();
+  if (kw.length && total < 4000) {
+    try {
+      const g = require('./codegraph').buildGraph(root);
+      for (const e of entries) {
+        const p = e.path.replace(/\\/g, '/');
+        if (!kw.some((w) => p.toLowerCase().includes(w))) continue;
+        for (const d of g.imports.get(p) || []) related.set(d, (related.get(d) || 0) + 40);
+        for (const d of g.importedBy.get(p) || []) related.set(d, (related.get(d) || 0) + 30);
+      }
+    } catch { /* the map still works without the graph */ }
+  }
+  const score = new Map(entries.map((e) => [e, scoreEntry(e) + Math.min(80, related.get(e.path.replace(/\\/g, '/')) || 0)]));
+  entries.sort((a, b) => score.get(b) - score.get(a) || (b.stats?.mtimeMs || 0) - (a.stats?.mtimeMs || 0) || a.path.localeCompare(b.path));
   const out = [];
   let used = 0;
   for (const e of entries) {
