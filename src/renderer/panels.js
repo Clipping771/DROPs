@@ -280,7 +280,7 @@ const Panels = (() => {
         const row = h('div', 'req-row ' + r.status);
         row.innerHTML = `<span class="rq-dot"></span><span class="rq-id mono"></span><span class="rq-t"></span>`;
         $('.rq-id', row).textContent = r.id; $('.rq-t', row).textContent = r.text;
-        row.title = r.evidence ? `${r.evidence.passed ? 'Verified' : 'Check failed'} by ${r.evidence.kind}: ${r.evidence.check}${r.evidence.expect ? ` (expects "${r.evidence.expect}")` : ''}
+        row.title = r.evidence ? `${r.status === 'verified' ? 'Verified' : r.evidence.passed ? 'Own check passed (QA check still needed)' : 'Check failed'} by ${r.evidence.byQa ? 'independent QA ' : ''}${r.evidence.kind}: ${r.evidence.check}${r.evidence.expect ? ` (expects "${r.evidence.expect}")` : ''}
 ${r.evidence.summary}` : 'No evidence yet';
         rows.appendChild(row);
       }

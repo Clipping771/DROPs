@@ -316,6 +316,47 @@ test('evidence: an HTTP check passes only on a 2xx response that contains the ex
   } finally { t.agent.dispose(); srv.close(); }
 });
 
+test('QA agent: independent checks from the spec alone are the only ones that can verify a requirement', async () => {
+  const http = require('node:http');
+  const srv = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/plain' }); r.end(q.url === '/api/deals' ? 'deal list: Annual licence' : 'home'); });
+  await new Promise((r) => srv.listen(0, r)); // all addresses: "localhost" may resolve to ::1
+  const port = srv.address().port;
+  const providers = require('../src/main/providers');
+  const { AgentSession } = require('../src/main/agent');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-qa-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node -e "0"' } }));
+  fs.writeFileSync(path.join(dir, 'SPEC.md'), '| FR-1 | Deals list |\n| FR-2 | b |\n| FR-3 | c |\n| FR-4 | d |\n');
+  const script = [
+    { tool: 'write_file', input: { path: 'deals.js', content: 'module.exports = [];\n' } },
+    { tool: 'check_requirement', input: { id: 'FR-1', kind: 'command', command: 'npm test' } }, // passes, but FR-1 has a QA check
+    { tool: 'check_requirement', input: { id: 'FR-1', use_qa: true } },
+    { text: 'Done.' },
+  ];
+  let i = 0, qaCalls = 0;
+  const qaJson = JSON.stringify([
+    { id: 'FR-1', kind: 'http', url: `http://localhost:${port}/api/deals`, expect: 'Annual licence' },
+    { id: 'FR-2', kind: 'browser', steps: [], expect: 'x' }, // invalid: no steps, dropped
+  ]);
+  providers.callModel = async ({ tools, system }) => {
+    if (!tools.length && /independent QA engineer/.test(system)) { qaCalls++; return { content: [{ type: 'text', text: 'Here you go:\n' + qaJson }], usage: {} }; }
+    const st = script[i++] || { text: 'done' };
+    return { content: st.tool ? [{ type: 'tool_use', id: 't' + i, name: st.tool, input: st.input }] : [{ type: 'text', text: st.text }], model: 'fake', stop_reason: st.tool ? 'tool_use' : 'end_turn', usage: {} };
+  };
+  const data = { id: 's', title: 'New session', projectDir: dir, messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 } };
+  const agent = new AgentSession(data, { send: () => {}, save: () => {}, getSettings: () => ({ autoVerify: true, qaAgent: true, completionAudit: false, evidenceCheck: true }), getApiKey: () => 'x', getGeminiKey: () => 'x' });
+  try {
+    await agent.send('Build the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'auto-edit' });
+    assert.equal(qaCalls, 1, 'the QA agent wrote the checks once');
+    assert.equal(data.requirements[0].qa.kind, 'http');
+    assert.equal(data.requirements[1].qa, undefined, 'a malformed QA check is dropped');
+    const all = JSON.stringify(data.messages);
+    assert.match(all, /has an independent QA check: run check_requirement with use_qa: true/, "the developer's own check cannot verify it");
+    assert.match(all, /FR-1 VERIFIED \(QA http\)/);
+    assert.equal(data.requirements[0].status, 'verified');
+    assert.equal(data.requirements[0].evidence.byQa, true);
+  } finally { agent.dispose(); srv.close(); }
+});
+
 test('specPlanNote: a task on a requirements document gets the full checklist; other tasks do not', () => {
   const { specPlanNote } = require('../src/main/agent');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-spec-'));

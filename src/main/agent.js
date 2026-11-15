@@ -106,7 +106,7 @@ function specRequirements(root, task) {
     let doc;
     try { doc = fs.readFileSync(path.resolve(root, n), 'utf8'); } catch { continue; }
     const fr = [...doc.matchAll(/^\|\s*(FR-\d+)\s*\|\s*([^|\n]+)/gm)].map((m) => ({ id: m[1], text: m[2].trim() }));
-    if (fr.length >= 4) return fr;
+    if (fr.length >= 4) { fr.doc = doc; return fr; }
   }
   return [];
 }
@@ -133,8 +133,9 @@ const CHECK_REQUIREMENT_DEF = {
       method: { type: 'string', description: 'kind=http, default GET' },
       body: { type: 'string', description: 'kind=http, JSON text for POST/PUT' },
       expect: { type: 'string', description: 'Text that must appear in the output / final page / response. Required for browser and http.' },
+      use_qa: { type: 'boolean', description: 'Run the independent QA check written for this requirement (when one exists, only it can verify the requirement).' },
     },
-    required: ['id', 'kind'],
+    required: ['id'],
   },
 };
 tools.registerDef(CHECK_REQUIREMENT_DEF);
@@ -427,7 +428,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (planNote) userBlocks.push({ type: 'text', text: planNote });
     if (s.evidenceCheck !== false) {
       const reqs = specRequirements(this.data.projectDir, text);
-      if (reqs.length) { this.data.requirements = mergeRequirements(this.data.requirements, reqs); this.emit('requirements', { requirements: this.data.requirements }); }
+      if (reqs.length) {
+        this.data.requirements = mergeRequirements(this.data.requirements, reqs);
+        if ((s.qaAgent === true || (s.qaAgent !== false && opts.mode === 'yolo')) && this.data.requirements.some((r) => !r.qa)) {
+          await this.writeQaChecks(reqs.doc, opts.model).catch((e) => this.emit('notice', { message: `QA agent could not write checks: ${String(e.message || e).slice(0, 120)}` }));
+        }
+        this.emit('requirements', { requirements: this.data.requirements });
+      }
     }
     this.pushUser(userBlocks);
     const turn = { msgIndex: this.data.messages.length - 1, text, files: {}, at: Date.now() };
@@ -582,7 +589,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
               // Evidence check: every requirement of the spec needs a passing check that DROPs ran itself.
               run.evidenceNudges = (run.evidenceNudges || 0) + 1;
               const reqs = this.data.requirements, open = reqs.filter((r) => r.status !== 'verified');
-              msg = `[DROPs evidence check] ${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence. Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app). Fix and re-check any that fail.`;
+              msg = `[DROPs evidence check] ${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence.${open.some((r) => r.qa) ? ' These have independent QA checks: start the app and run check_requirement with use_qa: true for each; fix the app (never the check) until they pass.' : ' Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app).'} Fix and re-check any that fail.`;
               this.emit('notice', { message: `Evidence check: ${open.length} of ${reqs.length} requirements are not verified yet; sending the agent back.` });
             } else if (run.uiIssue && (run.uiIssueNudges || 0) < 2 && this.uiCheckOn(s)) {
               // The browser showed a problem and the agent is finishing anyway ("verified").
@@ -958,6 +965,31 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return { type: 'tool_result', tool_use_id: u.id, content };
   }
 
+  // ---------- independent QA: checks written from the spec alone, before any code is seen ----------
+  async writeQaChecks(specText, model) {
+    if (!specText) return;
+    const reqs = this.data.requirements;
+    const system = 'You are an independent QA engineer. You have NOT seen the code and you do not trust the developer. From the specification alone, write one acceptance check per functional requirement, the way a careful user would test it. Use the routes, data-testid attributes, field labels and demo accounts the specification names; the app runs at http://localhost:3000. Prefer kind "browser": steps for a real browser ({"action":"open","url":...}, {"action":"fill","target":"testid=..." or a label,"value":...}, {"action":"click","target":...}, {"action":"select",...}, {"action":"press","key":"Enter"}), ending on a page that must show the "expect" text, which only a working feature shows. Use kind "http" ({"url","method","body","expect"}) only for pure API requirements. Log in first in each check that needs an account. Reply with JSON only: [{"id":"FR-1","kind":"browser","steps":[...],"expect":"..."}, ...].';
+    const prompt = `Specification:\n${String(specText).slice(0, 24000)}\n\nRequirements to cover: ${reqs.map((r) => r.id).join(', ')}`;
+    const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
+    const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const start = text.indexOf('['), end = text.lastIndexOf(']');
+    if (start < 0 || end < start) throw new Error('no JSON list in the reply');
+    let list;
+    try { list = JSON.parse(text.slice(start, end + 1)); } catch { throw new Error('the reply was not valid JSON'); }
+    let n = 0;
+    for (const c of Array.isArray(list) ? list : []) {
+      const r = reqs.find((x) => x.id === c?.id);
+      if (!r || !['browser', 'http'].includes(c.kind) || !String(c.expect || '').trim()) continue;
+      if (c.kind === 'browser' && !(Array.isArray(c.steps) && c.steps.length && c.steps.every((st) => st && typeof st.action === 'string'))) continue;
+      if (c.kind === 'http' && !/^http:\/\/localhost:\d+\//.test(String(c.url || ''))) continue;
+      r.qa = c.kind === 'browser' ? { kind: 'browser', steps: c.steps.slice(0, 25), expect: String(c.expect).slice(0, 200) } : { kind: 'http', url: c.url, method: c.method || 'GET', body: c.body, expect: String(c.expect).slice(0, 200) };
+      n++;
+    }
+    this.emit('notice', { message: `QA agent wrote independent checks for ${n} of ${reqs.length} requirements.` });
+    this.save();
+  }
+
   // ---------- evidence: run a requirement check and record the real result ----------
   async runCheckRequirement(u, meta, ctx, run) {
     const finish = (text, ok) => {
@@ -969,6 +1001,10 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const req = reqs.find((r) => r.id === String(u.input.id || '').trim());
     if (!req) return finish(`Unknown requirement "${u.input.id}". Requirements: ${reqs.map((r) => r.id).join(', ') || 'none'}.`, false);
     if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return finish('Checks run commands and a browser, which this read-only mode does not allow.', false);
+    // The independent QA check, when one exists, is the only check that can verify the requirement.
+    const useQa = !!req.qa && (u.input.use_qa === true || !u.input.kind);
+    if (useQa) u = { ...u, input: { ...req.qa, id: req.id } };
+    if (!u.input.kind) return finish(`Say how to check ${req.id}: kind command, browser or http${req.qa ? ', or use_qa: true to run its QA check' : ''}.`, false);
     const kind = u.input.kind, expect = String(u.input.expect || '').trim();
     let passed = false, detail = '', check = '';
     try {
@@ -1016,11 +1052,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     } catch (e) {
       passed = false; detail = `the check could not run: ${String(e.message || e).split('\n')[0]}`;
     }
-    req.status = passed ? 'verified' : 'failed';
-    req.evidence = { kind, check: check.slice(0, 200), expect: expect.slice(0, 120), passed, summary: detail.split('\n')[0].slice(0, 200), at: Date.now() };
+    // With a QA check, the agent's own check is recorded but cannot verify the requirement.
+    req.status = passed && (useQa || !req.qa) ? 'verified' : passed ? 'unverified' : 'failed';
+    req.evidence = { kind, byQa: useQa, check: check.slice(0, 200), expect: expect.slice(0, 120), passed, summary: detail.split('\n')[0].slice(0, 200), at: Date.now() };
     this.emit('requirements', { requirements: reqs });
     this.save();
-    return finish(`${req.id} ${passed ? 'VERIFIED' : 'NOT verified'} (${kind}): ${detail}`, passed);
+    const note = passed && req.qa && !useQa ? ` Your own check passed, but ${req.id} has an independent QA check: run check_requirement with use_qa: true to verify it.` : '';
+    return finish(`${req.id} ${req.status === 'verified' ? 'VERIFIED' : 'NOT verified'} (${useQa ? 'QA ' : ''}${kind}): ${detail}${note}`, passed);
   }
 
   // ---------- user command rules (Settings → Safety) ----------

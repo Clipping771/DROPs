@@ -12,7 +12,8 @@
     "bench": "node bench/run.js",
     "headless": "node src/cli.js",
     "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux",
+    "test:ui": "node --test tests/ui.test.js"
   },
   "keywords": [],
   "author": "",
