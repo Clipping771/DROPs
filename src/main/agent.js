@@ -654,6 +654,11 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
                 this.emit('notice', { message: 'Verification guard: no real test or build has run since the last change; sending the agent back to verify.' });
                 this.autoLesson('After the last edit, always run a real check (tests, build or type-checker) and read its result before finishing.', 'verification-guard');
               }
+            } else if (run.debugMode && !run.debugTestNudged && run.lastVerify !== 'fail' && !(run.debugTestFiles?.size)) {
+              // A failure that needed real debugging must not come back: ask for a regression test once.
+              run.debugTestNudged = true;
+              msg = '[DROPs debug] You fixed a failure that took several tries. Add a regression test that fails without your fix (or say in one line why a test is not possible here), run it, and in your final answer name the root cause in one sentence.';
+              this.emit('notice', { message: 'Debugging: asking the agent for a regression test and the root cause.' });
             } else if (run.edited && run.lastVerify === 'fail') {
               if (!(run.failNudged && /\b(pre-existing|already fail|original code|unrelated|cannot verify|impossible)\b/i.test(replyText))) {
                 run.failNudged = true;
@@ -1010,6 +1015,17 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         run.verifiedAfterEdit = true;
         run.lastVerify = isError ? 'fail' : 'pass';
       }
+      // Root-cause debugging: point at this project's own frames, and after a repeated failure of the
+      // same check, switch the agent to an engineer's debugging procedure.
+      if (prep.kind === 'shell' && isError) {
+        const frames = guards.projectFrames(text, this.data.projectDir);
+        if (frames.length) text += `\n[DROPs] Where it failed in this project's code: ${frames.join(', ')}`;
+        const key = String(u.input.command || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 200);
+        run.failCounts = run.failCounts || new Map();
+        run.failCounts.set(key, (run.failCounts.get(key) || 0) + 1);
+        if (run.failCounts.get(key) >= 2 && !run.debugMode) { run.debugMode = true; run.debugTestFiles = new Set(); text += `\n${guards.DEBUG_PROTOCOL}`; this.emit('notice', { message: 'The same check failed twice: DROPs switched the agent to step-by-step root-cause debugging.' }); }
+      }
+      if (run.debugMode && prep.kind === 'edit' && /(^|[/\\])(tests?|__tests__|spec)[/\\]|\.(test|spec)\.[a-z]+$|_test\.(py|go)$|^test_.*\.py$/i.test(u.input.path || '')) run.debugTestFiles?.add(u.input.path);
       meta.status = isError ? 'error' : 'done';
       meta.output = text.length > 20000 ? text.slice(0, 20000) + '\n…' : text;
       const images = typeof res === 'object' && Array.isArray(res.images) ? res.images : null;
@@ -1227,7 +1243,14 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const note = passed && req.qa && !useQa ? ` Your own check passed, but ${req.id} has an independent QA check: run check_requirement with use_qa: true to verify it.`
       : failedAttack ? ` The app accepted misuse it must refuse (${failedAttack.label}). Fix the app so it refuses it, then run the check again.` : '';
     const body = results.length > 1 ? `\n${lines.join('\n')}` : `: ${first.detail}`;
-    return finish(`${req.id} ${req.status === 'verified' ? 'VERIFIED' : 'NOT verified'} (${useQa ? 'QA ' : ''}${checks[0].kind}${(req.qaNeg || []).length && useQa ? ` + ${req.qaNeg.length} adversarial` : ''})${body}${note}`, passed);
+    // The same requirement failing again: debug it, do not guess.
+    let debug = '';
+    if (!passed && run) {
+      run.reqFails = run.reqFails || new Map();
+      run.reqFails.set(req.id, (run.reqFails.get(req.id) || 0) + 1);
+      if (run.reqFails.get(req.id) >= 2 && !run.debugMode) { run.debugMode = true; run.debugTestFiles = new Set(); debug = `\n${guards.DEBUG_PROTOCOL}`; this.emit('notice', { message: `${req.id} failed twice: DROPs switched the agent to step-by-step root-cause debugging.` }); }
+    }
+    return finish(`${req.id} ${req.status === 'verified' ? 'VERIFIED' : 'NOT verified'} (${useQa ? 'QA ' : ''}${checks[0].kind}${(req.qaNeg || []).length && useQa ? ` + ${req.qaNeg.length} adversarial` : ''})${body}${note}${debug}`, passed);
   }
 
   /** Runs one check definition. Browser checks use a fresh browser (no leftover login). */

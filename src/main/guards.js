@@ -122,4 +122,33 @@ function isUiFile(p) {
   return /\.(tsx|jsx|vue|svelte|astro|html|css|scss)$/.test(f);
 }
 
-module.exports = { isVerificationCommand, failureKey, LoopGuard, isUiFile };
+// ---- Root-cause debugging ----
+/**
+ * The places in this project's own code where a failure happened, from a stack trace or compiler
+ * output (Node/TS stacks, tsc "file(line,col)", Python 'File "x", line n'). Library and runtime frames
+ * are skipped. Returns up to five "path:line" strings, innermost first, relative to the project.
+ */
+function projectFrames(output, root) {
+  const text = String(output || '');
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const rootN = norm(root || '').replace(/\/+$/, '').toLowerCase();
+  const out = [];
+  const add = (file, line) => {
+    let p = norm(file).replace(/^file:\/\/\/?/, '').replace(/^\.\//, '');
+    if (/node_modules|^node:|internal\/|webpack-internal|<anonymous>|\.next\/|site-packages|\/lib\/python/i.test(p)) return;
+    if (/^[^/]*:\d/.test(p)) return; // part of a URL (host:port/...), not a file
+    if (rootN && p.toLowerCase().startsWith(rootN + '/')) p = p.slice(rootN.length + 1);
+    if (/^[a-z]:\//i.test(p) || p.startsWith('/')) return; // outside the project
+    const key = `${p}:${line}`;
+    if (!out.includes(key)) out.push(key);
+  };
+  for (const m of text.matchAll(/((?:[a-zA-Z]:)?[\w.@/\\-]+\.(?:m?[jt]sx?|cjs|vue|svelte)):(\d+)(?::\d+)?/g)) add(m[1], m[2]);
+  for (const m of text.matchAll(/([\w./\\-]+\.tsx?)\((\d+),\d+\)/g)) add(m[1], m[2]);
+  for (const m of text.matchAll(/File "([^"]+)", line (\d+)/g)) add(m[1], m[2]);
+  return out.slice(0, 5);
+}
+
+/** The engineer's debugging procedure, given when the same check keeps failing. */
+const DEBUG_PROTOCOL = "[DROPs debug] This has failed more than once. Stop changing code by guesswork and debug it like an engineer: 1) Reproduce it with the smallest command and read the whole error and stack trace. 2) Open the first frame in this project's code and trace the bad value back to where it is created. 3) Write two or three possible root causes. 4) Test each one with evidence (read the code, print the value, run a focused test) before editing. 5) Fix the root cause, not the line where it surfaced. 6) Add a regression test that fails without the fix. 7) Run the original failing check again.";
+
+module.exports = { isVerificationCommand, failureKey, LoopGuard, isUiFile, projectFrames, DEBUG_PROTOCOL };
