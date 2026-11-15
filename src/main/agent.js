@@ -138,6 +138,13 @@ const IMPACT_DEF = {
 };
 tools.registerDef(IMPACT_DEF);
 
+const AUDIT_DEF = {
+  name: 'audit',
+  description: 'Static security and performance audit of the project, by fixed rules (not guesses): secrets in code, SQL built from strings, eval, raw HTML from data, shell commands from request data, open CORS, cookies without httpOnly, plain passwords, TLS turned off, open redirects; database calls inside loops (N+1), blocking file calls in request code, unpaginated queries, very large files. Each finding has file:line, severity and a fix hint. Run it before finishing work that adds logins, forms, APIs or database code; fix every high finding. area: "security", "performance" or "all".',
+  input_schema: { type: 'object', properties: { area: { type: 'string', enum: ['all', 'security', 'performance'] } } },
+};
+tools.registerDef(AUDIT_DEF);
+
 const FIND_BREAK_DEF = {
   name: 'find_breaking_change',
   description: 'When a check (tests, build, a script) fails after your changes in this request, find which changed file causes it: DROPs puts each changed file back to its state before this request, one at a time, runs the command, and then restores every file exactly as it is now. Use it before reverting anything, so you undo only the culprit. Give the failing command.',
@@ -416,8 +423,9 @@ class AgentSession {
 6. Batch independent read-only calls in parallel in a single turn — it is much faster.
 7. If a tool call is denied or fails twice the same way, change approach instead of retrying. If truly blocked on a decision that is the user's, ask with \`ask_user\` (offer concrete options) instead of guessing.
 8. Record durable project knowledge (build/test commands, conventions, gotchas) with \`remember\` when you discover it, and design decisions with \`remember\` kind "decision" plus why. Memory and lessons are hints from the past: check them against the current code before relying on them. When you make a mistake and find the fix (a wrong assumption, a command that does not exist, a framework pitfall, stopping too early), record one short, general rule with \`learn_lesson\` so you never repeat it in any project.
-9. Never run destructive or irreversible operations (deleting data, force-push, publishing, dropping databases) unless the user explicitly asked.
-10. Finish with a short report (see "How to talk to the user"). Never claim tests pass unless you ran them.`,
+9. Before finishing work that adds logins, forms, APIs or database code, run \`audit\` and fix every high finding (confirm each in the code first).
+10. Never run destructive or irreversible operations (deleting data, force-push, publishing, dropping databases) unless the user explicitly asked.
+11. Finish with a short report (see "How to talk to the user"). Never claim tests pass unless you ran them.`,
       `# How to talk to the user
 The user sees each tool call as a compact step, so do not narrate tool output back to them.
 - Before a batch of tool calls, write one short sentence (under 20 words) saying what you are about to do, e.g. "Reading the router and its tests to find where the redirect happens." Skip it for trivial follow-up calls.
@@ -442,7 +450,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -968,6 +976,15 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
     if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
     if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
+    if (u.name === 'audit') {
+      const area = ['security', 'performance'].includes(u.input.area) ? u.input.area : 'all';
+      meta.summary = area; this.emit('tool-start', { id: u.id, name: 'audit', input: u.input, summary: area });
+      let out;
+      try { out = require('./audit').auditReport(this.data.projectDir, area); } catch (e) { out = `The audit could not run: ${e.message}`; }
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
     if (u.name === 'impact') {
       const target = String(u.input.target || '').trim();
       meta.summary = target; this.emit('tool-start', { id: u.id, name: 'impact', input: u.input, summary: target });

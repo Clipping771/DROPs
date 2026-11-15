@@ -189,7 +189,7 @@ const TOOL_DEFS = [
   },
 ];
 
-const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact']);
+const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'audit']);
 const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'remember']);
 const EXPLORE_TOOLS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url']);
 
