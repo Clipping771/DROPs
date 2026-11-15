@@ -175,3 +175,22 @@ test('browser: each step lists the API calls it made, and reload shows whether s
     assert.doesNotMatch(r.text, /unsaved view/, 'after a reload only what the server stored is shown');
   } finally { await browser.act(k, { action: 'close' }).catch(() => {}); s.close(); }
 });
+
+test('browser: a test id rendered in two different places is reported; repeated list rows are not', { timeout: 120_000 }, async (t) => {
+  if (!browser.available()) return t.skip('playwright-core not installed');
+  const s = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<title>CRM</title>
+<header class="desktop"><nav class="links"><a data-testid="nav-logout" href="/logout">Log out</a></nav></header>
+<div class="drawer" style="display:none"><ul class="menu"><li><a data-testid="nav-logout" href="/logout">Log out</a></li></ul></div>
+<table><tbody>${['Nancy', 'Olivia', 'Raj'].map((n) => `<tr data-testid="contact-row"><td data-testid="contact-name">${n}</td></tr>`).join('')}</tbody></table>`);
+  });
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const k = 'dupe-' + process.pid;
+  try {
+    let r;
+    try { r = await browser.act(k, { action: 'open', url: `http://127.0.0.1:${s.address().port}/` }); } catch (e) { if (/No browser/.test(e.message)) return t.skip(e.message); throw e; }
+    assert.match(r.text, /Duplicate test ids .*: nav-logout ×2\./);
+    assert.doesNotMatch(r.text, /contact-row ×|contact-name ×/, 'rows of one table are not duplicates');
+  } finally { await browser.act(k, { action: 'close' }).catch(() => {}); s.close(); }
+});

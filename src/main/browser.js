@@ -128,8 +128,15 @@ async function snapshot(page, s, { full = false } = {}) {
       items.push(d);
     }
     const alerts = [...document.querySelectorAll('[role="alert"], .error, [data-testid*="error"]')].filter(visible).map((e) => e.innerText.trim()).filter(Boolean).slice(0, 5);
+    // A test id rendered in two different places (e.g. a desktop and a mobile menu, one hidden) breaks
+    // automated tests that expect one element. Repeats inside one list (rows) are normal.
+    const byId = new Map();
+    for (const el of document.querySelectorAll('[data-testid]')) { const k = el.getAttribute('data-testid'); if (!byId.has(k)) byId.set(k, []); byId.get(k).push(el); }
+    // Items of one list share the same structure above them; the same id in two different places does not.
+    const shape = (el) => { const parts = []; for (let n = el.parentElement, i = 0; n && n !== document.body && i < 6; n = n.parentElement, i++) parts.push(n.tagName + '.' + [...n.classList].sort().join('.')); return parts.join('>'); };
+    const dupes = [...byId.entries()].filter(([, els]) => els.length > 1 && new Set(els.map(shape)).size > 1).map(([k, els]) => `${k} ×${els.length}`).slice(0, 8);
     const text = (document.body?.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
-    return { title: document.title, text: text.length > maxText ? text.slice(0, maxText) + `\n[… ${text.length - maxText} more characters; use action "read" with full=true]` : text, items, alerts, wide: document.documentElement.scrollWidth > window.innerWidth + 1 };
+    return { title: document.title, text: text.length > maxText ? text.slice(0, maxText) + `\n[… ${text.length - maxText} more characters; use action "read" with full=true]` : text, items, alerts, dupes, wide: document.documentElement.scrollWidth > window.innerWidth + 1 };
   }, full ? 20000 : 3000);
   const events = s.takeEvents();
   s.lastEvents = events;
@@ -139,6 +146,7 @@ async function snapshot(page, s, { full = false } = {}) {
     `Title: ${info.title || '(none)'}`,
     info.alerts.length ? `Messages shown: ${info.alerts.join(' | ')}` : '',
     info.wide ? 'Layout: the page scrolls sideways at this width.' : '',
+    info.dupes?.length ? `Duplicate test ids (the same id in different places, e.g. a desktop and a mobile menu): ${info.dupes.join(', ')}. Automated tests that look for one of these will fail: render each once, or give the copies different ids.` : '',
     events.length ? `Problems since the last step:\n- ${events.slice(0, 12).join('\n- ')}` : 'Problems since the last step: none',
     api.length ? `API calls since the last step: ${api.slice(-10).join('; ')}` : '',
     `Interactive elements (${info.items.length}):\n${info.items.map((i) => '- ' + i).join('\n') || '(none)'}`,

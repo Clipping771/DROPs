@@ -31,7 +31,7 @@ test('spec facts: real accounts only, routes, test ids and the base URL', () => 
 
 test('evidence guard: gives up after two fruitless nudges, but keeps going while checks make progress', () => {
   const reqs = [{ status: 'failed' }, { status: 'failed' }];
-  const run = {};
+  const run = { checkCalls: 1 }; // checks were run, they just did not pass
   const nudge = () => { const ok = evidenceNudgeAllowed(run, reqs); if (ok) { run.evidenceNudges = (run.evidenceNudges || 0) + 1; run.evidenceTotalNudges = (run.evidenceTotalNudges || 0) + 1; run.evidenceVerifiedAtNudge = reqs.filter((r) => r.status === 'verified').length; } return ok; };
   assert.equal(nudge(), true);
   assert.equal(nudge(), true);
@@ -42,7 +42,7 @@ test('evidence guard: gives up after two fruitless nudges, but keeps going while
   assert.equal(nudge(), false, 'everything verified: nothing to nudge');
 });
 
-function agentFor(dir, script, qa) {
+function agentFor(dir, script, qa, extra = {}) {
   let i = 0;
   const notices = [];
   providers.callModel = async ({ tools, system, messages }) => {
@@ -58,7 +58,7 @@ function agentFor(dir, script, qa) {
   const data = { id: 's', title: 'New session', projectDir: dir, messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 } };
   const agent = new AgentSession(data, {
     send: (id, type, p) => { if (type === 'notice') notices.push(p.message); }, save: () => {},
-    getSettings: () => ({ autoVerify: false, qaAgent: true, completionAudit: false, evidenceCheck: true }), getApiKey: () => 'x', getGeminiKey: () => 'x',
+    getSettings: () => ({ autoVerify: false, qaAgent: true, completionAudit: false, evidenceCheck: true, ...extra }), getApiKey: () => 'x', getGeminiKey: () => 'x',
   });
   return { agent, data, notices };
 }
@@ -181,4 +181,22 @@ test('adversarial QA: an app that accepts misuse is not verified; once it refuse
     assert.equal(fr2.status, 'verified');
     assert.deepEqual(fr2.evidence.attacks.map((a) => a.passed), [true]);
   } finally { agent.dispose(); srv.close(); providers.callModel = realCallModel; }
+});
+
+test('an agent that never runs a check is nudged up to four times, each naming the first requirement to check', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-ev-'));
+  fs.writeFileSync(path.join(dir, 'SPEC.md'), SPEC);
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node -e 0' } }));
+  const qa = { checks: [{ id: 'FR-1', kind: 'http', url: 'http://localhost:3000/', expect: 'x' }] };
+  const { agent, data } = agentFor(dir, [
+    { tool: 'write_file', input: { path: 'a.js', content: '1;\n' } },
+    { tool: 'shell', input: { command: 'npm test' } }, // a real test run, so only the evidence guard is left
+    { text: 'All requirements are met.' }, { text: 'Done.' }, { text: 'Done.' }, { text: 'Done.' }, { text: 'Done.' }, { text: 'Done.' },
+  ], qa, { autoVerify: true, uiCheck: false });
+  try {
+    await agent.send('Build the app in SPEC.md', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    const nudges = JSON.stringify(data.messages).match(/You have not run a single check yet/g) || [];
+    assert.equal(nudges.length, 4, 'four nudges, not two');
+    assert.match(JSON.stringify(data.messages), /call check_requirement with \{\\"id\\": \\"FR-1\\", \\"use_qa\\": true\}/);
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
 });

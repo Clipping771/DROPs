@@ -56,7 +56,8 @@ function evidenceNudgeAllowed(run, reqs) {
   if ((run.evidenceTotalNudges || 0) >= 8) return false;
   // A nudge that led to a new verified requirement resets the count of fruitless nudges.
   if (run.evidenceNudges && verifiedCount(reqs) > (run.evidenceVerifiedAtNudge ?? -1)) run.evidenceNudges = 0;
-  return (run.evidenceNudges || 0) < 2;
+  // An agent that has not run a single check gets more nudges (four), each naming where to start.
+  return (run.evidenceNudges || 0) < ((run.checkCalls || 0) === 0 ? 4 : 2);
 }
 /** Facts a QA check must copy exactly: demo accounts, routes, test ids and the app's base URL. */
 function specFacts(doc) {
@@ -724,7 +725,10 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
               run.evidenceTotalNudges = (run.evidenceTotalNudges || 0) + 1;
               run.evidenceVerifiedAtNudge = verifiedCount(this.data.requirements);
               const reqs = this.data.requirements, open = reqs.filter((r) => r.status !== 'verified');
-              msg = `[DROPs evidence check] ${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : r.status === 'stale' ? ' (verified before a later change; DROPs could not re-check it: keep the app running)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence.${open.some((r) => r.qa) ? ' These have independent QA checks: start the app and run check_requirement with use_qa: true for each; fix the app (never the check) until they pass.' : ' Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app).'} Fix and re-check any that fail.`;
+              const none = (run.checkCalls || 0) === 0
+                ? `You have not run a single check yet, so nothing is proven. Your next step: start the app with start_process, then call check_requirement with {"id": "${open[0].id}"${open[0].qa ? ', "use_qa": true' : ''}}, then the next one. `
+                : '';
+              msg = `[DROPs evidence check] ${none}${open.length} of ${reqs.length} requirements have no passing evidence: ${open.slice(0, 12).map((r) => `${r.id}${r.status === 'failed' ? ' (its check failed)' : r.status === 'stale' ? ' (verified before a later change; DROPs could not re-check it: keep the app running)' : ''}`).join(', ')}${open.length > 12 ? ', …' : ''}. Your statement that they work is not evidence.${open.some((r) => r.qa) ? ' These have independent QA checks: start the app and run check_requirement with use_qa: true for each; fix the app (never the check) until they pass.' : ' Build whatever is missing, then prove each one with check_requirement (a test command, browser steps that end on a page showing the expected text, or an HTTP call to the running app).'} Fix and re-check any that fail.`;
               this.emit('notice', { message: `Evidence check: ${open.length} of ${reqs.length} requirements are not verified yet; sending the agent back.` });
             } else if (run.uiIssue && (run.uiIssueNudges || 0) < 2 && this.uiCheckOn(s)) {
               // The browser showed a problem and the agent is finishing anyway ("verified").
@@ -1329,6 +1333,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       }
     }
 
+    if (run) run.checkCalls = (run.checkCalls || 0) + 1;
     const results = [];
     for (const c of checks) {
       const r = await this.runOneCheck(c, req.id, ctx, run);
