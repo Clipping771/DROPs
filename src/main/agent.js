@@ -410,11 +410,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   // ---------- main entry ----------
-  async send(text, opts, images = []) {
+  async send(text, opts, images = [], extra = {}) {
     if (this.busy) throw new Error('Agent is busy');
     this.busy = true;
-    this.abort = new AbortController();
-    const signal = this.abort.signal;
+    this.abort = extra.signal ? { signal: extra.signal, abort: () => extra.abortController?.abort() } : new AbortController();
+    const signal = extra.signal || this.abort.signal;
+    this._currentTaskId = extra.taskId || null;
+    const onProgress = extra.onProgress || (() => {});
     const s = this.settings();
     Object.assign(this.data, { model: opts.model, effort: opts.effort, mode: opts.mode });
     if (!this.data.title || this.data.title === 'New session') this.data.title = text.replace(/\s+/g, ' ').trim().slice(0, 64) || 'New session';
@@ -494,6 +496,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       for (;;) {
         if (signal.aborted) throw new Error('aborted');
         if (++run.steps > maxSteps) { this.emit('error', { message: `Stopped after ${maxSteps} steps (limit in Settings). Send "continue" to keep going.` }); this.sealTranscript(); break; }
+        onProgress({ step: run.steps, maxSteps, percent: Math.min(100, Math.round((run.steps / maxSteps) * 100)) });
         const over = budgetHit();
         if (over) { this.emit('error', { message: `${over} Send "continue" to keep going, or raise the limit in Settings.` }); this.sealTranscript(); break; }
 
@@ -646,7 +649,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         const toolImages = results.flatMap((r) => r?._images || []);
         for (const r of results) if (r) delete r._images;
         if (toolImages.length) dropOldToolImages(this.data.messages, 3 - toolImages.length);
-        this.data.messages.push({ role: 'user', content: [...results, ...toolImages, ...steer] });
+        if (steer.length) {
+          this.data.messages.push({ role: 'user', content: [...results, ...toolImages] });
+          this.data.messages.push({ role: 'user', content: steer });
+        } else {
+          this.data.messages.push({ role: 'user', content: [...results, ...toolImages] });
+        }
         this.save();
         if (signal.aborted) throw new Error('aborted');
       }

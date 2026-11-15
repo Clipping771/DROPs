@@ -231,6 +231,7 @@ const Panels = (() => {
     $('#body').classList.remove('no-insp');
     $$('#inspTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
     $$('.tab-body').forEach((b) => (b.hidden = b.dataset.body !== name));
+    if (name === 'tasks') renderTasks();
   }
   /** The right panel's overview: where this session runs, how full its context is, what it produced. */
   function overviewPanel() {
@@ -326,6 +327,112 @@ ${r.evidence.summary}` : 'No evidence yet';
     ]) { const li = h('li'); li.innerHTML = '<span><b></b><span></span></span>'; $('b', li).textContent = t; $('span > span', li).textContent = d; steps.appendChild(li); }
     wrap.appendChild(steps);
     return wrap;
+  }
+
+  async function renderTasks() {
+    const box = $('#tasksBody');
+    if (!box) return;
+    box.innerHTML = '';
+    let tasks = [];
+    try { tasks = await api.taskList(); } catch { tasks = []; }
+
+    const activeTasks = tasks.filter((t) => t.status === 'running');
+    const queuedTasks = tasks.filter((t) => t.status === 'queued');
+    const pastTasks = tasks.filter((t) => ['completed', 'failed', 'cancelled'].includes(t.status)).slice(0, 20);
+
+    const activeCount = activeTasks.length + queuedTasks.length;
+    const badge = $('#tasksBadge');
+    if (badge) {
+      badge.hidden = activeCount === 0;
+      badge.textContent = activeCount;
+    }
+
+    if (!tasks.length) {
+      box.innerHTML = '<div class="empty">No tasks recorded yet.<br><small style="color:var(--dim)">Coding tasks run in the background independently from chat.</small></div>';
+      return;
+    }
+
+    const wrap = h('div', 'tasks-list');
+
+    if (activeTasks.length) {
+      wrap.appendChild(h('div', 'glance-title', `Active (${activeTasks.length})`));
+      for (const t of activeTasks) {
+        const card = h('div', 'task-card running');
+        const dur = Math.round((Date.now() - (t.started_at || t.created_at)) / 1000);
+        card.innerHTML = `
+          <div class="task-head">
+            <span class="task-status-pill running">Running</span>
+            <span class="task-time">${dur}s</span>
+          </div>
+          <div class="task-title"></div>
+          <div class="task-progress-bar"><div style="width:${Math.max(5, t.progress?.percent || 0)}%"></div></div>
+          <div class="task-meta"><small></small></div>
+          <div class="task-actions">
+            <button class="btn sm danger btn-cancel-task">Cancel Task</button>
+          </div>
+        `;
+        $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
+        $('small', card).textContent = `Step ${t.progress?.step || 0}/${t.progress?.maxSteps || 250} · ${t.progress?.currentAction || 'Running'}`;
+        $('.btn-cancel-task', card).onclick = async () => {
+          if (!(await confirmBox('Cancel this running task?', 'This will stop the agent and any active processes for this task. The task will be marked cancelled.', 'Cancel Task'))) return;
+          await api.taskCancel(t.task_id);
+          toast('Task cancelled');
+          renderTasks();
+        };
+        wrap.appendChild(card);
+      }
+    }
+
+    if (queuedTasks.length) {
+      wrap.appendChild(h('div', 'glance-title', `Queued (${queuedTasks.length})`));
+      queuedTasks.forEach((t, idx) => {
+        const card = h('div', 'task-card queued');
+        card.innerHTML = `
+          <div class="task-head">
+            <span class="task-status-pill queued">#${idx + 1} in Queue</span>
+          </div>
+          <div class="task-title"></div>
+          <div class="task-actions">
+            <button class="btn sm btn-steer-task">Steer Now</button>
+            <button class="btn sm danger btn-remove-task">Remove</button>
+          </div>
+        `;
+        $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
+        $('.btn-remove-task', card).onclick = async () => {
+          await api.taskCancel(t.task_id);
+          toast('Removed from queue');
+          renderTasks();
+        };
+        $('.btn-steer-task', card).onclick = async () => {
+          await api.send(t.session_id, t.prompt, t.opts, t.images, { action: 'steer' });
+          await api.taskCancel(t.task_id);
+          toast('Task injected as steering instruction');
+          renderTasks();
+        };
+        wrap.appendChild(card);
+      });
+    }
+
+    if (pastTasks.length) {
+      wrap.appendChild(h('div', 'glance-title', 'Recent History'));
+      for (const t of pastTasks) {
+        const card = h('div', `task-card ${t.status}`);
+        const dur = t.completed_at && t.started_at ? Math.round((t.completed_at - t.started_at) / 1000) : 0;
+        card.innerHTML = `
+          <div class="task-head">
+            <span class="task-status-pill ${t.status}">${t.status}</span>
+            <span class="task-time">${dur ? dur + 's' : ''}</span>
+          </div>
+          <div class="task-title"></div>
+          ${t.error_info ? '<div class="task-error"></div>' : ''}
+        `;
+        $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
+        if (t.error_info) $('.task-error', card).textContent = t.error_info;
+        wrap.appendChild(card);
+      }
+    }
+
+    box.appendChild(wrap);
   }
 
   function renderPlan() {
@@ -1009,7 +1116,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
     });
   }
 
-  return { showSide, renderSessions, markSession, loadTree, refreshTreeMarks, refreshGit, refreshGitSoon, generateCommitMessage, switchTab, renderPlan, renderChanges, renderUsage, onProc, renderProcs, renderStatus, renderHero, openSettings, openPalette };
+  return { showSide, renderSessions, markSession, loadTree, refreshTreeMarks, refreshGit, refreshGitSoon, generateCommitMessage, switchTab, renderPlan, renderTasks, renderChanges, renderUsage, onProc, renderProcs, renderStatus, renderHero, openSettings, openPalette };
 })();
 
 // ---------- theme ----------

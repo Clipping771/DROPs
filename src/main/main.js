@@ -18,6 +18,7 @@ if (process.platform === 'win32' && process.env.PORTABLE_EXECUTABLE_DIR && app.i
 
 const store = require('./store');
 const { AgentSession } = require('./agent');
+const { getTaskManager } = require('./tasks');
 const providers = require('./providers');
 const gemini = require('./gemini');
 const git = require('./git');
@@ -80,6 +81,12 @@ function getAgent(id) {
   }
   return agents.get(id);
 }
+
+const taskManager = getTaskManager({
+  getAgent,
+  sendEvent: (id, type, p) => deps.send(id, type, p),
+  store,
+});
 
 // ---------- theme ----------
 const OVERLAY = { dark: { color: '#131314', symbolColor: '#c4c7c5' }, light: { color: '#ffffff', symbolColor: '#444746' } };
@@ -439,15 +446,38 @@ handle('session:export', async (id, format = 'md') => {
   return r.filePath;
 });
 
-// ---------- agent ----------
-handle('agent:send', (id, text, opts, images) => {
+// ---------- agent & tasks ----------
+handle('agent:send', async (id, text, opts, images, extra = {}) => {
   const a = getAgent(id);
   if (!a) return { error: 'Session not found' };
-  if (a.busy) return { steered: a.steer(text, images || []) };
-  a.send(text, opts, images || []).catch((err) => deps.send(id, 'error', { message: err.message }));
-  return { ok: true };
+  try {
+    return await taskManager.submitTask({
+      session_id: id,
+      workspace_id: a.data.projectDir,
+      prompt: text,
+      images: images || [],
+      opts: opts || {},
+    }, { action: extra?.action || 'queue' });
+  } catch (err) {
+    deps.send(id, 'error', { message: err.message });
+    return { error: err.message };
+  }
 });
-handle('agent:stop', (id) => { getAgent(id)?.stop(); return true; });
+handle('agent:stop', (id) => {
+  const activeTask = taskManager.getActiveTaskForSession(id);
+  if (activeTask) {
+    taskManager.cancelTask(activeTask.task_id);
+    return true;
+  }
+  getAgent(id)?.stop();
+  return true;
+});
+handle('task:list', (filter) => taskManager.listTasks(filter));
+handle('task:get', (taskId) => taskManager.getTask(taskId));
+handle('task:cancel', (taskId) => taskManager.cancelTask(taskId));
+handle('task:reorder', (sessionId, fromIdx, toIdx) => taskManager.reorderQueue(sessionId, fromIdx, toIdx));
+handle('task:remove', (sessionId, taskId) => taskManager.removeFromQueue(sessionId, taskId));
+handle('task:queue', (sessionId) => taskManager.queues.get(sessionId) || []);
 handle('agent:permission', (id, reqId, decision, feedback) => { getAgent(id)?.respond(reqId, decision, feedback); return true; });
 handle('agent:rewind', async (id, turnIndex) => {
   const a = getAgent(id);

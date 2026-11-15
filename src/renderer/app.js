@@ -442,6 +442,14 @@ function onEvent(ev) {
       if (ev.busy) v.turnStartCost = v.data.usage.cost;
       if (cur) { updateComposer(); Panels.renderStatus(); }
       Panels.markSession(v);
+      Panels.renderTasks?.();
+      break;
+    case 'task-started':
+    case 'task-queued':
+    case 'task-ended':
+    case 'task-cancelled':
+    case 'task-event':
+      Panels.renderTasks?.();
       break;
     case 'iteration-start':
       v.group = place(v, h('div', 'assistant'));
@@ -811,8 +819,8 @@ function updateComposer() {
   $('#stopBtn').hidden = !busy;
   $('#sendBtn').hidden = busy && !hasText;
   $('#sendBtn').disabled = !hasText;
-  $('#sendBtn').title = busy ? 'Steer the running agent (Enter)' : 'Send (Enter)';
-  $('#input').placeholder = busy ? 'Steer the agent: your message reaches it at the next step' : 'Ask DROPs to build, fix or explain something';
+  $('#sendBtn').title = busy ? 'Queue message for when agent finishes (Enter)' : 'Send (Enter)';
+  $('#input').placeholder = busy ? 'Task running in background: type a message to queue it after this task...' : 'Ask DROPs to build, fix or explain something';
 }
 function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 280) + 'px'; }
 function insertAtCursor(s) {
@@ -897,26 +905,38 @@ async function send() {
   t.value = ''; autosize();
   doSend(v, text || 'See the attached image.', images);
 }
-async function doSend(v, text, images) {
+async function doSend(v, text, images, action = 'queue') {
   $('#hero').hidden = true; v.el.hidden = S.current !== v.id;
-  const steering = v.busy;
-  const u = appendUser(v, text, null, images, steering ? 'Steering — delivered at the next step' : null);
-  if (!steering) u.classList.add('pending');
+  const isRunning = v.busy;
+  let tagText = null;
+  if (isRunning) {
+    tagText = action === 'steer' ? 'Steering — delivered at next step' : 'Queued — runs after current task';
+  }
+  const u = appendUser(v, text, null, images, tagText);
+  if (!isRunning) u.classList.add('pending');
   // Be honest once per session: a small local model is the main limit on how well the agent works.
   const pickedModel = v.id === S.current ? $('#modelSel').value : v.data.model;
   const mi = S.info?.models.find((x) => x.id === pickedModel);
-  if (!steering && !v.smallWarned && mi?.params && mi.params < 14 && !mi.cloud) {
+  if (!isRunning && !v.smallWarned && mi?.params && mi.params < 14 && !mi.cloud) {
     v.smallWarned = true;
     place(v, noticeEl('info', `${mi.label.split(' — ')[0]} is a small local model: fine for simple edits, weaker on big or complex projects. For those, pick Auto, Claude or a Gemini Pro model.`));
   }
   autoScroll(v, true);
-  if (!steering) { v.busy = true; v.started = Date.now(); setWorking(v, true, 'Thinking'); }
+  if (!isRunning) { v.busy = true; v.started = Date.now(); setWorking(v, true, 'Thinking'); }
   updateComposer();
   const opts = v.id === S.current ? currentOpts() : { model: v.data.model, effort: v.data.effort, mode: v.data.mode };
   Object.assign(v.data, opts);
-  if (!steering) v.data.messages.push({ role: 'user', content: text });
-  const r = await api.send(v.id, text, opts, images);
-  if (r?.error) { v.busy = false; setWorking(v, false); onEvent({ sessionId: v.id, type: 'error', message: r.error }); updateComposer(); }
+  if (!isRunning) v.data.messages.push({ role: 'user', content: text });
+  const r = await api.send(v.id, text, opts, images, { action });
+  if (r?.queued) {
+    toast(`Message queued (#${r.position})`);
+    Panels.renderTasks?.();
+  } else if (r?.steered) {
+    toast('Steering instruction delivered');
+    Panels.renderTasks?.();
+  } else if (r?.error) {
+    v.busy = false; setWorking(v, false); onEvent({ sessionId: v.id, type: 'error', message: r.error }); updateComposer();
+  }
 }
 
 async function rewind(v, turnIndex) {

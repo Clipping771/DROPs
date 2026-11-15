@@ -57,16 +57,20 @@ function toContents(messages, model) {
       }
       if (parts.length) contents.push({ role: 'model', parts });
     } else {
-      const parts = [];
+      const fnParts = [];
+      const userParts = [];
       for (const b of blocks) {
-        if (b.type === 'text' && b.text) parts.push({ text: b.text });
-        else if (b.type === 'image' && b.source?.data) parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
-        else if (b.type === 'tool_result') {
+        if (b.type === 'tool_result') {
           const text = typeof b.content === 'string' ? b.content : (b.content || []).map((c) => c.text || '').join('\n');
-          parts.push({ functionResponse: { id: b.tool_use_id, name: names.get(b.tool_use_id) || 'tool', response: b.is_error ? { error: text } : { output: text } } });
+          fnParts.push({ functionResponse: { id: b.tool_use_id, name: names.get(b.tool_use_id) || 'tool', response: b.is_error ? { error: text } : { output: text } } });
+        } else if (b.type === 'text' && b.text) {
+          userParts.push({ text: b.text });
+        } else if (b.type === 'image' && b.source?.data) {
+          userParts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
         }
       }
-      if (parts.length) contents.push({ role: 'user', parts });
+      if (fnParts.length) contents.push({ role: 'user', parts: fnParts });
+      if (userParts.length) contents.push({ role: 'user', parts: userParts });
     }
   }
   return contents;

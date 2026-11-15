@@ -88,11 +88,13 @@
       <aside class="inspector" id="inspector">
         <div class="tabs" id="inspTabs">
           <button data-tab="plan" class="on">Overview</button>
+          <button data-tab="tasks">Tasks <span class="badge" id="tasksBadge" hidden></span></button>
           <button data-tab="changes">Changes <span class="badge" id="changesBadge" hidden></span></button>
           <button data-tab="terminal">Processes <span class="badge" id="procBadge" hidden></span></button>
           <button data-tab="usage">Usage</button>
         </div>
         <div class="tab-body" data-body="plan" id="planBody"></div>
+        <div class="tab-body" data-body="tasks" id="tasksBody" hidden></div>
         <div class="tab-body" data-body="changes" id="changesBody" hidden></div>
         <div class="tab-body" data-body="terminal" id="termBody" hidden></div>
         <div class="tab-body" data-body="usage" id="usageBody" hidden></div>
