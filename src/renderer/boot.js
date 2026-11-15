@@ -81,6 +81,8 @@ async function init() {
       if (e.key === 'Enter' || e.key === 'Tab') { pickPop(Pop.idx); e.preventDefault(); return; }
       if (e.key === 'Escape') { closePop(); e.preventDefault(); e.stopPropagation(); return; }
     }
+    // Alt+Enter while the agent works: tell it now (steer). Enter: queue the message for after the task.
+    if (e.key === 'Enter' && e.altKey && currentView()?.busy) { e.preventDefault(); send('steer'); return; }
     if (e.key === 'Enter' && !e.shiftKey && (sendWithCtrl() ? e.ctrlKey : !e.ctrlKey)) { e.preventDefault(); send(); }
     if (e.key === 'Tab' && e.shiftKey) {
       e.preventDefault();

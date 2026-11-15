@@ -730,6 +730,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       const open = reqs.filter((r) => r.status !== 'verified').map((r) => r.id);
       this.emit('notice', { message: `Evidence: ${ok} of ${reqs.length} requirements verified by a check DROPs ran${open.length ? ` (not verified: ${open.slice(0, 15).join(', ')}${open.length > 15 ? ', …' : ''})` : ''}.` });
     }
+    const stoppedByUser = !!this.abort?.signal?.aborted;
     for (const [, r] of this.pending) r({ decision: 'deny', feedback: 'Stopped.' });
     this.pending.clear();
     this.busy = false;
@@ -737,8 +738,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     this.save(true);
     this.emit('status', { busy: false });
     this.emit('done', {});
-    // Steering that never got delivered becomes the next message.
-    if (this.steerQueue.length) {
+    // Steering that never got delivered: after a Stop it goes back to the user's input box; otherwise
+    // it becomes the next message.
+    if (this.steerQueue.length && stoppedByUser) {
+      const items = this.steerQueue.splice(0);
+      this.emit('steer-returned', { text: items.map((i) => i.text).join('\n\n') });
+    } else if (this.steerQueue.length) {
       const items = this.steerQueue.splice(0);
       const text = items.map((i) => i.text).join('\n\n');
       const images = items.flatMap((i) => i.images || []);
@@ -1368,7 +1373,8 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     this.pending.delete(reqId);
     r({ decision, feedback });
   }
-  stop() { this.abort?.abort(); this.steerQueue = []; }
+  // Steering not yet delivered is handed back to the user by finish(), never silently dropped.
+  stop() { this.abort?.abort(); }
 
   // ---------- compaction ----------
   async compact(opts, signal = new AbortController().signal, reason = 'manual') {

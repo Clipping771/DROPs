@@ -163,6 +163,56 @@ test('a full chat turn with a fake model runs a tool and renders the reply in th
   }
 });
 
+test('while the agent works: Enter queues above the composer (cancellable), Alt+Enter tells it now', async () => {
+  const http = require('node:http');
+  let calls = 0; const bodies = [];
+  const srv = http.createServer((req, res) => {
+    let body = ''; req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'fake:latest', details: { parameter_size: '4B' } }] }));
+      if (req.url === '/api/show') return res.end(JSON.stringify({ capabilities: ['tools'] }));
+      if (req.url !== '/api/chat') return res.end('{}');
+      const n = ++calls; bodies.push(body);
+      // Three slow tool steps, then an answer: time to type while it works.
+      setTimeout(() => res.end(JSON.stringify(n < 4
+        ? { message: { role: 'assistant', tool_calls: [{ function: { name: 'list_dir', arguments: { path: '.' } } }] }, done: true, prompt_eval_count: 5, eval_count: 5 }
+        : { message: { role: 'assistant', content: `Answer ${n}.` }, done: true, prompt_eval_count: 5, eval_count: 5 }) + '\n'), 1500);
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const proj = path.join(tmp, 'proj-queue');
+  fs.mkdirSync(proj, { recursive: true });
+  try {
+    await win.evaluate(async ({ url, projDir }) => {
+      await window.drops.setSettings({ ollamaUrl: url, ollamaEnabled: true, defaultModel: 'ollama:fake:latest', recentProjects: [projDir], autoVerify: false, completionAudit: false });
+      await setProject(projDir); await reloadModels(); await newSession();
+      document.querySelector('#modelSel').value = 'ollama:fake:latest'; syncPills();
+    }, { url: `http://127.0.0.1:${srv.address().port}`, projDir: proj });
+    await win.fill('#input', 'Look around the project');
+    await win.keyboard.press('Enter');
+    await win.waitForFunction(() => document.querySelector('#composer').classList.contains('is-busy'));
+    assert.match(await win.getAttribute('#input', 'placeholder'), /Alt\+Enter/);
+
+    // Enter: queued above the composer; cancel it.
+    await win.fill('#input', 'Queued then cancelled');
+    await win.keyboard.press('Enter');
+    await win.waitForSelector('#queueBar .queue-item', { state: 'visible' });
+    assert.match(await win.textContent('#queueBar'), /Queued then cancelled/);
+    await win.click('#queueBar .q-cancel');
+    await win.waitForSelector('#queueBar', { state: 'hidden' });
+
+    // Alt+Enter: delivered to the running agent at its next step.
+    await win.fill('#input', 'Steer: also check README');
+    await win.keyboard.press('Alt+Enter');
+    await win.waitForFunction(() => /Delivered to the agent/.test(document.querySelector('#threads')?.textContent || ''), null, { timeout: 15000 });
+    await win.waitForFunction(() => !document.querySelector('#composer').classList.contains('is-busy'), null, { timeout: 20000 });
+    assert.ok(bodies.some((b) => b.includes('[User steering] Steer: also check README')), 'the model got the steering');
+    assert.ok(!bodies.some((b) => b.includes('Queued then cancelled')), 'the cancelled message never reached the model');
+    assert.match(await win.textContent('#threads'), /Cancelled — not sent/);
+  } finally { srv.close(); }
+});
+
 test('Ctrl+Shift+L switches between light and dark themes', async () => {
   const theme = () => win.evaluate(() => document.documentElement.dataset.theme || document.body.dataset.theme || document.documentElement.className);
   const first = await theme();

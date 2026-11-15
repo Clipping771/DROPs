@@ -469,6 +469,7 @@ function onEvent(ev) {
         if (t) t.innerHTML = icon('x', 'xs') + 'Cancelled — not sent';
       }
       Panels.renderTasks?.();
+      if (cur) renderQueue();
       break;
     }
     case 'iteration-start':
@@ -573,7 +574,22 @@ function onEvent(ev) {
     }
     case 'model-switched': v.data.model = ev.model; if (cur) { $('#modelSel').value = ev.model; syncPills(); } toast(`Switched to ${ev.model}`); break;
     case 'steer-queued': break;
-    case 'steer-delivered': $$('.msg-user .tag:not(.done)', v.el).forEach((t) => { t.classList.add('done'); t.innerHTML = icon('check', 'xs') + 'Delivered to the agent'; }); break;
+    case 'steer-delivered': $$('.msg-user .tag.steer:not(.done)', v.el).forEach((t) => { t.classList.add('done'); t.innerHTML = icon('check', 'xs') + 'Delivered to the agent'; }); break;
+    case 'steer-returned': {
+      // Stop came before the agent read these: put them back in the box instead of losing them.
+      $$('.msg-user .tag.steer:not(.done)', v.el).forEach((t) => { t.innerHTML = icon('undo', 'xs') + 'Not delivered — back in the message box'; t.classList.add('done'); });
+      if (cur) { const t = $('#input'); t.value = (t.value.trim() ? t.value.trim() + '\n\n' : '') + ev.text; autosize(); updateComposer(); t.focus(); }
+      toast('Stopped before the agent read your message: it is back in the box');
+      break;
+    }
+    case 'queue-updated': {
+      // A queued message sent to the running agent now: its bubble says so, then Delivered.
+      const u = ev.steeredTask && v.el.querySelector(`.msg-user[data-task="${CSS.escape(ev.steeredTask)}"]`);
+      const t = u?.querySelector('.tag');
+      if (t) { t.classList.add('steer'); t.innerHTML = icon('zap', 'xs') + 'Steering — delivered at next step'; }
+      renderQueue();
+      break;
+    }
     case 'steer-resend': { const u = $$('.msg-user .tag:not(.done)', v.el).pop()?.closest('.msg-user'); if (u) u.classList.add('pending'); break; }
     case 'compact-start': setWorking(v, true, 'Compacting context'); place(v, noticeEl('layers', `Compacting ${ev.messages} messages to free up context…`)); break;
     case 'compacted': {
@@ -839,8 +855,36 @@ function updateComposer() {
   $('#stopBtn').hidden = !busy;
   $('#sendBtn').hidden = busy && !hasText;
   $('#sendBtn').disabled = !hasText;
-  $('#sendBtn').title = busy ? 'Queue message for when agent finishes (Enter)' : 'Send (Enter)';
-  $('#input').placeholder = busy ? 'Task running in background: type a message to queue it after this task...' : 'Ask DROPs to build, fix or explain something';
+  $('#sendBtn').title = busy ? 'Queue for after this task (Enter) · Tell the agent now (Alt+Enter)' : 'Send (Enter)';
+  $('#input').placeholder = busy ? 'Enter: queue for after this task · Alt+Enter: tell the agent now' : 'Ask DROPs to build, fix or explain something';
+  renderQueue();
+}
+
+/** Messages waiting for this session, shown above the composer, each with Run/Tell now and Cancel. */
+let queueSeq = 0;
+async function renderQueue() {
+  const bar = $('#queueBar'); const v = currentView();
+  if (!bar) return;
+  const my = ++queueSeq;
+  const items = v && api.taskQueued ? await api.taskQueued(v.id).catch(() => []) : [];
+  if (my !== queueSeq) return;
+  bar.innerHTML = '';
+  bar.hidden = !items.length;
+  for (const it of items) {
+    const row = h('div', 'queue-item');
+    row.innerHTML = `<span class="q-ic">${icon(it.restored ? 'history' : 'list', 'xs')}</span><span class="q-text"></span><span class="q-note"></span><button class="btn ghost sm q-run"></button><button class="btn ghost sm q-cancel" title="Cancel this message">${icon('x', 'xs')}</button>`;
+    $('.q-text', row).textContent = it.prompt.replace(/\s+/g, ' ').slice(0, 140);
+    $('.q-note', row).textContent = it.restored ? 'waiting since the app restarted' : '';
+    $('.q-run', row).textContent = v.busy ? 'Tell agent now' : 'Run now';
+    $('.q-run', row).onclick = async () => { const r = await api.taskRunNow(it.task_id); if (r?.error) toast(r.error); else if (r?.steered) toast('Delivered to the agent at its next step'); renderQueue(); };
+    $('.q-cancel', row).onclick = async () => {
+      await api.taskCancel(it.task_id);
+      const u = v.el.querySelector(`.msg-user[data-task="${CSS.escape(it.task_id)}"]`);
+      const t = u?.querySelector('.tag'); if (t) { t.innerHTML = icon('x', 'xs') + 'Cancelled — not sent'; t.classList.add('done'); }
+      renderQueue();
+    };
+    bar.appendChild(row);
+  }
 }
 function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 280) + 'px'; }
 function insertAtCursor(s) {
@@ -907,7 +951,7 @@ function allSlash() {
 async function loadCustomCommands() { try { S.customCommands = await api.listCommands(S.project); } catch { S.customCommands = []; } }
 function sendText(text) { $('#input').value = text; send(); }
 
-async function send() {
+async function send(action = 'queue') {
   const t = $('#input');
   const text = t.value.trim();
   if (!text && !S.attachments.length) return;
@@ -923,7 +967,7 @@ async function send() {
   const images = S.attachments.splice(0);
   renderAttachments();
   t.value = ''; autosize();
-  doSend(v, text || 'See the attached image.', images);
+  doSend(v, text || 'See the attached image.', images, action);
 }
 async function doSend(v, text, images, action = 'queue') {
   $('#hero').hidden = true; v.el.hidden = S.current !== v.id;
@@ -933,6 +977,7 @@ async function doSend(v, text, images, action = 'queue') {
     tagText = action === 'steer' ? 'Steering — delivered at next step' : 'Queued — runs after current task';
   }
   const u = appendUser(v, text, null, images, tagText);
+  if (isRunning && action === 'steer') u.querySelector('.tag')?.classList.add('steer');
   if (!isRunning) u.classList.add('pending');
   // Be honest once per session: a small local model is the main limit on how well the agent works.
   const pickedModel = v.id === S.current ? $('#modelSel').value : v.data.model;

@@ -46,14 +46,24 @@ class TaskManager {
     }
   }
 
-  // Crash / restart recovery: detect any tasks left in 'running' or 'queued' state
-  // from previous sessions and accurately mark them as failed (never falsely claim running).
+  // Crash / restart recovery. A task that was running when the app stopped is marked failed (never
+  // falsely claimed running). A message still waiting in the queue is kept: it goes back into its
+  // session's queue, in order, and waits for the user to run or cancel it (nothing starts by itself).
   recoverStaleTasks() {
     try {
       const index = this.readIndex();
       let changed = false;
+      const waiting = index.tasks.filter((e) => e.status === STATUS.QUEUED).sort((a, b) => a.created_at - b.created_at);
+      for (const entry of waiting) {
+        if (!this.queues.has(entry.session_id)) this.queues.set(entry.session_id, []);
+        this.queues.get(entry.session_id).push(entry.task_id);
+        entry.restored = true;
+        changed = true;
+        const f = path.join(TASKS_DIR(), `${entry.task_id}.json`);
+        try { const full = JSON.parse(fs.readFileSync(f, 'utf8')); full.restored = true; fs.writeFileSync(f, JSON.stringify(full, null, 2), 'utf8'); } catch {}
+      }
       for (const entry of index.tasks) {
-        if (entry.status === STATUS.RUNNING || entry.status === STATUS.QUEUED) {
+        if (entry.status === STATUS.RUNNING) {
           entry.status = STATUS.FAILED;
           entry.error_info = 'Worker process terminated unexpectedly (app restart or crash)';
           entry.completed_at = Date.now();
@@ -281,6 +291,7 @@ class TaskManager {
       try {
         await agent.send(task.prompt, task.opts, task.images || [], {
           signal: abort.signal,
+          abortController: abort, // so agent.stop() works for a task-run turn too
           taskId,
           onProgress: (p) => {
             task.progress = { ...task.progress, ...p };
@@ -324,18 +335,52 @@ class TaskManager {
     return activeRecord;
   }
 
-  // Drain the next queued task for a session
+  // Drain the next queued task for a session. Messages restored after a restart wait for the user.
   drainQueue(sessionId) {
     const queue = this.queues.get(sessionId);
     if (!queue || !queue.length) return;
 
     if (this.isSessionRunning(sessionId)) return;
 
-    const nextTaskId = queue.shift();
-    const nextTask = this.getTask(nextTaskId);
+    const nextTask = this.getTask(queue[0]);
+    if (nextTask?.restored) return;
+    queue.shift();
     if (nextTask && nextTask.status === STATUS.QUEUED) {
       this.startTask(nextTask);
     }
+  }
+
+  /** Queued messages of one session, in order (for the list above the composer). */
+  queuedFor(sessionId) {
+    return (this.queues.get(sessionId) || []).map((id) => this.getTask(id)).filter((t) => t && t.status === STATUS.QUEUED)
+      .map((t) => ({ task_id: t.task_id, title: t.title, prompt: t.prompt, created_at: t.created_at, restored: !!t.restored }));
+  }
+
+  /** The user runs a queued message now: when the session is idle it starts at once; when it is busy,
+   *  it is delivered to the running agent as steering. */
+  runQueuedNow(taskId) {
+    for (const [sid, q] of this.queues) {
+      const idx = q.indexOf(taskId);
+      if (idx < 0) continue;
+      const task = this.getTask(taskId);
+      if (!task) return { error: 'Task not found' };
+      q.splice(idx, 1);
+      delete task.restored;
+      const agent = this.deps.getAgent?.(sid);
+      if (this.isSessionRunning(sid) && agent?.busy) {
+        agent.steer(task.prompt, task.images);
+        task.status = STATUS.COMPLETED;
+        task.completed_at = Date.now();
+        task.execution_metadata = { ...(task.execution_metadata || {}), steered: true };
+        this.saveTask(task);
+        this.notifySession(sid, 'queue-updated', { queue: q, steeredTask: taskId });
+        return { steered: true };
+      }
+      task.status = STATUS.QUEUED;
+      this.startTask(task);
+      return { started: true };
+    }
+    return { error: 'That message is no longer waiting.' };
   }
 
   // Explicit user cancellation: cancels ONLY the target task

@@ -254,6 +254,42 @@ test('TEST 7 & 10: Stale worker detection on backend restart (never falsely repo
   assert.ok(recovered.completed_at > 0);
 });
 
+test('a queued message survives a restart, waits for the user, and "Run now" starts it', async () => {
+  const sid = 'sess_restart';
+  const agent = createFakeAgent(sid);
+  const before = new TaskManager({ getAgent: () => agent, sendEvent: () => {} });
+  await before.submitTask({ session_id: sid, prompt: 'first' });
+  const queued = await before.submitTask({ session_id: sid, prompt: 'second, typed while busy' });
+  assert.equal(queued.queued, true);
+  // The app quits while "first" runs: a new TaskManager starts from the files.
+  const after = new TaskManager({ getAgent: () => agent, sendEvent: () => {} });
+  const waiting = after.queuedFor(sid);
+  assert.equal(waiting.length, 1);
+  assert.equal(waiting[0].prompt, 'second, typed while busy');
+  assert.equal(waiting[0].restored, true);
+  await new Promise((r) => setTimeout(r, 200)); // "first" (old manager) ends; nothing restored starts by itself
+  after.drainQueue(sid);
+  assert.equal(after.getTask(queued.task.task_id).status, STATUS.QUEUED, 'a restored message never starts by itself');
+  const r = after.runQueuedNow(queued.task.task_id);
+  assert.equal(r.started, true);
+  await new Promise((res) => setTimeout(res, 250));
+  assert.equal(after.getTask(queued.task.task_id).status, STATUS.COMPLETED);
+  assert.deepEqual(after.queuedFor(sid), []);
+  assert.match(after.runQueuedNow('task_nope').error, /no longer waiting/);
+});
+
+test('"Tell agent now" on a queued message steers the running agent instead of waiting', async () => {
+  const sid = 'sess_steer_now';
+  const agent = createFakeAgent(sid);
+  const m = new TaskManager({ getAgent: () => agent, sendEvent: () => {} });
+  await m.submitTask({ session_id: sid, prompt: 'long task' });
+  const q = await m.submitTask({ session_id: sid, prompt: 'use blue, not red' });
+  const r = m.runQueuedNow(q.task.task_id);
+  assert.equal(r.steered, true);
+  assert.ok(agent.data.messages.some((x) => x.content === '[User steering] use blue, not red'));
+  assert.deepEqual(m.queuedFor(sid), []);
+});
+
 test('TEST 8: Explicitly cancel a task -> only the targeted task is cancelled', async () => {
   const sessionId1 = 's-cancel-1';
   const sessionId2 = 's-cancel-2';

@@ -68,6 +68,25 @@ test('a message typed while a tool runs joins the same user turn as the tool res
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
 
+test('Stop hands undelivered steering back to the user instead of losing or resending it', async () => {
+  const { agent, data, events } = session();
+  providers.callModel = async ({ signal }) => {
+    agent.steer('actually use blue');
+    setTimeout(() => agent.stop(), 10);
+    await new Promise((r, j) => { const t = setTimeout(r, 2000); signal.addEventListener('abort', () => { clearTimeout(t); j(new Error('aborted')); }); });
+    return { content: [{ type: 'text', text: 'never' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('paint it', opts);
+    const back = events.find((e) => e.type === 'steer-returned');
+    assert.equal(back?.text, 'actually use blue');
+    assert.ok(!events.some((e) => e.type === 'steer-resend'), 'not resent after a Stop');
+    assert.ok(!JSON.stringify(data.messages).includes('actually use blue'), 'never sent to the model');
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(agent.busy, false, 'no new turn started');
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});
+
 test('a short outage is retried; a quota error is not', { timeout: 30_000 }, async () => {
   let chats = 0, mode = 'outage';
   const srv = http.createServer((req, res) => {
