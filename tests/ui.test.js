@@ -92,7 +92,7 @@ test('the palette opens the Lessons window, which shows an empty list on a fresh
   await win.waitForSelector('.modal', { state: 'detached', timeout: 5000 });
 });
 
-test('Ctrl+, opens Settings and each section can be shown', async () => {
+test('Ctrl+, opens Settings, each section can be shown, and the Independent QA agent switch saves', async () => {
   await win.keyboard.press('Control+,');
   await win.waitForSelector('.settings-page', { state: 'visible' });
   for (const sec of ['general', 'providers', 'models', 'agent', 'tools', 'safety', 'appearance', 'shortcuts', 'about']) {
@@ -100,8 +100,67 @@ test('Ctrl+, opens Settings and each section can be shown', async () => {
     assert.ok(await win.isVisible(`.settings-page [data-sp="${sec}"]`), `${sec} section is shown`);
   }
   assert.match(await win.textContent('.settings-page .ver'), /DROPs/);
-  await win.keyboard.press('Escape');
+  await win.click('.settings-page [data-nav="agent"]');
+  assert.ok(await win.$eval('#setQaAgent', (el) => el.classList.contains('on')), 'Independent QA agent is on by default');
+  await win.click('#setQaAgent');
+  await win.click('#saveSettings');
   await win.waitForSelector('.settings-page', { state: 'detached', timeout: 5000 });
+  assert.equal((await win.evaluate(() => window.drops.getSettings())).qaAgent, false, 'saving turns qaAgent off');
+  await win. evaluate(() => window.drops.setSettings({ qaAgent: true }));
+});
+
+test('a full chat turn with a fake model runs a tool and renders the reply in the window', async () => {
+  const http = require('node:http');
+  let chatCalls = 0, secondBody = '';
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'fake:latest', details: { parameter_size: '4B' } }] }));
+      if (req.url === '/api/show') return res.end(JSON.stringify({ capabilities: ['tools'] }));
+      if (req.url === '/api/chat') {
+        chatCalls++;
+        if (chatCalls === 1) {
+          return res.end(JSON.stringify({
+            message: { role: 'assistant', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'hello.txt' } } }] },
+            done: true, prompt_eval_count: 12, eval_count: 6,
+          }) + '\n');
+        }
+        secondBody = body;
+        return res.end(JSON.stringify({
+          message: { role: 'assistant', content: 'I read hello.txt: **Hello from the fake project!**' },
+          done: true, prompt_eval_count: 24, eval_count: 10,
+        }) + '\n');
+      }
+      res.end('{}');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const proj = path.join(tmp, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'hello.txt'), 'Hello from the fake project!\n');
+  try {
+    await win.evaluate(async ({ url, projDir }) => {
+      await window.drops.setSettings({ ollamaUrl: url, ollamaEnabled: true, defaultModel: 'ollama:fake:latest', recentProjects: [projDir] });
+      await setProject(projDir);
+      await reloadModels();
+      document.querySelector('#modelSel').value = 'ollama:fake:latest';
+      syncPills();
+    }, { url: `http://127.0.0.1:${srv.address().port}`, projDir: proj });
+    await win.fill('#input', 'What is in hello.txt?');
+    await win.keyboard.press('Enter');
+    await win.waitForFunction(() => /Hello from the fake project!/.test(document.querySelector('#threads')?.textContent || ''), null, { timeout: 15000 });
+    await win.waitForFunction(() => !document.querySelector('#composer')?.classList.contains('is-busy'), null, { timeout: 10000 });
+    const threadText = await win.textContent('#threads');
+    assert.match(threadText, /What is in hello\.txt\?/);
+    assert.match(threadText, /hello\.txt/);
+    assert.match(threadText, /I read hello\.txt: Hello from the fake project!/);
+    assert.equal(chatCalls, 2, 'one tool call round-trip, then the final answer');
+    assert.match(secondBody, /Hello from the fake project!/, 'the tool output was sent to the model');
+  } finally {
+    srv.close();
+  }
 });
 
 test('Ctrl+Shift+L switches between light and dark themes', async () => {

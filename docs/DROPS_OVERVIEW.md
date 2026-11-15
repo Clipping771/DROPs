@@ -156,14 +156,13 @@ There is also a **spec plan note**: when the task names a requirements document 
 These numbers come from free-tier Gemini models that switch as quotas run out, so they are not a single-model measurement.
 
 ## 11. Tests
-There are 75 automated tests (`npm test`). They cover:
+There are 83 automated unit/integration tests (`npm test`) plus 10 real Electron UI tests (`npm run test:ui`). They cover:
 - the guards and the agent loop (with a scripted model);
 - MCP (with a test server) and security (dangerous commands, redaction, sensitive files);
 - worktrees, the CLI and media;
-- lessons, and the browser (real headless runs: a login journey, a dead button, missing page code);
-- the fallback chain (two fake servers) and backward compatibility of the rename.
-
-**The UI itself has no automated tests.** It is checked only by screenshots.
+- lessons, and the browser (real headless runs: a login journey, async form submissions, a dead button, missing page code, self-cancelled prefetch filtering);
+- the fallback chain (two fake servers) and backward compatibility of the rename;
+- full Electron window UI: first-run setup, navigation, palette, lessons dialog, settings panel and `qaAgent` toggle, themes, and a full chat turn with a mock model.
 
 ---
 
@@ -186,7 +185,7 @@ There are 75 automated tests (`npm test`). They cover:
 10. The Docker sandbox has network access by default, and published ports bind to localhost only. There is no CPU or memory limit for the sandbox container.
 
 **Engineering**
-11. The renderer is large vanilla JS (`app.js` and `panels.js` are about 1,000 lines each) with no component structure. UI tests now cover the main screens (see below), but deeper flows such as a full chat turn are not yet tested in the window.
+11. The renderer is large vanilla JS (`app.js` and `panels.js` are about 1,000 lines each) with no component structure. Automated UI tests (`npm run test:ui`) cover the main screens, modals, settings switches, and a full mock chat turn.
 12. The context limit is a single constant (1M tokens) for every model. Compaction quality depends on the model.
 13. Cost is unknown for models without a price entry. Free-tier fallbacks mix models silently except for notices.
 14. Windows-first: PowerShell versus bash differences, CRLF files, and a Windows-only data folder. macOS and Linux builds exist but are barely tested.
@@ -220,9 +219,9 @@ There are 75 automated tests (`npm test`). They cover:
   - When a requirement has a QA check, **only that check can verify it**. The coder's own passing check is recorded as "own check passed" but the requirement stays unverified until `check_requirement` with `use_qa: true` passes.
   - The coder cannot edit the QA check; the evidence guard tells it to fix the app, never the check.
   - Malformed QA checks (no steps, no expected text, a non-local URL) are dropped, and those requirements fall back to the coder's own checks.
-  - On by default in yolo/headless mode; setting `qaAgent: true` turns it on everywhere, `false` turns it off.
+  - On by default in yolo/headless mode; setting `qaAgent: true` turns it on everywhere, `false` turns it off. Settings includes a user-toggleable switch under Agent → Reliability.
   - Limit: the QA agent can guess a test id or route the spec does not name. A wrong QA check blocks verification of that requirement, so specs should name their routes and test ids.
-- **#11 UI tests:** `npm run test:ui` launches the real Electron app with empty, throwaway data and home folders (and no API keys), then checks: first-run Settings, the home screen, the sidebar (Ctrl+B), every right-panel tab, the Ctrl+K palette, the Lessons window, every Settings section, the theme toggle, and that no page error was logged.
+- **#11 UI tests:** `npm run test:ui` launches the real Electron app with empty, throwaway data and home folders (and no API keys), then checks: first-run Settings, the home screen, the sidebar (Ctrl+B), every right-panel tab, the Ctrl+K palette, the Lessons window, every Settings section and `qaAgent` switch persistence, the theme toggle, a full chat turn with mock tool calls, and that no page error was logged.
 
 ## 13. Questions for the reviewer
 1. Which guard would you trust least, and what would a non-phrase-based completion check look like?

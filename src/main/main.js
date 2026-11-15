@@ -144,7 +144,7 @@ const handle = (ch, fn) => ipcMain.handle(ch, async (_e, ...args) => fn(...args)
 
 // Ollama state: 'off' (setting disabled), 'missing' (not installed), 'stopped' (installed, not running),
 // 'empty' (running, no models), 'ready'.
-let ollamaModels = null, ollamaAt = 0, ollamaState = 'stopped';
+let ollamaModels = null, ollamaAt = 0, ollamaState = 'stopped', ollamaSeq = 0;
 function findOllamaExe() {
   const candidates = process.platform === 'win32'
     ? [path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'), path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Ollama', 'ollama.exe')]
@@ -161,10 +161,14 @@ async function getOllamaModels(force) {
   const s = store.getSettings();
   if (s.ollamaEnabled === false) { ollamaState = 'off'; return []; }
   if (!force && ollamaModels && Date.now() - ollamaAt < (ollamaModels.length ? 30000 : 5000)) return ollamaModels;
+  const seq = ++ollamaSeq;
   try {
-    ollamaModels = await ollama.listModels(s.ollamaUrl);
+    const list = await ollama.listModels(s.ollamaUrl);
+    if (seq !== ollamaSeq) return ollamaModels || list;
+    ollamaModels = list;
     ollamaState = ollamaModels.length ? 'ready' : 'empty';
   } catch {
+    if (seq !== ollamaSeq) return ollamaModels || [];
     ollamaModels = [];
     ollamaState = findOllamaExe() ? 'stopped' : 'missing';
   }
@@ -252,9 +256,10 @@ handle('ollama:pull', async (name) => {
 handle('settings:get', () => store.getSettings());
 handle('settings:set', async (patch) => {
   patch = { ...patch };
+  if (Array.isArray(patch.recentProjects)) for (const p of patch.recentProjects) if (p && typeof p === 'string' && fs.existsSync(p)) store.addRecentProject(p);
   delete patch.recentProjects; delete patch.lastProject; // only changed by opening a project
   if (patch.geminiKey !== undefined) geminiModels = null;
-  if (patch.ollamaUrl !== undefined || patch.ollamaEnabled !== undefined) ollamaModels = null;
+  if (patch.ollamaUrl !== undefined || patch.ollamaEnabled !== undefined) { ollamaModels = null; ollamaSeq++; }
   if (patch.providerKeys) for (const pid of Object.keys(patch.providerKeys)) oaiCache.delete(pid);
   if (patch.customBaseUrl !== undefined) oaiCache.delete('custom');
   if (patch.lmstudioUrl !== undefined || patch.lmstudioEnabled !== undefined) oaiCache.delete('lmstudio');

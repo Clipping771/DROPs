@@ -116,6 +116,33 @@ test('browser: a request the page cancelled itself (a Next.js prefetch) is not r
   } finally { s.close(); }
 });
 
+test('browser: an async fetch login followed by client navigation waits and is not flagged as unchanged', { timeout: 120_000 }, async (t) => {
+  if (!browser.available()) return t.skip('playwright-core not installed');
+  const s = http.createServer((req, res) => {
+    if (req.url === '/api/auth/login') {
+      return setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); }, 220);
+    }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (req.url === '/deals') return res.end('<title>Deals</title><h1>Pipeline</h1>');
+    res.end(`<title>Sign in</title><form id="f"><input data-testid="login-email"><button data-testid="login-submit" type="submit">Sign in</button></form>
+      <script>document.getElementById('f').onsubmit = async (e) => {
+        e.preventDefault();
+        const r = await fetch('/api/auth/login', { method: 'POST' });
+        if (r.ok) location.href = '/deals';
+      };</script>`);
+  });
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const k = 'async-login-' + process.pid;
+  try {
+    try { await browser.act(k, { action: 'open', url: `http://127.0.0.1:${s.address().port}/login` }); } catch (e) { if (/No browser/.test(e.message)) return t.skip(e.message); throw e; }
+    await browser.act(k, { action: 'fill', target: 'testid=login-email', value: 'maya@example.com' });
+    const r = await browser.act(k, { action: 'click', target: 'testid=login-submit' });
+    assert.ok(!r.issue, `async login click should not report an issue, got: ${r.issue}`);
+    assert.match(r.text, /URL: .*\/deals/);
+    assert.match(r.text, /Pipeline/);
+  } finally { s.close(); }
+});
+
 test('sandbox URL mapping: localhost ports go to the published ports, other URLs are untouched', () => {
   const { Sandbox } = require('../src/main/shell');
   const s = new Sandbox(process.cwd());

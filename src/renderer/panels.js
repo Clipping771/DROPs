@@ -628,6 +628,7 @@ ${r.evidence.summary}` : 'No evidence yet';
         <section class="set-sec" data-sp="agent"><h2>Agent</h2><p class="set-desc">How the agent works, checks its own work and explains itself.</p>
           <div class="set-card"><div class="set-sub">Reliability</div>
             ${setItem('Verification guard', 'After editing, the agent cannot finish until a real test, build or type-check passes, or it proves the failure was already there.', tgl('setVerify'))}
+            ${setItem('Independent QA agent', 'When a task names SPEC.md, a separate QA call writes browser or HTTP checks from the spec alone before coding starts.', tgl('setQaAgent'))}
             ${setItem('Auto-compact context at (tokens)', 'Older turns are summarised past this size. Lower is cheaper; higher keeps more detail.', '<input class="input num" type="number" id="setCompact" min="20000" step="10000">')}
             ${setItem('Maximum steps per request', 'Safety limit on agent iterations for one message.', '<input class="input num" type="number" id="setSteps" min="10" step="10">')}
             ${setItem('After-edit command', 'Runs after every file the agent changes, e.g. a formatter or linter. <code>{file}</code> is the changed file. Its output goes back to the agent. Leave empty to turn off.', '<input class="input" id="setAfterEdit" placeholder="npx prettier --write {file}" spellcheck="false">')}
@@ -750,7 +751,7 @@ ${r.evidence.summary}` : 'No evidence yet';
     const tog = (id, on) => { const t = $(id, m); t.classList.toggle('on', !!on); t.onclick = () => t.classList.toggle('on'); return t; };
     const T = {
       restore: tog('#setRestore', s.restoreLastProject !== false), notify: tog('#setNotify', s.notifyApproval !== false),
-      verify: tog('#setVerify', s.autoVerify !== false), explain: tog('#setExplain', s.explainMode), cheap: tog('#setCheapSub', s.cheapSubagents !== false),
+      verify: tog('#setVerify', s.autoVerify !== false), qa: tog('#setQaAgent', s.qaAgent !== false), explain: tog('#setExplain', s.explainMode), cheap: tog('#setCheapSub', s.cheapSubagents !== false),
       ollama: tog('#setOllama', s.ollamaEnabled !== false), projMcp: tog('#setProjMcp', s.allowProjectMcp), sandbox: tog('#setSandbox', s.sandbox), net: tog('#setSandboxNet', s.sandboxNetwork !== false),
     };
     let theme = s.theme || 'dark';
@@ -894,7 +895,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const patch = {
         defaultModel: sel.value, effort: $('#setEffort', m).value, mode: $('#setMode', m).value,
         compactAt: num('#setCompact', 180000, 20000), maxSteps: num('#setSteps', 250, 10), customInstructions: $('#setInstr', m).value,
-        autoVerify: T.verify.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value,
+        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value,
         autoProvider: $('#setAutoProv', m).value, cheapSubagents: T.cheap.classList.contains('on'),
         maxCostPerTask: Math.max(0, Number($('#setMaxCost', m).value) || 0), maxTokensPerTask: Math.max(0, Number($('#setMaxTok', m).value) || 0),
         ollamaEnabled: T.ollama.classList.contains('on'), ollamaUrl: $('#setOllamaUrl', m).value.trim() || 'http://localhost:11434', ollamaCtx: num('#setOllamaCtx', 16384, 4096),
@@ -913,12 +914,12 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const a = $('#setAnthropic', m).value.trim(); if (a) patch.apiKey = a;
       const g = $('#setGemini', m).value.trim(); if (g) patch.geminiKey = g;
       S.settings = await api.setSettings(patch);
-      close();
       applyAppearance(S.settings); applySendKey(); loadCustomCommands();
       await reloadModels();
       if (!currentView()) { $('#modelSel').value = usableModel(S.settings.defaultModel); syncPills(); }
       if (!$('#hero').hidden) renderHero();
       updateCtx(); renderUsage(); renderStatus();
+      close();
       toast('Settings saved');
     };
     setTimeout(() => (tab === 'providers' ? $('#setAnthropic', m) : $('#setSearch', m))?.focus({ preventScroll: true }), 60);

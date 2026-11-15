@@ -21,7 +21,7 @@ async function launch() {
 }
 
 class BrowserSession {
-  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.timer = null; this.lastStatus = null; }
+  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; }
 
   async ensure(viewport) {
     this.touch();
@@ -35,6 +35,8 @@ class BrowserSession {
     this.page.setDefaultTimeout(ACTION_TIMEOUT);
     this.page.on('console', (m) => { if (m.type() === 'error') this.events.push(`console error: ${m.text().slice(0, 300)}`); });
     this.page.on('pageerror', (e) => this.events.push(`page error: ${String(e.message || e).slice(0, 300)}`));
+    this.page.on('request', (q) => { if (['document', 'fetch', 'xhr'].includes(q.resourceType())) this.inflight.add(q); });
+    this.page.on('requestfinished', (q) => this.inflight.delete(q));
     this.page.on('response', (r) => {
       const t = r.request().resourceType();
       if (r.status() >= 400 && ['document', 'fetch', 'xhr'].includes(t)) this.events.push(`HTTP ${r.status()} ${r.request().method()} ${r.url().slice(0, 200)}`);
@@ -43,6 +45,7 @@ class BrowserSession {
       else if (r.status() >= 400 && ['script', 'stylesheet'].includes(t)) this.events.push(`HTTP ${r.status()} for the page's ${t === 'script' ? 'JavaScript' : 'CSS'} ${r.url().slice(0, 160)}: the page's code did not load, so its buttons and forms will not work. If you rebuilt the app, stop the running server and start it again.`);
     });
     this.page.on('requestfailed', (q) => {
+      this.inflight.delete(q);
       // A request the browser itself cancelled (a navigation replacing a prefetch, as Next.js does
       // with its ?_rsc= requests) is normal, not a broken app.
       if (/ERR_ABORTED|NS_BINDING_ABORTED|cancelled/i.test(q.failure()?.errorText || '')) return;
@@ -147,6 +150,26 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
   const viewport = input.width ? { width: Math.max(320, Math.min(input.width, 2560)), height: Math.max(480, Math.min(input.height || 900, 2000)) } : null;
   const page = await s.ensure(viewport);
   const settle = async () => { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {}); };
+  // Playwright's networkidle latch resolves in 0 ms once the initial page load has settled, so a
+  // click/Enter that triggers an async fetch() + router.push() needs to wait for any requests it
+  // started (plus the post-fetch navigation/DOM update) before we snapshot or judge s.unchanged.
+  const afterInteract = async (before) => {
+    await page.waitForTimeout(50).catch(() => {});
+    const deadline = Date.now() + 4000;
+    const idleLimit = Date.now() + 900;
+    while (Date.now() < deadline) {
+      if (s.inflight.size > 0) {
+        await page.waitForTimeout(80).catch(() => {});
+        if (s.inflight.size === 0) await page.waitForTimeout(80).catch(() => {});
+        continue;
+      }
+      if ((await fingerprint(page)) !== before) break;
+      if (Date.now() >= idleLimit) break;
+      await page.waitForTimeout(80).catch(() => {});
+    }
+    await settle();
+    return (await fingerprint(page)) === before;
+  };
   if (signal?.aborted) throw new Error('Stopped.');
 
   switch (action) {
@@ -159,16 +182,17 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
       await settle();
       break;
     }
-    case 'click': { const before = await fingerprint(page); await (await locate(page, input.target, 'click')).click(); await settle(); s.lastStatus = null; s.unchanged = before === await fingerprint(page); break; }
+    case 'click': { const before = await fingerprint(page); s.inflight.clear(); await (await locate(page, input.target, 'click')).click(); s.lastStatus = null; s.unchanged = await afterInteract(before); break; }
     case 'fill': await (await locate(page, input.target, 'fill')).fill(String(input.value ?? '')); break;
     case 'select': { const el = await locate(page, input.target, 'fill'); await el.selectOption({ label: String(input.value ?? '') }).catch(() => el.selectOption(String(input.value ?? ''))); } await settle(); break;
     case 'check': await (await locate(page, input.target, 'fill')).check(); break;
     case 'press': {
       const before = await fingerprint(page);
+      s.inflight.clear();
       if (input.target) await (await locate(page, input.target, 'fill')).press(input.key || 'Enter');
       else await page.keyboard.press(input.key || 'Enter');
-      await settle();
-      s.unchanged = /^(Enter|NumpadEnter)$/.test(input.key || 'Enter') && before === await fingerprint(page);
+      const same = await afterInteract(before);
+      s.unchanged = /^(Enter|NumpadEnter)$/.test(input.key || 'Enter') && same;
       break;
     }
     case 'wait': {
@@ -197,9 +221,15 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
 Note: nothing on the page changed after this step (same address, same text). If it was meant to submit, save or navigate, it did not work: find out why (failed request? page code not loaded? validation?) and fix it.` : text, issue };
 }
 
-/** A cheap signature of what the user sees: address plus visible text. */
+/** A cheap signature of what the user sees: address plus visible text and form/dialog state. */
 async function fingerprint(page) {
-  try { return page.url() + '|' + (await page.evaluate(() => document.body ? document.body.innerText : '')); } catch { return page.url(); }
+  try {
+    return page.url() + '|' + (await page.evaluate(() => {
+      if (!document.body) return '';
+      const vals = [...document.querySelectorAll('input,select,textarea')].map((e) => (e.type === 'checkbox' || e.type === 'radio' ? e.checked : e.value)).join('\x1f');
+      return document.body.innerText + '|' + vals + '|' + document.querySelectorAll('[role="dialog"],dialog[open]').length;
+    }));
+  } catch { return page.url(); }
 }
 
 async function closeAll() { await Promise.all([...sessions.values()].map((s) => s.close())); }

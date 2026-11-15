@@ -21,6 +21,7 @@ const DEFAULTS = {
   apiKeyEnc: null,
   theme: 'dark',
   autoVerify: true,
+  qaAgent: true,
   compactAt: 180000,
   maxSteps: 250,
   // models & routing
