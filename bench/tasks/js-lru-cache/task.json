@@ -1,0 +1,5 @@
+{
+  "prompt": "Implement an LRUCache class in src/lru.js with constructor(capacity), get(key) (returns undefined when missing, marks as recently used), set(key, value) (evicts the least recently used entry when over capacity) and a size getter. All operations should be O(1).",
+  "check": "node --test",
+  "category": "feature"
+}

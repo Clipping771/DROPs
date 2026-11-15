@@ -1,0 +1,9 @@
+﻿node_modules/
+dist/
+coverage/
+*.log
+
+# Secrets and local settings never go to the repository.
+.env
+.env.*
+*.key

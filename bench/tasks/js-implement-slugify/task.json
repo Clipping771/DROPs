@@ -1,0 +1,5 @@
+{
+  "prompt": "Implement slugify(text) in src/slugify.js: lowercase, strip accents (é -> e), replace any run of non-alphanumeric characters with a single \"-\", and trim leading/trailing dashes. Add tests.",
+  "check": "node --test",
+  "category": "feature"
+}

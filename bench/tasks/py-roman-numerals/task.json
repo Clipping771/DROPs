@@ -1,0 +1,5 @@
+{
+  "prompt": "Implement to_roman(n) and from_roman(s) in roman.py for 1..3999. from_roman must raise ValueError for invalid numerals (e.g. \"IIII\", \"IC\", \"ABC\", \"\").",
+  "check": "python -m unittest discover -s tests -q",
+  "category": "feature"
+}

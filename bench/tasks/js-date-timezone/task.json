@@ -1,0 +1,5 @@
+{
+  "prompt": "formatDue in src/dates.js shows the previous day for users west of UTC (e.g. \"2026-03-01\" shows as Feb 28). Fix it so a YYYY-MM-DD date always formats as that same calendar day, regardless of the machine time zone.",
+  "check": "node --test",
+  "category": "bug fix"
+}

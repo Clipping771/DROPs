@@ -1,0 +1,5 @@
+{
+  "prompt": "Rename the function getUsr to getUser everywhere in the codebase (definition, imports, call sites, exports). Behaviour must not change.",
+  "check": "node --test && node -e \"const fs=require('fs');const s=['src/users.js','src/api.js','src/report.js'].map(f=>fs.readFileSync(f,'utf8')).join();if(/getUsr/.test(s)){console.error('getUsr still present');process.exit(1)}\"",
+  "category": "refactor"
+}

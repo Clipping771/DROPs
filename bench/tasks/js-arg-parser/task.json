@@ -1,0 +1,5 @@
+{
+  "prompt": "Implement parseArgs(argv) in src/args.js. It returns { flags, positional }. Support: --name=value, --name value, boolean --flag, --no-flag (sets false), grouped short flags -abc (each true), -o value, and \"--\" ending option parsing (rest are positional). Numeric-looking values stay strings.",
+  "check": "node --test",
+  "category": "feature"
+}

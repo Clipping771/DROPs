@@ -1,0 +1,5 @@
+{
+  "prompt": "loadProfile in src/profile.js sometimes returns a Promise instead of the profile name, and errors from the store are swallowed. Fix it so it returns the display name and lets store errors propagate.",
+  "check": "node --test",
+  "category": "bug fix"
+}

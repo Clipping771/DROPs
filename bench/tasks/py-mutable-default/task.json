@@ -1,0 +1,5 @@
+{
+  "prompt": "In cart.py, carts created separately share items with each other. Find and fix the bug.",
+  "check": "python -m unittest discover -s tests -q",
+  "category": "bug fix"
+}

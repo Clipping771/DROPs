@@ -1,0 +1,37 @@
+# Example: let DROPs fix a failing build in CI and open a pull request with the fix.
+# Copy to .github/workflows/drops-fix.yml in your repository and add GEMINI_API_KEY (or ANTHROPIC_API_KEY) as a secret.
+name: DROPs auto-fix
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What should DROPs do?
+        default: Run the tests, fix every failure, and make sure the build passes.
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Install DROPs
+        run: |
+          git clone --depth 1 https://github.com/Clipping771/DROPs.git /tmp/drops
+          cd /tmp/drops && npm ci --omit=dev
+      - name: Install project dependencies
+        run: npm ci
+      - name: Run DROPs
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node /tmp/drops/src/cli.js --project . --model auto --max-cost 2 --json "${{ inputs.task }}" > drops-result.json
+      - name: Open pull request
+        if: success()
+        run: |
+          git config user.name "drops-bot" && git config user.email "drops-bot@users.noreply.github.com"
+          git checkout -b drops/fix-${{ github.run_id }}
+          git add -A && git commit -m "DROPs: ${{ inputs.task }}" || exit 0
+          git push origin HEAD
+          gh pr create --fill --body "$(node -e "console.log(require('./drops-result.json').answer)")"
+        env: { GH_TOKEN: ${{ github.token }} }

@@ -1,0 +1,5 @@
+{
+  "prompt": "Fix deepMerge in src/merge.js so that: nested plain objects are merged recursively, arrays from the override replace (not concatenate) the base, undefined values in the override are ignored, and neither input is mutated.",
+  "check": "node --test",
+  "category": "feature"
+}

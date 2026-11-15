@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'" />
+  <title>DROPs</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="titlebar">
+      <div class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6c-.3 0-.6.15-.8.4C9.4 5.3 5.6 10.2 5.6 14a6.4 6.4 0 0 0 12.8 0c0-3.8-3.8-8.7-5.6-11-.2-.25-.5-.4-.8-.4Z" fill="var(--accent)"/><path d="M9.2 14.6a2.9 2.9 0 0 0 2.6 2.8" stroke="var(--bg)" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg><span>DROPs</span></div>
+      <div class="tb-sep"></div>
+      <button class="tb-btn" id="projectBtn" title="Switch project (Ctrl+O)"><span data-icon="folder" class="sm"></span><span id="projectName">No project</span><span data-icon="chevronDown" class="xs chev"></span></button>
+      <button class="tb-btn" id="branchBtn" title="Source control" hidden><span data-icon="branch" class="sm"></span><span id="branchName"></span></button>
+      <div class="tb-title" id="sessionTitle"></div>
+      <button class="tb-btn" id="paletteBtn" title="Command palette"><span data-icon="search" class="sm"></span><span class="muted">Search or run a command</span><kbd>Ctrl K</kbd></button>
+      <button class="icon-btn" id="themeBtn" title="Toggle light/dark (Ctrl+Shift+L)"><span data-icon="sun"></span></button>
+      <button class="icon-btn" id="inspToggle" title="Toggle right panel (Ctrl+J)"><span data-icon="panelRight"></span></button>
+    </header>
+
+    <div class="body" id="body">
+      <nav class="rail">
+        <button data-view="sessions" class="on" title="Sessions"><span data-icon="chat"></span></button>
+        <button data-view="explorer" title="Explorer"><span data-icon="files"></span></button>
+        <button data-view="scm" title="Source control"><span data-icon="branch"></span><span class="count" id="scmCount" hidden></span></button>
+        <div class="spacer"></div>
+        <button id="railSettings" title="Settings (Ctrl+,)"><span data-icon="settings"></span></button>
+      </nav>
+
+      <aside class="sidebar" id="sidebar">
+        <section class="side-view" data-side="sessions">
+          <div class="pane-head"><span class="grow">Sessions</span><button class="icon-btn" id="newWorktreeBtn" title="New parallel session in its own git worktree"><span data-icon="merge"></span></button><button class="icon-btn" id="newSessionBtn" title="New session (Ctrl+N)"><span data-icon="plus"></span></button></div>
+          <div class="side-search"><input id="sessionSearch" class="input sm" placeholder="Filter sessions…" /></div>
+          <div class="pane-body" id="sessionList"></div>
+        </section>
+        <section class="side-view" data-side="explorer" hidden>
+          <div class="pane-head"><span class="grow" id="explorerTitle">Explorer</span><button class="icon-btn" id="refreshTree" title="Refresh"><span data-icon="refresh"></span></button></div>
+          <div class="side-search"><input id="treeSearch" class="input sm" placeholder="Filter files…" /></div>
+          <div class="pane-body" id="tree"></div>
+        </section>
+        <section class="side-view" data-side="scm" hidden>
+          <div class="pane-head"><span class="grow">Source control</span><button class="icon-btn" id="refreshGit" title="Refresh"><span data-icon="refresh"></span></button></div>
+          <div class="pane-body" id="scm"></div>
+        </section>
+      </aside>
+
+      <main class="chat">
+        <div class="thread-wrap" id="threadWrap">
+          <div id="threads"></div>
+          <section class="hero" id="hero"></section>
+        </div>
+        <div class="composer-wrap">
+          <div class="popup" id="popup" hidden></div>
+          <div class="composer" id="composer">
+            <div class="attachments" id="attachments" hidden></div>
+            <textarea id="input" rows="1" placeholder="Ask DROPs to build, fix or explain something"></textarea>
+            <div class="composer-bar">
+              <button class="icon-btn" id="attachBtn" title="Attach image (or paste / drop)"><span data-icon="paperclip"></span></button>
+              <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+              <label class="pill" title="Model"><span class="v" id="modelLabel"></span><span data-icon="chevronDown" class="xs"></span><select id="modelSel"></select></label>
+              <button class="pill" id="optsBtn" title="Permission mode and reasoning effort (Shift+Tab changes the mode)" aria-haspopup="menu"><span data-icon="shield" class="sm"></span><span class="v" id="optsLabel"></span><span data-icon="chevronDown" class="xs"></span></button>
+              <div id="modeSeg" hidden>
+                <button data-mode="plan">Plan</button><button data-mode="ask">Ask</button><button data-mode="auto-edit">Auto-edit</button><button data-mode="yolo">Full auto</button>
+              </div>
+              <select id="effortSel" hidden></select><span id="effortLabel" hidden></span>
+              <div class="grow"></div>
+              <div class="ctx-ring" id="ctxRing" title="Context window used" hidden><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15" class="bg"/><circle cx="18" cy="18" r="15" class="fg" id="ctxArc"/></svg><span id="ctxText" hidden></span></div>
+              <button class="send" id="sendBtn" title="Send (Enter)"><span data-icon="arrowUp"></span></button>
+              <button class="stop" id="stopBtn" title="Stop (Esc)" hidden><span data-icon="square" class="sm"></span></button>
+            </div>
+          </div>
+          <div class="hint" id="hint">Enter to send · Shift+Enter new line · messages sent while the agent works steer it live</div>
+        </div>
+      </main>
+
+      <section class="editor-pane" id="editorPane" hidden>
+        <div class="ed-tabs" id="edTabs"></div>
+        <div class="ed-bar"><span class="path" id="edPath"></span><span id="edActions"></span><button class="icon-btn" id="edClose" title="Close editor"><span data-icon="x"></span></button></div>
+        <div class="ed-host" id="edHost"><div class="loading">Loading editor…</div></div>
+      </section>
+
+      <aside class="inspector" id="inspector">
+        <div class="tabs" id="inspTabs">
+          <button data-tab="plan" class="on">Plan</button>
+          <button data-tab="changes">Changes <span class="badge" id="changesBadge" hidden></span></button>
+          <button data-tab="terminal">Processes <span class="badge" id="procBadge" hidden></span></button>
+          <button data-tab="usage">Usage</button>
+        </div>
+        <div class="tab-body" data-body="plan" id="planBody"></div>
+        <div class="tab-body" data-body="changes" id="changesBody" hidden></div>
+        <div class="tab-body" data-body="terminal" id="termBody" hidden></div>
+        <div class="tab-body" data-body="usage" id="usageBody" hidden></div>
+      </aside>
+    </div>
+
+    <footer class="statusbar" id="statusbar"></footer>
+  </div>
+
+  <script src="../../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../../node_modules/dompurify/dist/purify.min.js"></script>
+  <script src="../../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
+  <script src="../../node_modules/monaco-editor/min/vs/loader.js"></script>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+  <script src="panels.js"></script>
+  <script src="editor.js"></script>
+  <script src="boot.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "prompt": "The test \"invoice total includes tax\" in test/invoice.test.js fails. The test is correct — find the root cause and fix the code.",
+  "check": "node --test",
+  "category": "diagnosis"
+}
