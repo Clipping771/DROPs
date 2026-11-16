@@ -410,7 +410,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
           <div class="task-progress-bar"><div style="width:${Math.max(5, t.progress?.percent || 0)}%"></div></div>
           <div class="task-meta"><small></small></div>
           <div class="task-actions">
-            <button class="btn sm danger btn-cancel-task">Cancel Task</button>
+            <button class="btn sm btn-cancel-task">Stop</button>
           </div>
         `;
         $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
@@ -431,12 +431,12 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
         const card = h('div', 'task-card queued');
         card.innerHTML = `
           <div class="task-head">
-            <span class="task-status-pill queued">#${idx + 1} in Queue</span>
+            <span class="task-status-pill queued">Queued · ${idx + 1}</span>
           </div>
           <div class="task-title"></div>
           <div class="task-actions">
-            <button class="btn sm btn-steer-task">Steer Now</button>
-            <button class="btn sm danger btn-remove-task">Remove</button>
+            <button class="btn sm btn-steer-task">Send now</button>
+            <button class="btn sm btn-remove-task">Remove</button>
           </div>
         `;
         $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
@@ -456,18 +456,15 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     }
 
     if (pastTasks.length) {
-      wrap.appendChild(h('div', 'glance-title', 'Recent History'));
+      wrap.appendChild(h('div', 'glance-title', 'Recent'));
       for (const t of pastTasks) {
-        const card = h('div', `task-card ${t.status}`);
+        // One quiet row per finished task: a mark, the title, how long it took.
+        const card = h('div', `task-row ${t.status}`);
         const dur = t.completed_at && t.started_at ? Math.round((t.completed_at - t.started_at) / 1000) : 0;
-        card.innerHTML = `
-          <div class="task-head">
-            <span class="task-status-pill ${t.status}">${t.status}</span>
-            <span class="task-time">${dur ? dur + 's' : ''}</span>
-          </div>
-          <div class="task-title"></div>
-          ${t.error_info ? '<div class="task-error"></div>' : ''}
-        `;
+        const time = !dur ? '' : dur < 60 ? `${dur}s` : `${Math.round(dur / 60)}m`;
+        const mark = t.status === 'completed' ? taskMark('completed') : `<span class="tr-x" aria-hidden="true">${icon(t.status === 'failed' ? 'alert' : 'x', 'xs')}</span>`;
+        card.innerHTML = `<span class="tr-mark">${mark}</span><div class="tr-main"><div class="task-title"></div>${t.error_info ? '<div class="task-error"></div>' : ''}</div><span class="task-time">${t.status === 'completed' ? '' : t.status + (time ? ' · ' : '')}${time}</span>`;
+        card.title = t.status;
         $('.task-title', card).textContent = t.title || t.prompt?.slice(0, 60);
         if (t.error_info) $('.task-error', card).textContent = t.error_info;
         wrap.appendChild(card);
