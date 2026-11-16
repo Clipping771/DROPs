@@ -43,7 +43,7 @@ test('app: launch an Electron app, click, read, screenshot; a dead button is rep
     assert.match(r[1], /Count: 1/, 'the click worked');
     assert.match(r[2], /nothing on the page changed/, 'a dead button is reported');
     const last = data.messages.find((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image'));
-    assert.ok(last, 'the screenshot went to a model that can see images');
+    assert.ok(last, `the screenshot went to a model that can see images (the screenshot step returned: ${String(r[3]).slice(0, 600)})`);
     await new Promise((res) => setTimeout(res, 1500));
     assert.equal(browser.isOpen(`app::${APP}`), false, 'the app was closed when the request ended');
   } finally { agent.dispose(); providers.callModel = realCallModel; await browser.closeAll(); }

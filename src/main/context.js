@@ -33,7 +33,8 @@ function projectProfile(root) {
   }
   if (exists(path.join(root, 'Cargo.toml'))) { lines.push('- Rust project (Cargo)'); verify.push('cargo check', 'cargo test'); }
   if (exists(path.join(root, 'go.mod'))) { lines.push('- Go module'); verify.push('go build ./...', 'go test ./...'); }
-  const sln = fg.sync(['*.sln', '*.csproj', '*/*.csproj'], { cwd: root, deep: 2 });
+  // suppressErrors: an unreadable folder (e.g. /tmp/snap-private-tmp) must not crash the request.
+  const sln = fg.sync(['*.sln', '*.csproj', '*/*.csproj'], { cwd: root, deep: 2, suppressErrors: true });
   if (sln.length) { lines.push(`- .NET project (${sln.slice(0, 3).join(', ')})`); verify.push('dotnet build', 'dotnet test'); }
   if (exists(path.join(root, 'Makefile'))) lines.push('- Has a Makefile');
   if (exists(path.join(root, 'Dockerfile'))) lines.push('- Has a Dockerfile');
