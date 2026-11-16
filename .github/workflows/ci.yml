@@ -16,6 +16,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -32,7 +33,14 @@ jobs:
       - if: runner.os != 'Linux'
         run: npm test
       # The window itself: composer, sessions, settings, approvals (Electron, driven by Playwright).
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:ui
-      - if: runner.os != 'Linux'
-        run: npm run test:ui
+      # Its output is kept, and failures become annotations that can be read without signing in.
+      - name: UI tests
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a npm run test:ui 2>&1 | tee ui-test.log; else npm run test:ui 2>&1 | tee ui-test.log; fi
+      - name: Show UI test failures
+        if: failure()
+        shell: bash
+        run: node scripts/ci-annotate.js ui-test.log "UI test (${{ runner.os }})"
