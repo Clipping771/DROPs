@@ -10,6 +10,18 @@ const { _electron } = require('playwright-core');
 
 const root = path.join(__dirname, '..');
 let app, win, tmp;
+/** A 1440x900 window; where the screen is smaller and Windows keeps the window to the screen, the page is
+ *  zoomed out so it still lays out as a desktop window (the sidebar and right panel shown). */
+async function fitDesktop() {
+  await app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows()[0]; w.webContents.setZoomFactor(1); w.setBounds({ x: 0, y: 0, width: 1440, height: 900 }); });
+  await new Promise((r) => setTimeout(r, 300));
+  await app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    const [cw, ch] = w.getContentSize();
+    const zoom = Math.min(1, cw / 1400, ch / 820);
+    if (zoom < 1) w.webContents.setZoomFactor(Math.max(0.5, zoom));
+  });
+}
 const errors = [];
 
 before(async () => {
@@ -21,6 +33,9 @@ before(async () => {
   for (const k of Object.keys(env)) if (/^(DROPS|H2O)_|_API_KEY$/.test(k)) delete env[k]; // no keys: nothing can call a model
   app = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root, env, timeout: 60000 });
   win = await app.firstWindow();
+  // These tests check the desktop layout (sidebar and right panel), which narrow windows hide. A CI
+  // machine's screen can be small (xvfb starts at 640x480), so the window size is set, not inherited.
+  await fitDesktop();
   win.on('pageerror', (e) => errors.push(String(e.message || e)));
   win.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await win.waitForSelector('#hero', { state: 'visible', timeout: 30000 });
@@ -407,4 +422,18 @@ test('the user data stays in the test folder, and the page logged no errors', as
   const dataDir = await app.evaluate(({ app: a }) => a.getPath('userData'));
   assert.ok(dataDir.startsWith(tmp), `userData is inside the test folder (${dataDir})`);
   assert.deepEqual(errors.filter((e) => !/Autofill|DevTools|favicon/i.test(e)), []);
+});
+
+test('in a narrow window (sidebar and Settings menu hidden), Escape still closes Settings', async () => {
+  const narrow = () => app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0]; b.webContents.setZoomFactor(1); b.setMinimumSize(300, 300); b.setBounds({ x: 0, y: 0, width: 640, height: 480 }); });
+  try {
+    await narrow();
+    await win.waitForFunction(() => innerWidth <= 700);
+    await win.keyboard.press('Control+,');
+    await win.waitForSelector('.settings-page', { state: 'visible' });
+    await win.waitForTimeout(200);
+    assert.ok(await win.evaluate(() => document.querySelector('.settings-page').contains(document.activeElement)), 'focus is inside Settings, not in the chat box behind it');
+    await win.keyboard.press('Escape');
+    await win.waitForSelector('.settings-page', { state: 'detached', timeout: 5000 });
+  } finally { await fitDesktop(); }
 });

@@ -943,8 +943,11 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     document.body.appendChild(o);
     const scroller = $('.set-scroll', m);
     let offMcp = () => {}, offProg = () => {};
-    const close = () => { offMcp(); offProg(); o.remove(); applyAppearance(S.settings); $('#input')?.focus(); };
-    o.onkeydown = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    // Escape closes Settings wherever the focus is: in a narrow window the search box is hidden, focus
+    // stayed in the chat box behind Settings, and Escape never reached it.
+    const onEsc = (e) => { if (e.key === 'Escape' && document.body.contains(o) && !document.querySelector('.overlay')) { e.preventDefault(); e.stopPropagation(); close(); } };
+    const close = () => { document.removeEventListener('keydown', onEsc, true); offMcp(); offProg(); o.remove(); applyAppearance(S.settings); $('#input')?.focus(); };
+    document.addEventListener('keydown', onEsc, true);
     $$('[data-close]', m).forEach((b) => (b.onclick = close));
     // Navigation: jump to a section; highlight the section in view while scrolling.
     const navTo = (k, smooth = true) => {
@@ -1179,7 +1182,13 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       close();
       toast('Settings saved');
     };
-    setTimeout(() => (tab === 'providers' ? $('#setAnthropic', m) : $('#setSearch', m))?.focus({ preventScroll: true }), 60);
+    setTimeout(() => {
+      // Keyboard focus goes into Settings: the first field, or Settings itself when that field is hidden
+      // (the search box is hidden in a narrow window).
+      const f = tab === 'providers' ? $('#setAnthropic', m) : $('#setSearch', m);
+      if (f && f.offsetParent) f.focus({ preventScroll: true });
+      else { o.tabIndex = -1; o.focus({ preventScroll: true }); }
+    }, 60);
   }
 
   // ---------- command palette ----------

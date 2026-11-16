@@ -29,7 +29,7 @@ jobs:
       - run: npm run lint
       # Some tests start an Electron app; Linux runners have no screen, so they get a virtual one.
       - if: runner.os == 'Linux'
-        run: xvfb-run -a npm test
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" npm test
       - if: runner.os != 'Linux'
         run: npm test
       # The window itself: composer, sessions, settings, approvals (Electron, driven by Playwright).
@@ -39,7 +39,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a npm run test:ui 2>&1 | tee ui-test.log; else npm run test:ui 2>&1 | tee ui-test.log; fi
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1920x1080x24" npm run test:ui 2>&1 | tee ui-test.log; else npm run test:ui 2>&1 | tee ui-test.log; fi
       - name: Show UI test failures
         if: failure()
         shell: bash
