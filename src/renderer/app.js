@@ -100,20 +100,31 @@ function waterOrbSVG(size = 22) {
 }
 function setWorking(v, on, label = 'Working') {
   if (on) {
-    // Just the drop. The state is kept for hover and screen readers only.
+    // The drop, plus one quiet line: what it is doing · how long · tokens written this turn.
     if (!v.working) {
       v.working = h('div', 'working');
       v.working.setAttribute('role', 'status');
-      v.working.innerHTML = waterOrbSVG(26);
+      v.working.innerHTML = waterOrbSVG(22) + '<span class="wl-label"></span><span class="wl-meta"></span>';
     }
     if (!v.started) v.started = Date.now();
+    v.workLabel = label;
     v.working.title = label + '…';
     v.working.setAttribute('aria-label', label + '…');
+    tickWorking(v);
+    if (!v.workTimer) v.workTimer = setInterval(() => tickWorking(v), 1000);
     v.el.appendChild(v.working);
     autoScroll(v);
   } else {
+    clearInterval(v.workTimer); v.workTimer = null;
     if (v.working) v.working.remove();
   }
+}
+function fmtElapsed(ms) { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; }
+function tickWorking(v) {
+  if (!v.working) return;
+  const out = Math.max(0, (v.data.usage?.output || 0) - (v.turnStartOut || 0));
+  v.working.querySelector('.wl-label').textContent = (v.workLabel || 'Working') + '…';
+  v.working.querySelector('.wl-meta').textContent = `${fmtElapsed(Date.now() - (v.started || Date.now()))}${out ? ` · ${fmtTok(out)} tokens` : ''}`;
 }
 
 function renderHistory(v) {
@@ -460,7 +471,7 @@ function onEvent(ev) {
     case 'status':
       v.busy = ev.busy;
       setWorking(v, ev.busy);
-      if (ev.busy) v.turnStartCost = v.data.usage.cost;
+      if (ev.busy) { v.turnStartCost = v.data.usage.cost; v.turnStartOut = v.data.usage.output || 0; }
       if (cur) { updateComposer(); Panels.renderStatus(); }
       Panels.markSession(v);
       Panels.renderTasks?.();
@@ -473,6 +484,7 @@ function onEvent(ev) {
       // A message that waited in the queue: when it starts, it moves below the previous answer;
       // if it is cancelled, it says so.
       const u = ev.task_id && v.el.querySelector(`.msg-user[data-task="${CSS.escape(ev.task_id)}"]`);
+      if (u && (ev.type === 'task-started' || ev.type === 'task-cancelled')) u.querySelector('.send-now')?.remove();
       if (u && ev.type === 'task-started') {
         u.querySelector('.tag')?.remove();
         u.classList.add('pending'); // its turn-start adds the Rewind button
@@ -551,7 +563,10 @@ function onEvent(ev) {
       if (isShellTool(ev.name) || ev.name === 'start_process') c.setCommand(ev.input.command);
       if (ev.mcp) c.setCommand(JSON.stringify(ev.input));
       if (ev.diff) c.setDiff(ev.diff);
-      setWorking(v, true, isShellTool(ev.name) ? 'Running command' : ev.mcp ? 'Calling MCP tool' : ev.name === 'task' ? 'Sub-agent researching' : 'Working');
+      {
+        const what = String(ev.summary || '').replace(/\s+/g, ' ').slice(0, 60);
+        setWorking(v, true, isShellTool(ev.name) ? (what ? `Running ${what}` : 'Running a command') : ev.mcp ? 'Calling MCP tool' : ev.name === 'task' ? (what ? `Sub-agent: ${what}` : 'Sub-agent working') : what ? `${toolInfo(ev.name)[0]} ${what}` : toolInfo(ev.name)[0]);
+      }
       break;
     }
     case 'sub-step': v.tools.get(ev.id)?.addStep(ev.line); break;
@@ -606,6 +621,7 @@ function onEvent(ev) {
       const u = ev.steeredTask && v.el.querySelector(`.msg-user[data-task="${CSS.escape(ev.steeredTask)}"]`);
       const t = u?.querySelector('.tag');
       if (t) { t.classList.add('steer'); t.innerHTML = icon('zap', 'xs') + 'Steering — delivered at next step'; }
+      u?.querySelector('.send-now')?.remove();
       renderQueue();
       break;
     }
@@ -629,6 +645,8 @@ function onEvent(ev) {
     }
     case 'done': {
       setWorking(v, false);
+      // Finished while you were looking at another session: mark it unread in the sidebar.
+      if (S.current !== v.id) (S.unread ||= new Set()).add(v.id);
       v.waiting.clear();
       if (!ev.quiet) {
         const spent = v.data.usage.cost - v.turnStartCost;
@@ -707,15 +725,24 @@ function wrapUpCard(v, box, live) {
 }
 
 /** The task list under the latest message, updated live while the agent works. */
+/** The task state mark: a dashed circle (to do), a spinning ring (now), a filled circle with a tick (done). */
+function taskMark(status) {
+  if (status === 'completed') return '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7" class="tm-done"/><path d="M4.8 8.2l2.1 2.1 4.3-4.6" fill="none" class="tm-tick" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  if (status === 'in_progress') return '<span class="tm-spin" aria-hidden="true"></span>';
+  return '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" class="tm-todo" stroke-width="1.3" stroke-dasharray="2.6 2.4"/></svg>';
+}
+window.taskMark = taskMark;
+
 function renderTaskCard(v) {
   const todos = v.data.todos || [];
   if (!todos.length) { v.taskCard?.remove(); v.taskCard = null; return; }
   if (!v.taskCard) v.taskCard = h('div', 'task-card-inline');
   const done = todos.filter((t) => t.status === 'completed').length;
-  v.taskCard.innerHTML = `<div class="tci-head"><span>Tasks</span><span class="tci-count">${done} / ${todos.length}</span></div>`;
+  v.taskCard.innerHTML = '';
+  v.taskCard.setAttribute('aria-label', `Tasks: ${done} of ${todos.length} done`);
   for (const t of todos) {
     const r = h('div', 'tci-row ' + t.status);
-    r.innerHTML = `<span class="tci-ic">${icon(t.status === 'completed' ? 'check' : t.status === 'in_progress' ? 'play' : 'square', 'xs')}</span>`;
+    r.innerHTML = `<span class="tci-ic">${taskMark(t.status)}</span>`;
     r.appendChild(h('span', 'tci-t', t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content));
     v.taskCard.appendChild(r);
   }
@@ -809,7 +836,9 @@ async function openSession(id) {
     v = makeView(data);
   } else if (v.data.projectDir !== S.project) await setProject(v.data.projectDir, true);
   S.current = id;
+  S.unread?.delete(id);
   showCurrent();
+  Panels.renderSessions(false);
 }
 async function newSession() {
   if (!S.project) { const p = await api.openProject(); if (!p) return; await setProject(p); }
@@ -925,8 +954,8 @@ function updateComposer() {
   $('#stopBtn').hidden = !busy;
   $('#sendBtn').hidden = busy && !hasText;
   $('#sendBtn').disabled = !hasText;
-  $('#sendBtn').title = busy ? 'Queue for after this task (Enter) · Tell the agent now (Alt+Enter)' : 'Send (Enter)';
-  $('#input').placeholder = busy ? 'Enter: queue for after this task · Alt+Enter: tell the agent now' : 'Ask DROPs to build, fix or explain something';
+  $('#sendBtn').title = busy ? 'Send now: the agent reads it at its next step (Enter) · Queue for after this task (Ctrl+Enter)' : 'Send (Enter)';
+  $('#input').placeholder = busy ? 'Enter to send now, Ctrl+Enter to queue for later' : 'Ask DROPs to build, fix or explain something';
   renderQueue();
 }
 
@@ -1066,7 +1095,13 @@ async function doSend(v, text, images, action = 'queue') {
   if (!isRunning) v.data.messages.push({ role: 'user', content: text });
   const r = await api.send(v.id, text, opts, images, { action });
   if (r?.queued) {
-    if (r.task?.task_id) u.dataset.task = r.task.task_id;
+    if (r.task?.task_id) {
+      u.dataset.task = r.task.task_id;
+      // Like Claude Code: a queued message can still be sent now, to the running agent.
+      const now = h('button', 'btn ghost sm send-now'); now.innerHTML = icon('arrowUp', 'xs') + 'Send now';
+      now.onclick = async () => { now.disabled = true; const x = await api.taskRunNow(r.task.task_id); if (x?.error) { toast(x.error); now.disabled = false; } else now.remove(); };
+      u.appendChild(now);
+    }
     toast(`Message queued (#${r.position})`);
     Panels.renderTasks?.();
   } else if (r?.steered) {

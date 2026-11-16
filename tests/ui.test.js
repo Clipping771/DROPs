@@ -163,7 +163,7 @@ test('a full chat turn with a fake model runs a tool and renders the reply in th
   }
 });
 
-test('while the agent works: Enter queues above the composer (cancellable), Alt+Enter tells it now', async () => {
+test('while the agent works: Ctrl+Enter queues (Send now, Cancel), Enter tells it now; the sidebar and a live line show it working', async () => {
   const http = require('node:http');
   let calls = 0; const bodies = [];
   const srv = http.createServer((req, res) => {
@@ -192,24 +192,31 @@ test('while the agent works: Enter queues above the composer (cancellable), Alt+
     await win.fill('#input', 'Look around the project');
     await win.keyboard.press('Enter');
     await win.waitForFunction(() => document.querySelector('#composer').classList.contains('is-busy'));
-    assert.match(await win.getAttribute('#input', 'placeholder'), /Alt\+Enter/);
+    assert.match(await win.getAttribute('#input', 'placeholder'), /Enter to send now, Ctrl\+Enter to queue for later/);
+    // The sidebar shows the session working, and a live line says what, how long, how many tokens.
+    await win.waitForSelector('#sessionList .row.session.on.busy .dot', { timeout: 10000 });
+    await win.waitForFunction(() => /…\s*\d+s/.test(document.querySelector('.working')?.textContent || ''), null, { timeout: 10000 }); // the "·" is drawn by CSS
 
-    // Enter: queued above the composer; cancel it.
+    // Ctrl+Enter: queued above the composer, with Send now on the bubble; cancel it.
     await win.fill('#input', 'Queued then cancelled');
-    await win.keyboard.press('Enter');
+    await win.keyboard.press('Control+Enter');
     await win.waitForSelector('#queueBar .queue-item', { state: 'visible' });
     assert.match(await win.textContent('#queueBar'), /Queued then cancelled/);
+    assert.equal(await win.locator('.msg-user .send-now').count(), 1, 'the queued bubble offers Send now');
     await win.click('#queueBar .q-cancel');
     await win.waitForSelector('#queueBar', { state: 'hidden' });
+    await win.waitForFunction(() => !document.querySelector('.msg-user .send-now'), null, { timeout: 5000 });
 
-    // Alt+Enter: delivered to the running agent at its next step.
+    // Enter: delivered to the running agent at its next step (like Claude Code).
     await win.fill('#input', 'Steer: also check README');
-    await win.keyboard.press('Alt+Enter');
+    await win.keyboard.press('Enter');
     await win.waitForFunction(() => /Delivered to the agent/.test(document.querySelector('#threads')?.textContent || ''), null, { timeout: 15000 });
     await win.waitForFunction(() => !document.querySelector('#composer').classList.contains('is-busy'), null, { timeout: 20000 });
     assert.ok(bodies.some((b) => b.includes('[User steering] Steer: also check README')), 'the model got the steering');
     assert.ok(!bodies.some((b) => b.includes('Queued then cancelled')), 'the cancelled message never reached the model');
     assert.match(await win.textContent('#threads'), /Cancelled — not sent/);
+    await win.waitForFunction(() => !document.querySelector('#sessionList .row.session.on.busy'), null, { timeout: 5000 });
+    assert.equal(await win.locator('.working').count(), 0, 'the live line goes away when the turn ends');
   } finally { srv.close(); }
 });
 
@@ -244,7 +251,10 @@ test('a turn shows a live task list, ends with a next-step box whose button repl
     await win.fill('#input', 'file ta ki bole?');
     await win.keyboard.press('Enter');
     await win.waitForSelector('.task-card-inline', { state: 'visible', timeout: 15000 });
-    assert.match(await win.textContent('.task-card-inline'), /Tasks\s*1 \/ 2.*Read the file.*Explain it/s);
+    assert.match(await win.textContent('.task-card-inline'), /Read the file.*Explain it/s);
+    assert.equal(await win.getAttribute('.task-card-inline', 'aria-label'), 'Tasks: 1 of 2 done');
+    assert.equal(await win.locator('.task-card-inline .tci-row.completed .tm-done').count(), 1, 'done: a filled circle with a tick');
+    assert.equal(await win.locator('.task-card-inline .tci-row.in_progress .tm-spin').count(), 1, 'now: a spinning ring');
     await win.waitForSelector('.wrapup', { state: 'visible', timeout: 15000 });
     const box = await win.textContent('.wrapup');
     assert.match(box, /Ami file ta porechi/);

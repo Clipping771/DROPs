@@ -53,9 +53,11 @@ const Panels = (() => {
       for (const s of items.slice(0, limit)) {
         const it = h('div', 'row session' + (s.id === S.current ? ' on' : ''));
         it.dataset.id = s.id;
+        it.dataset.failed = s.failed ? '1' : '';
         it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${timeAgo(s.updated)}${s.cost ? ' · ' + fmtCost(s.cost) : ''}</span></span><span class="acts"><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
         $('.tt', it).textContent = s.title;
         it.title = s.title;
+        applyStatus(it, S.views.get(s.id), s);
         it.onclick = () => openSession(s.id);
         const [ren, del] = $$('.acts button', it);
         ren.onclick = async (e) => {
@@ -79,9 +81,24 @@ const Panels = (() => {
   }
   function markSession(v) {
     const it = document.querySelector(`.row.session[data-id="${v.id}"]`);
-    if (!it) return;
-    it.classList.toggle('busy', v.busy && !v.waiting.size);
-    it.classList.toggle('waiting', v.waiting.size > 0);
+    if (it) applyStatus(it, v, null);
+  }
+  /** One status per session row: working, needs you, stopped by an error, or finished while you were elsewhere. */
+  function applyStatus(it, v, summary) {
+    const busy = !!v?.busy && !(v.waiting?.size);
+    const waiting = !!(v?.waiting?.size);
+    const lastText = (() => { const m = v?.data?.messages?.[v.data.messages.length - 1]; return m && m.role === 'assistant' && Array.isArray(m.content) ? m.content.map((b) => b.text || '').join(' ') : ''; })();
+    const failed = !busy && !waiting && (v ? lastText.startsWith('[DROPs] Stopped by an error:') : (summary?.failed || it.dataset.failed === '1'));
+    const unread = !busy && !waiting && !failed && S.unread?.has(it.dataset.id);
+    it.classList.toggle('busy', busy);
+    it.classList.toggle('waiting', waiting);
+    it.classList.toggle('failed', !!failed);
+    it.classList.toggle('unread', !!unread);
+    const dot = it.querySelector('.dot');
+    if (dot) {
+      dot.innerHTML = failed ? icon('alert', 'xs') : '';
+      dot.title = busy ? 'Working' : waiting ? 'Needs your answer' : failed ? 'Stopped by an error' : unread ? 'Finished: not seen yet' : '';
+    }
   }
 
   // ---------- explorer ----------
@@ -268,6 +285,28 @@ const Panels = (() => {
     const spend = section('Usage');
     row(spend, 'gauge', 'Spent', u && u.cost ? fmtCost(u.cost) : '$0.00', () => switchTab('usage'));
 
+    // Background tasks: dev servers and other processes the agent left running, with a live timer and Stop.
+    const procs = v ? [...v.procs.values()] : [];
+    if (procs.length) {
+      const live = procs.filter((p) => p.running), done = procs.length - live.length;
+      const bg = section('Background tasks');
+      for (const p of live) {
+        const r = h('div', 'glance-row bg-row');
+        r.innerHTML = `${icon('terminal', 'sm')}<span class="gl"></span><span class="gv bg-time mono" data-start="${p.startedAt || ''}"></span><button class="icon-btn bg-stop" title="Stop this process">${icon('square', 'xs')}</button>`;
+        $('.gl', r).textContent = p.name || p.command || p.id; r.title = p.command || '';
+        $('.gl', r).onclick = () => switchTab('terminal');
+        $('.bg-stop', r).onclick = async () => { await api.procStop(v.id, p.id); toast(`Stopped ${p.name || p.id}`); };
+        bg.appendChild(r);
+      }
+      if (done) {
+        const r = h('button', 'glance-row link bg-done');
+        r.innerHTML = `${icon('check', 'sm')}<span class="gl">${done} finished</span>`;
+        r.onclick = () => switchTab('terminal');
+        bg.appendChild(r);
+      }
+      tickBackground();
+    }
+
     // Requirements: verified only by checks DROPs ran itself.
     const reqs = v?.data.requirements || [];
     if (reqs.length) {
@@ -446,7 +485,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     const head = h('div', 'todo-head'); head.innerHTML = `<span>Task plan</span><span>${done}/${todos.length}</span>`;
     const pr = h('div', 'progress'); const bar = h('div'); bar.style.width = `${(done / todos.length) * 100}%`; pr.appendChild(bar);
     box.append(head, pr);
-    for (const t of todos) { const r = h('div', 'todo ' + t.status); r.innerHTML = `<span class="box">${t.status === 'completed' ? icon('check', 'xs') : ''}</span>`; r.appendChild(h('span', 't', t.content)); box.appendChild(r); }
+    for (const t of todos) { const r = h('div', 'todo ' + t.status); r.innerHTML = `<span class="box">${window.taskMark ? window.taskMark(t.status) : ''}</span>`; r.appendChild(h('span', 't', t.content)); box.appendChild(r); }
   }
   function renderChanges() {
     if (!$('#planBody').hidden) renderPlan();
@@ -518,15 +557,33 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     box.appendChild(b);
   }
 
+  // Live timers of the background tasks shown in the Overview panel.
+  let bgTimer = null;
+  function tickBackground() {
+    const update = () => {
+      const els = document.querySelectorAll('#planBody .bg-time');
+      if (!els.length) { clearInterval(bgTimer); bgTimer = null; return; }
+      for (const el of els) {
+        const t0 = Number(el.dataset.start);
+        if (!t0) { el.textContent = 'running'; continue; }
+        const s = Math.round((Date.now() - t0) / 1000);
+        el.textContent = s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+      }
+    };
+    update();
+    if (!bgTimer) bgTimer = setInterval(update, 1000);
+  }
+
   // processes
   function onProc(v, ev) {
     let p = v.procs.get(ev.id);
-    if (ev.started) { p = { id: ev.id, name: ev.name, command: ev.command, running: true, code: null, out: '' }; v.procs.set(ev.id, p); }
+    if (ev.started) { p = { id: ev.id, name: ev.name, command: ev.command, running: true, code: null, out: '', startedAt: Date.now() }; v.procs.set(ev.id, p); }
     if (!p) return;
     if (ev.chunk) { p.out += ev.chunk; if (p.out.length > 200000) p.out = p.out.slice(-150000); }
     if (ev.exited) { p.running = false; p.code = ev.code; }
     if (S.current !== v.id) return;
-    if (ev.started || ev.exited) { renderProcs(); renderStatus(); if (ev.started) switchTab('terminal'); return; }
+    // Like Claude Code: a process starting does not pull you away; it shows under Background tasks.
+    if (ev.started || ev.exited) { renderProcs(); renderStatus(); renderPlan(); return; }
     const pre = document.querySelector(`.proc[data-id="${ev.id}"] pre`);
     if (pre) { const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40; pre.textContent = p.out.slice(-20000); if (stick) pre.scrollTop = pre.scrollHeight; }
   }
@@ -664,7 +721,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
   const SHORTCUTS = [
     ['Command palette', 'Ctrl K'], ['New session', 'Ctrl N'], ['Open project', 'Ctrl O'], ['Settings', 'Ctrl ,'],
     ['Toggle sidebar', 'Ctrl B'], ['Toggle right panel', 'Ctrl J'], ['Focus the message box', 'Ctrl L'], ['Light / dark theme', 'Ctrl Shift L'],
-    ['Cycle permission mode', 'Shift Tab'], ['New line in a message', 'Shift Enter'], ['Stop the agent', 'Esc'], ['While the agent works: tell it now (Enter queues)', 'Alt Enter'],
+    ['Cycle permission mode', 'Shift Tab'], ['New line in a message', 'Shift Enter'], ['Stop the agent', 'Esc'], ['While the agent works: queue a message for later (Enter sends now)', 'Ctrl Enter'],
   ];
   // One settings row: label + description on the left, control on the right.
   const setItem = (label, desc, ctrl, cls = '') => `<div class="set-item ${cls}"><div class="set-label">${label}${desc ? `<small>${desc}</small>` : ''}</div><div class="set-ctrl">${ctrl}</div></div>`;
