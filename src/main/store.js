@@ -98,16 +98,51 @@ function getSettings() {
   const anyOai = Object.entries(providers).some(([id, p]) => p.enabled && id !== 'lmstudio');
   // Without an OS key store (e.g. Linux with no keyring) keys are only base64-encoded on disk: say so.
   const stored = [apiKeyEnc, geminiKeyEnc, ...Object.values(providerKeysEnc || {})].filter(Boolean);
-  const keyStoreAvailable = safeStorage ? !!safeStorage.isEncryptionAvailable?.() : true;
+  const keyStoreAvailable = safeStorage ? asyncKeyStore !== false : true;
   return {
     ...pub, keyStoreAvailable, plainKeysSaved: stored.some((k) => String(k).startsWith('raw:')), hasAnthropic, hasGemini, providers, hasKey: hasAnthropic || hasGemini || anyOai,
     keyFromEnv: !apiKeyEnc && !!process.env.ANTHROPIC_API_KEY,
     geminiFromEnv: !geminiKeyEnc && !!geminiEnv(),
   };
 }
-const encrypt = (v) => (safeStorage?.isEncryptionAvailable?.()
+// Electron 45 deprecates safeStorage's synchronous calls. In the app, keys are decrypted once at start
+// (init) and encrypted when saved (setSettingsAsync) with the asynchronous ones; the stored format is the
+// same ("v10" on Windows), so older saved keys and the headless CLI keep working. The synchronous calls
+// below are only a fallback for code that runs before init.
+let asyncKeyStore = null; // true / false once init has asked the OS key store
+const encrypt = (v) => (safeStorage && (asyncKeyStore ?? safeStorage.isEncryptionAvailable?.())
   ? 'enc:' + safeStorage.encryptString(v).toString('base64')
   : 'raw:' + Buffer.from(v).toString('base64'));
+async function encryptAsync(v) {
+  if (safeStorage?.encryptStringAsync && asyncKeyStore) {
+    const enc = 'enc:' + (await safeStorage.encryptStringAsync(v)).toString('base64');
+    decrypted.set(enc, v);
+    return enc;
+  }
+  return encrypt(v);
+}
+/** Asks the OS key store once (after the app is ready) and decrypts every saved key into memory. */
+async function init() {
+  if (!safeStorage?.isAsyncEncryptionAvailable) return;
+  asyncKeyStore = !!(await safeStorage.isAsyncEncryptionAvailable());
+  if (!asyncKeyStore) return;
+  const s = getSettingsRaw();
+  let changed = false;
+  const open = async (enc) => {
+    if (!enc || !enc.startsWith('enc:') || decrypted.has(enc)) return enc;
+    try {
+      const r = await safeStorage.decryptStringAsync(Buffer.from(enc.slice(4), 'base64'));
+      decrypted.set(enc, r.result);
+      // The OS rotated its key: store the value again under the new one.
+      if (r.shouldReEncrypt) { changed = true; return encryptAsync(r.result); }
+    } catch { /* unreadable here (another account or machine): treated as missing */ }
+    return enc;
+  };
+  if (s.apiKeyEnc) s.apiKeyEnc = await open(s.apiKeyEnc);
+  if (s.geminiKeyEnc) s.geminiKeyEnc = await open(s.geminiKeyEnc);
+  for (const id of Object.keys(s.providerKeysEnc || {})) s.providerKeysEnc[id] = await open(s.providerKeysEnc[id]);
+  if (changed) writeSettingsFile(s);
+}
 let cachedOsCryptKey;
 function getOsCryptKey() {
   if (cachedOsCryptKey !== undefined) return cachedOsCryptKey;
@@ -140,7 +175,8 @@ const decryptRaw = (enc) => {
   try {
     const buf = Buffer.from(enc.slice(4), 'base64');
     if (!enc.startsWith('enc:')) return buf.toString();
-    if (safeStorage?.isEncryptionAvailable?.()) return safeStorage.decryptString(buf);
+    // In the app every saved key was decrypted by init; this is the fallback before init and in the CLI.
+    if (safeStorage && !(process.platform === 'win32' && buf.subarray(0, 3).toString('ascii') === 'v10') && safeStorage.isEncryptionAvailable?.()) return safeStorage.decryptString(buf);
     if (buf.subarray(0, 3).toString('ascii') === 'v10') {
       const masterKey = getOsCryptKey();
       if (!masterKey) return null;
@@ -151,18 +187,29 @@ const decryptRaw = (enc) => {
     return null;
   } catch { return null; }
 };
-function setSettings(patch) {
+function setSettings(patch, enc = {}) {
   const s = getSettingsRaw();
   const { apiKey, geminiKey, providerKeys, ...rest } = patch;
   Object.assign(s, rest);
   if (providerKeys) {
     s.providerKeysEnc = { ...(s.providerKeysEnc || {}) };
-    for (const [id, k] of Object.entries(providerKeys)) { if (k) s.providerKeysEnc[id] = encrypt(k); else delete s.providerKeysEnc[id]; }
+    for (const [id, k] of Object.entries(providerKeys)) { if (k) s.providerKeysEnc[id] = enc.providerKeys?.[id] || encrypt(k); else delete s.providerKeysEnc[id]; }
   }
-  if (apiKey !== undefined) s.apiKeyEnc = apiKey ? encrypt(apiKey) : null;
-  if (geminiKey !== undefined) s.geminiKeyEnc = geminiKey ? encrypt(geminiKey) : null;
+  if (apiKey !== undefined) s.apiKeyEnc = apiKey ? enc.apiKey || encrypt(apiKey) : null;
+  if (geminiKey !== undefined) s.geminiKeyEnc = geminiKey ? enc.geminiKey || encrypt(geminiKey) : null;
   writeSettingsFile(s);
   return getSettings();
+}
+/** setSettings for the app: new keys are encrypted with the OS key store's asynchronous calls first. */
+async function setSettingsAsync(patch) {
+  const enc = {};
+  if (patch.apiKey) enc.apiKey = await encryptAsync(patch.apiKey);
+  if (patch.geminiKey) enc.geminiKey = await encryptAsync(patch.geminiKey);
+  if (patch.providerKeys) {
+    enc.providerKeys = {};
+    for (const [id, k] of Object.entries(patch.providerKeys)) if (k) enc.providerKeys[id] = await encryptAsync(k);
+  }
+  return setSettings(patch, enc);
 }
 function getApiKey() {
   const enc = getSettingsRaw().apiKeyEnc;
@@ -333,4 +380,4 @@ function listSessions() {
   return out.sort((a, b) => b.updated - a.updated);
 }
 
-module.exports = { gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions };
+module.exports = { init, setSettingsAsync, gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions };

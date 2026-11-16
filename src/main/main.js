@@ -416,7 +416,7 @@ handle('settings:set', async (patch) => {
   if (patch.providerKeys) for (const pid of Object.keys(patch.providerKeys)) oaiCache.delete(pid);
   if (patch.customBaseUrl !== undefined) oaiCache.delete('custom');
   if (patch.lmstudioUrl !== undefined || patch.lmstudioEnabled !== undefined) oaiCache.delete('lmstudio');
-  const s = store.setSettings(patch);
+  const s = await store.setSettingsAsync(patch);
   if (patch.theme !== undefined) applyTheme(patch.theme);
   if (patch.mcpServers !== undefined || patch.allowProjectMcp !== undefined) syncMcp().catch(() => {});
   return s;
@@ -679,8 +679,10 @@ handle('git:message', async (root, model) => {
   } catch (e) { return { error: providers.friendlyError(e, model).message }; }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   app.setAppUserModelId('dev.drops.agent');
+  // Saved API keys are decrypted once, with the OS key store's asynchronous calls, before anything reads them.
+  await store.init().catch((e) => console.error('Could not open the saved keys:', e));
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showWindow(); });
   if (startHidden && keepInBackground()) ensureTray();
