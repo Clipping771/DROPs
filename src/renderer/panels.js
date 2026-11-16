@@ -865,6 +865,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
         <section class="set-sec" data-sp="agent"><h2>Agent</h2><p class="set-desc">How the agent works, checks its own work and explains itself.</p>
           <div class="set-card"><div class="set-sub">Reliability</div>
             ${setItem('Verification guard', 'After editing, the agent cannot finish until a real test, build or type-check passes, or it proves the failure was already there.', tgl('setVerify'))}
+            ${setItem('Check for updates', 'Once a day DROPs asks GitHub whether a newer version has been released and tells you. It never downloads or installs anything by itself. Crash reports are kept on this computer only (Ctrl+K → Open crash reports folder).', tgl('setUpdateCheck'))}
             ${setItem('Computer use', 'Lets DROPs use apps on this computer with the mouse and keyboard when you ask. It asks before each app, never touches system programs or password fields, asks before delete/send/pay, and stops when you move the mouse.', tgl('setComputer'))}
             ${setItem('Independent QA agent', 'When a task names SPEC.md, a separate QA call writes browser or HTTP checks from the spec alone before coding starts.', tgl('setQaAgent'))}
             ${setItem('Auto-compact context at (tokens)', 'Older turns are summarised past this size. Lower is cheaper; higher keeps more detail.', '<input class="input num" type="number" id="setCompact" min="20000" step="10000">')}
@@ -990,7 +991,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     const tog = (id, on) => { const t = $(id, m); t.classList.toggle('on', !!on); t.onclick = () => t.classList.toggle('on'); return t; };
     const T = {
       restore: tog('#setRestore', s.restoreLastProject !== false), notify: tog('#setNotify', s.notifyApproval !== false),
-      verify: tog('#setVerify', s.autoVerify !== false), qa: tog('#setQaAgent', s.qaAgent !== false), computer: tog('#setComputer', s.computerUse !== false), explain: tog('#setExplain', s.explainMode), cheap: tog('#setCheapSub', s.cheapSubagents !== false),
+      verify: tog('#setVerify', s.autoVerify !== false), qa: tog('#setQaAgent', s.qaAgent !== false), computer: tog('#setComputer', s.computerUse !== false), upd: tog('#setUpdateCheck', s.updateCheck !== false), explain: tog('#setExplain', s.explainMode), cheap: tog('#setCheapSub', s.cheapSubagents !== false),
       ollama: tog('#setOllama', s.ollamaEnabled !== false), projMcp: tog('#setProjMcp', s.allowProjectMcp), sandbox: tog('#setSandbox', s.sandbox), net: tog('#setSandboxNet', s.sandboxNetwork !== false),
     };
     let theme = s.theme || 'dark';
@@ -1134,7 +1135,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const patch = {
         defaultModel: sel.value, effort: $('#setEffort', m).value, mode: $('#setMode', m).value,
         compactAt: num('#setCompact', 180000, 20000), maxSteps: num('#setSteps', 250, 10), customInstructions: $('#setInstr', m).value,
-        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), computerUse: T.computer.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value, languageMigrated: true,
+        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), computerUse: T.computer.classList.contains('on'), updateCheck: T.upd.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value, languageMigrated: true,
         autoProvider: $('#setAutoProv', m).value, cheapSubagents: T.cheap.classList.contains('on'),
         maxCostPerTask: Math.max(0, Number($('#setMaxCost', m).value) || 0), maxTokensPerTask: Math.max(0, Number($('#setMaxTok', m).value) || 0),
         ollamaEnabled: T.ollama.classList.contains('on'), ollamaUrl: $('#setOllamaUrl', m).value.trim() || 'http://localhost:11434', ollamaCtx: num('#setOllamaCtx', 16384, 4096),
@@ -1192,6 +1193,8 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       ['Generate commit message', '/commit', () => generateCommitMessage(), 'sparkles'],
       ['Switch to Plan mode', '', () => { setMode('plan'); persistOpts(); }, 'list'],
       ['Switch to Full auto mode', '', () => { setMode('yolo'); persistOpts(); }, 'zap'],
+      ['Check for updates', '', () => checkForUpdatesNow(), 'download'],
+      ['Open crash reports folder', '', () => api.crashOpenFolder(), 'alert'],
       ['Split view: show another session beside this one', 'Ctrl+\\', () => (S.split ? setSplit(null) : openSplitPicker()), 'panelRight'],
       ['Toggle sidebar', 'Ctrl+B', () => $('#body').classList.toggle('no-side'), 'panelLeft'],
       ['Toggle right panel', 'Ctrl+J', () => toggleInspector(), 'panelRight'],

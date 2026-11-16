@@ -23,6 +23,7 @@ const DEFAULTS = {
   autoVerify: true,
   qaAgent: true,
   computerUse: true,
+  updateCheck: true,
   compactAt: 180000,
   maxSteps: 250,
   // models & routing

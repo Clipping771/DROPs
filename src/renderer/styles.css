@@ -2200,3 +2200,11 @@ label.pill[title="Model"]:hover { background: var(--panel-3); }
 .task-row.sched .sched-acts { gap: 0; margin-top: 4px; flex-wrap: nowrap; }
 .task-row.sched .sched-acts .btn { height: 24px; padding: 0 7px; font-size: 12px; color: var(--muted); }
 .task-row.sched .sched-acts .btn:hover { color: var(--text); }
+
+/* ---- notices at the top: a crash last time, a new version ---- */
+.top-banner { position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px; max-width: min(760px, calc(100vw - 32px));
+  padding: 8px 8px 8px 14px; background: var(--panel-2, var(--panel)); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.28); font-size: 13px; color: var(--text-2); }
+.top-banner .tb-text { display: inline-flex; align-items: center; gap: 8px; line-height: 1.4; }
+.top-banner .tb-text svg { color: var(--muted); flex-shrink: 0; }
+.top-banner .tb-acts { display: flex; gap: 6px; flex-shrink: 0; }
+.top-banner + .top-banner { top: 100px; }

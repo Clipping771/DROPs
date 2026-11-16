@@ -335,6 +335,8 @@ Free-tier runs mix models as quotas run out, so they are not single-model measur
 | **Skills** (`skill` tool) | Written instructions for a kind of task (a house style, a release process, a checklist): a folder with `SKILL.md` (front matter `name`, `description`) in `.drops/skills`, `.claude/skills` or DROPs' own skills folder. The agent sees each skill's name and description, loads the full text when a task matches, and can read the skill's own files (templates, scripts). Each skill is also a `/` command. |
 | **Hooks** | Your commands at fixed points: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` (Claude Code's format is accepted). Each gets the event as JSON on stdin; exit code 2 blocks the request or tool (or, for Stop, sends the agent back with the reason, up to three times); stdout is added as context. Set them in Settings → Hooks, or per project in `.drops/hooks.json`, which you approve once per session outside full auto (it is code from the repository). Hooks never see the model keys; headless runs approve project hooks like other commands. |
 | **Scheduled tasks** (`schedule` tool, Tasks panel) | A prompt that runs by itself in a new session of its project: once, every hour, every day, on weekdays or weekly. Make, edit, pause, run now and delete them in the Tasks panel, or ask the agent ("every weekday at 9 run the tests"), which asks you before saving. A run missed while DROPs was closed happens once when it opens. Questions a scheduled run asks wait for you in its session. |
+| **Crash reports** (local only) | Errors in DROPs and its window, a window or helper process that died, and a run that did not close normally are saved as JSON reports in DROPs' data folder (`crashes`), with secret values removed and the home folder shown as `~`. Nothing is uploaded. After a crash, the next start says so (Open reports, Dismiss). Ctrl+K → Open crash reports folder. |
+| **Update check** | Once a day (and from Ctrl+K → Check for updates) DROPs asks GitHub for the newest release and, when it is newer, shows a notice with Download (opens the release page) and Later. It never downloads or installs anything by itself. Settings can turn it off. |
 | **Pinned sessions** | Pin a session to keep it at the top of its project in the sidebar. |
 | **Screenshots for text-only models** | When the model in use cannot read images (DeepSeek, local Qwen and similar), a Gemini vision model describes each screenshot (layout, visible text, anything broken) and the description goes to the model instead. |
 | **Chat interface** | Sidebar status per session, a live line while the agent works, Enter steers and Ctrl+Enter queues during a task, Send now, Claude-style task list, background tasks, chapters with a table of contents in the title bar, a live browser pane, split view (Ctrl+\\), icon tabs in the right panel. |
@@ -345,7 +347,7 @@ Free-tier runs mix models as quotas run out, so they are not single-model measur
 - **Still missing:**
   - scheduled tasks run only while DROPs is open (a missed run happens once when it opens);
   - computer use on Mac and Linux (Windows only for now);
-  - for releasing DROPs: auto-update, crash reports, a signed installer;
+  - for releasing DROPs: a signed installer (needs a code-signing certificate) and installing updates by itself (needs signed releases); no release is published on GitHub yet;
   - tested Mac and Linux builds.
 - The renderer is large vanilla JavaScript without components. The UI tests guard it.
 

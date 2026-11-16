@@ -51,6 +51,46 @@ function checkPop() {
   }, 80);
 }
 
+// ---------- notices at the top (crash after the last run, a new version) ----------
+function showBanner(id, html, actions) {
+  document.getElementById(id)?.remove();
+  const b = h('div', 'top-banner'); b.id = id; b.setAttribute('role', 'status');
+  b.innerHTML = `<span class="tb-text">${html}</span><span class="tb-acts"></span>`;
+  for (const [label, run, primary] of actions) {
+    const btn = h('button', 'btn sm' + (primary ? ' primary' : ' ghost'), label);
+    btn.onclick = async () => { if ((await run()) !== false) b.remove(); };
+    $('.tb-acts', b).appendChild(btn);
+  }
+  document.body.appendChild(b);
+}
+// Errors in this window go to the local crash reports (nothing is uploaded).
+window.addEventListener('error', (e) => { api.crashRenderer?.({ message: e.message, stack: e.error?.stack || `${e.filename}:${e.lineno}` }); });
+window.addEventListener('unhandledrejection', (e) => { api.crashRenderer?.({ message: String(e.reason?.message || e.reason), stack: e.reason?.stack || '' }); });
+async function startupNotices() {
+  const c = await api.crashLast?.().catch(() => null);
+  if (c) {
+    const what = c.kind === 'unclean-exit' ? 'DROPs did not close normally last time.' : `DROPs recorded ${c.count > 1 ? `${c.count} errors` : 'an error'} since you last looked.`;
+    showBanner('crashBanner', `${icon('alert', 'sm')}${esc(what)} Your sessions are saved. A report is kept on this computer only.`, [
+      ['Open reports', async () => { await api.crashOpenFolder(); await api.crashSeen(); }],
+      ['Dismiss', () => api.crashSeen(), true],
+    ]);
+  }
+  api.onUpdate?.((r) => showUpdate(r));
+}
+function showUpdate(r) {
+  showBanner('updateBanner', `${icon('download', 'sm')}DROPs ${esc(r.version)} is available (you have ${esc(r.current)}).`, [
+    ['Later', () => api.updateDismiss(r.version)],
+    ['Download', () => api.updateOpen(r.url), true],
+  ]);
+}
+async function checkForUpdatesNow() {
+  toast('Checking for updates…');
+  const r = await api.updateCheck();
+  if (r?.error) toast(`Could not check for updates: ${r.error}`);
+  else if (r?.available) showUpdate(r);
+  else toast(`DROPs is up to date (${S.info?.version || r?.current || ''}).`);
+}
+
 // ---------- init ----------
 async function init() {
   hydrateIcons();
@@ -177,6 +217,7 @@ async function init() {
   if (S.settings.lastProject && S.settings.restoreLastProject !== false) await setProject(S.settings.lastProject);
   else { await Panels.loadTree(); await Panels.renderSessions(); showCurrent(); }
   if (!S.settings.hasKey) setTimeout(() => Panels.openSettings(), 300);
+  startupNotices();
   t.focus();
 }
 init();

@@ -57,12 +57,15 @@ class Helper {
     if (this.ready) return this.ready;
     if (process.platform !== 'win32') return Promise.reject(new Error('Computer use works on Windows only for now.'));
     const src = fs.readFileSync(CS, 'utf8');
-    const dll = path.join(os.tmpdir(), `drops-desk-${crypto.createHash('sha1').update(src).digest('hex').slice(0, 12)}.dll`);
+    const tag = crypto.createHash('sha1').update(src).digest('hex').slice(0, 12);
+    const dll = path.join(os.tmpdir(), `drops-desk-${tag}.dll`);
+    const cs = path.join(os.tmpdir(), `drops-desk-${tag}.cs`);
+    if (!fs.existsSync(dll)) fs.writeFileSync(cs, src);
     const q = (s) => `'${s.replace(/'/g, "''")}'`;
     const script = [
       "$ErrorActionPreference='Stop'",
       '[Console]::InputEncoding=New-Object Text.UTF8Encoding $false; [Console]::OutputEncoding=New-Object Text.UTF8Encoding $false',
-      `if (Test-Path ${q(dll)}) { Add-Type -Path ${q(dll)} } else { Add-Type -Path ${q(CS)} -ReferencedAssemblies ${REFS} -OutputAssembly ${q(dll)}; Add-Type -Path ${q(dll)} }`,
+      `if (Test-Path ${q(dll)}) { Add-Type -Path ${q(dll)} } else { Add-Type -Path ${q(cs)} -ReferencedAssemblies ${REFS} -OutputAssembly ${q(dll)}; Add-Type -Path ${q(dll)} }`,
       '[DropsDesk]::Init()',
       "[Console]::Out.WriteLine('{\"ready\":true}'); [Console]::Out.Flush()",
       'while ($true) { $l=[Console]::In.ReadLine(); if ($null -eq $l) { break }; [Console]::Out.WriteLine([DropsDesk]::Run($l)); [Console]::Out.Flush() }',

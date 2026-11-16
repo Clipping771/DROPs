@@ -1,9 +1,12 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, crashReporter } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const brand = require('./brand');
 // Settings, saved keys and sessions: keep using the existing H2O folder after the rename to DROPs.
 app.setPath('userData', brand.appDataDir());
+// Crash reports stay on this computer (see crash.js).
+const crash = require('./crash');
+const previousCrash = crash.init({ dataDir: app.getPath('userData'), appVersion: app.getVersion(), app, crashReporter });
 
 // The portable .exe unpacks the app into %TEMP% on every start. If that folder's ACL lists an
 // AppContainer package (left there by some other app) but not ALL APPLICATION PACKAGES,
@@ -579,6 +582,40 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => { for (const a of agents.values()) a.dispose(); mcp.closeAll().finally(() => app.quit()); });
 app.whenReady().then(() => syncMcp().catch(() => {}));
 app.whenReady().then(() => setTimeout(() => scheduler.start(), 5000));
+
+// ---------- crash reports ----------
+handle('crash:last', () => {
+  // Reports since the user last looked, for the notice at start (the unclean-exit one first).
+  const seen = store.getSettings().crashSeenAt || 0;
+  const recent = crash.list(seen);
+  if (!recent.length) return null;
+  const main = recent.find((r) => r.kind === 'unclean-exit') || recent[0];
+  return { count: recent.length, kind: main.kind, message: main.message, at: main.at, previous: !!previousCrash };
+});
+handle('crash:seen', () => { store.setSettings({ crashSeenAt: Date.now() }); return true; });
+handle('crash:openFolder', () => shell.openPath(crash.dir()));
+handle('crash:renderer', (info) => { crash.record('window-error', { message: String(info?.message || '').slice(0, 2000), stack: String(info?.stack || '').slice(0, 8000) }); return true; });
+
+// ---------- update check (reads GitHub releases; installing stays the user's choice) ----------
+const update = require('./update');
+let lastUpdate = null;
+async function checkUpdate(manual = false) {
+  try {
+    const r = await update.check(app.getVersion());
+    lastUpdate = r;
+    const st = store.getSettings();
+    if (r.available && (manual || st.updateDismissed !== r.version) && win && !win.isDestroyed()) win.webContents.send('update:available', r);
+    return r;
+  } catch (e) { return { available: false, error: e.message }; }
+}
+app.whenReady().then(() => {
+  const auto = () => { if (store.getSettings().updateCheck !== false) checkUpdate(false); };
+  setTimeout(auto, 20_000);
+  setInterval(auto, 24 * 3600_000).unref?.();
+});
+handle('update:check', () => checkUpdate(true));
+handle('update:open', (url) => { const u = String(url || lastUpdate?.url || ''); if (/^https:\/\/github\.com\/Clipping771\/DROPs\//.test(u)) shell.openExternal(u); return true; });
+handle('update:dismiss', (version) => { store.setSettings({ updateDismissed: String(version || '') }); return true; });
 handle('schedule:list', () => scheduleList());
 handle('schedule:save', (input) => { try { return saveSchedule(input || {}); } catch (e) { return { error: e.message }; } });
 handle('schedule:delete', (id) => deleteSchedule(id));
