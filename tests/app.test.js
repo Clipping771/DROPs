@@ -82,3 +82,24 @@ test('a model that cannot see images gets a description of the screenshot instea
     assert.ok(!data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image')), 'no image goes to the text-only model');
   } finally { agent.dispose(); providers.callModel = realCallModel; await browser.closeAll(); }
 });
+
+test('app: when the page screenshot times out (slow machine), Electron captures the window instead', { timeout: 180_000 }, async (t) => {
+  if (!browser.available()) return t.skip('playwright-core not installed');
+  const pw = require('playwright-core');
+  const realLaunch = pw._electron.launch;
+  pw._electron.launch = async (...args) => {
+    const app = await realLaunch.apply(pw._electron, args);
+    const realFirst = app.firstWindow.bind(app);
+    app.firstWindow = async (...a) => { const page = await realFirst(...a); page.screenshot = async () => { throw new Error('page.screenshot: Timeout 30000ms exceeded.'); }; return page; };
+    return app;
+  };
+  const key = `app::${APP}::fallback`;
+  try {
+    await browser.act(key, { action: 'launch', path: APP });
+    const r = await browser.act(key, { action: 'screenshot' });
+    assert.equal(r.images?.length, 1, 'a picture came back');
+    const png = Buffer.from(r.images[0].source.data, 'base64');
+    assert.equal(png.subarray(1, 4).toString('ascii'), 'PNG');
+    assert.ok(png.length > 1000);
+  } finally { pw._electron.launch = realLaunch; await browser.closeKey(key).catch(() => {}); }
+});
