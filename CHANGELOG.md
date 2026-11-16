@@ -19,6 +19,12 @@ Everything since 2.2.0.
 - The repository map reuses what has not changed (about 100x faster on a repeat request); grep reads files in parallel.
 - Long answers stream without slowing down; idle sessions are released from memory.
 
+### Look
+- A plainer, more professional interface: no pill-shaped buttons, glows or pulsing dots; 6–8px corners; one solid colour for the main action.
+- Approval and question cards are calm panels: the question, a one-line risk note, the answer box, and the buttons on the right. Options are a plain list.
+- Step headers say "waiting for your approval" or "waiting for your answer" instead of "ran a command" while nothing has run yet.
+- Light mode: code blocks and the selected session are readable again.
+
 ### New
 - Rewind also undoes changes made by shell commands (formatters, generators), in git projects.
 - Only one DROPs runs at a time; the window remembers its size and place.
