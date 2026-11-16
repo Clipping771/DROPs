@@ -2134,3 +2134,15 @@ code, pre { font-family: var(--mono); }
 #threads.split > .split-main { order: 0; }
 #threads.split > .split-side { order: 1; }
 #threads.split > .split-empty::before { content: 'New session: type below to start.'; display: block; color: var(--dim); padding: 24px 4px; }
+/* Right-panel tabs: icons, with the name shown only on the open tab */
+#inspTabs { overflow: visible; gap: 2px; padding: 4px 8px 0; }
+#inspTabs button { padding: 9px 9px 11px; gap: 6px; flex: none; }
+#inspTabs button .lbl { display: none; white-space: nowrap; }
+#inspTabs button.on .lbl { display: inline; }
+#inspTabs button .badge { margin-left: -2px; }
+/* Chapters button sits in the title bar, next to the session title (it never covers the chat) */
+.tb-title-wrap { flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; -webkit-app-region: drag; }
+.tb-title-wrap .tb-title { flex: 0 1 auto; min-width: 0; }
+.tb-title-wrap .toc { position: relative; top: 0; height: auto; padding: 0; z-index: 30; -webkit-app-region: no-drag; }
+.tb-title-wrap .toc-btn { padding: 2px 9px; font-size: 11.5px; }
+.tb-title-wrap .toc-list { position: absolute; top: 28px; left: 50%; transform: translateX(-50%); }

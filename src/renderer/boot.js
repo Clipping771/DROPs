@@ -126,7 +126,17 @@ async function init() {
   $('#refreshTree').onclick = () => Panels.loadTree();
   $('#refreshGit').onclick = () => Panels.refreshGit();
   $$('.rail button[data-view]').forEach((b) => (b.onclick = () => Panels.showSide(b.dataset.view)));
-  $$('#inspTabs button').forEach((b) => (b.onclick = () => Panels.switchTab(b.dataset.tab)));
+  // Right-panel tabs: an icon each, and the name only on the open tab (all six fit any panel width).
+  const TAB_ICONS = { plan: 'layers', tasks: 'list', changes: 'diff', terminal: 'terminal', browser: 'globe', usage: 'gauge' };
+  $$('#inspTabs button').forEach((b) => {
+    const badge = b.querySelector('.badge');
+    const label = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim();
+    b.title = label; b.setAttribute('aria-label', label);
+    b.innerHTML = `${icon(TAB_ICONS[b.dataset.tab] || 'list', 'sm')}<span class="lbl"></span>`;
+    b.querySelector('.lbl').textContent = label;
+    if (badge) b.appendChild(badge);
+    b.onclick = () => Panels.switchTab(b.dataset.tab);
+  });
   let lastModel = $('#modelSel').value, lastRefresh = 0;
   $('#modelSel').onchange = async () => {
     const sel = $('#modelSel');

@@ -13,7 +13,7 @@
       <div class="tb-sep"></div>
       <button class="tb-btn" id="projectBtn" title="Switch project (Ctrl+O)"><span data-icon="folder" class="sm"></span><span id="projectName">No project</span><span data-icon="chevronDown" class="xs chev"></span></button>
       <button class="tb-btn" id="branchBtn" title="Source control" hidden><span data-icon="branch" class="sm"></span><span id="branchName"></span></button>
-      <div class="tb-title" id="sessionTitle"></div>
+      <div class="tb-title-wrap"><div class="tb-title" id="sessionTitle"></div><div class="toc" id="toc" hidden></div></div>
       <button class="tb-btn" id="paletteBtn" title="Command palette"><span data-icon="search" class="sm"></span><span class="muted">Search or run a command</span><kbd>Ctrl K</kbd></button>
       <div class="tb-quick">
         <button class="icon-btn" id="qbFiles" title="Files (explorer)"><span data-icon="files"></span></button>
@@ -52,7 +52,6 @@
 
       <main class="chat">
         <div class="thread-wrap" id="threadWrap">
-          <div class="toc" id="toc" hidden></div>
           <div id="threads"></div>
           <section class="hero" id="hero"></section>
         </div>
