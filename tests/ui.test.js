@@ -1,5 +1,5 @@
 // UI tests: launch the real DROPs Electron app and drive its window.
-// The app runs with its own empty data and home folders, so the user's settings, keys,
+// The app runs with its own empty data folder and DROPs user folder, so the user's settings, keys,
 // sessions and lessons are never read or changed. Run with: npm run test:ui
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,17 +10,30 @@ const { _electron } = require('playwright-core');
 
 const root = path.join(__dirname, '..');
 let app, win, tmp;
-/** A 1440x900 window; where the screen is smaller and Windows keeps the window to the screen, the page is
- *  zoomed out so it still lays out as a desktop window (the sidebar and right panel shown). */
+/** The tests check the desktop layout (sidebar and right panel): a 1440x900 window, or the page shown at
+ *  that size when the screen keeps the window smaller (CI machines have small screens). */
+// UI_TEST_WINDOW=800x600 forces a small window, to check this on a machine with a big screen.
+const forced = (process.env.UI_TEST_WINDOW || '').match(/^(\d+)x(\d+)$/);
 async function fitDesktop() {
-  await app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows()[0]; w.webContents.setZoomFactor(1); w.setBounds({ x: 0, y: 0, width: 1440, height: 900 }); });
-  // The page's own width, once the window has settled (macOS applies a new size a moment later and keeps
-  // a window inside a small screen): zoom out until it lays out as a desktop window.
-  await new Promise((r) => setTimeout(r, 800));
-  const { w, h } = await win.evaluate(() => ({ w: innerWidth, h: innerHeight }));
-  const zoom = Math.min(1, w / 1400, h / 820);
-  if (zoom < 1) await app.evaluate(({ BrowserWindow }, z) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(z), Math.max(0.5, zoom));
-  await win.waitForFunction(() => innerWidth > 1280, null, { timeout: 5000 }).catch(() => {});
+  const size = forced ? { width: +forced[1], height: +forced[2] } : { width: 1440, height: 900 };
+  await app.evaluate(({ BrowserWindow }, s) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.webContents.disableDeviceEmulation(); w.webContents.setZoomFactor(1);
+    w.setMinimumSize(300, 300); w.setBounds({ x: 0, y: 0, ...s });
+  }, size);
+  // The page's own size once the window has settled (macOS applies a new size a moment later and keeps a
+  // window inside a small screen). When it is smaller than a desktop window, the page is zoomed out until it
+  // lays out like one (zoom, unlike device emulation, keeps Playwright's clicks on target).
+  for (let i = 0; i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 600));
+    const { w, h } = await win.evaluate(() => ({ w: innerWidth, h: innerHeight }));
+    if (w >= 1400 && h >= 820) return;
+    const zoom = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor());
+    const next = Math.max(0.4, zoom * Math.min(w / 1440, h / 860));
+    await app.evaluate(({ BrowserWindow }, f) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(f), next);
+  }
+  const { w } = await win.evaluate(() => ({ w: innerWidth }));
+  if (w < 1300) throw new Error(`The page is only ${w} px wide even zoomed out: the desktop layout cannot be tested on this screen.`);
 }
 const errors = [];
 
@@ -28,9 +41,12 @@ before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-ui-'));
   const home = path.join(tmp, 'home'), appdata = path.join(tmp, 'appdata');
   fs.mkdirSync(home); fs.mkdirSync(appdata);
-  // DROPs data and home go to throwaway folders; LOCALAPPDATA stays real, because the installed Chrome/Edge needs it to start.
-  const env = { ...process.env, APPDATA: appdata, USERPROFILE: home, HOME: home };
+  // DROPs's data (APPDATA) and its user folder (DROPS_USER_DIR: lessons, the old key file) go to throwaway
+  // folders. The real home folder stays: Chrome/Edge do not start with a replaced one (they failed so on
+  // the Windows CI runner), and DROPs keeps nothing else there.
+  const env = { ...process.env, APPDATA: appdata };
   for (const k of Object.keys(env)) if (/^(DROPS|H2O)_|_API_KEY$/.test(k)) delete env[k]; // no keys: nothing can call a model
+  env.DROPS_USER_DIR = home;
   app = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root, env, timeout: 60000 });
   win = await app.firstWindow();
   // These tests check the desktop layout (sidebar and right panel), which narrow windows hide. A CI
@@ -431,7 +447,7 @@ test('the user data stays in the test folder, and the page logged no errors', as
 });
 
 test('in a narrow window (sidebar and Settings menu hidden), Escape still closes Settings', async () => {
-  const narrow = () => app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0]; b.webContents.setZoomFactor(1); b.setMinimumSize(300, 300); b.setBounds({ x: 0, y: 0, width: 640, height: 480 }); });
+  const narrow = () => app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0]; b.webContents.disableDeviceEmulation(); b.webContents.setZoomFactor(1); b.setMinimumSize(300, 300); b.setBounds({ x: 0, y: 0, width: 640, height: 480 }); });
   try {
     await narrow();
     await win.waitForFunction(() => innerWidth <= 700);

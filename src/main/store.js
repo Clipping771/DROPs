@@ -163,7 +163,8 @@ async function init() {
 }
 /** The plain-text OpenRouter key file, when it exists. */
 function plainKeyFile() {
-  const f = path.join(os.homedir(), '.h2o', 'openrouter.key');
+  // In the user's DROPs folder when DROPS_USER_DIR moves it (tests), so a test never reads the real one.
+  const f = require('./brand').env('USER_DIR') ? path.join(require('./brand').env('USER_DIR'), 'openrouter.key') : path.join(os.homedir(), '.h2o', 'openrouter.key');
   return fs.existsSync(f) ? f : null;
 }
 let cachedOsCryptKey;
@@ -249,8 +250,8 @@ function getProviderKey(id) {
   const envKey = PROVIDERS[id]?.env ? process.env[PROVIDERS[id].env] || null : null;
   if (envKey) return envKey;
   if (id === 'openrouter') {
-    const keyFile = path.join(os.homedir(), '.h2o', 'openrouter.key');
-    if (fs.existsSync(keyFile)) {
+    const keyFile = plainKeyFile();
+    if (keyFile) {
       try {
         const k = fs.readFileSync(keyFile, 'utf8').trim();
         if (k) return k;
