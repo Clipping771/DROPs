@@ -360,7 +360,7 @@ async function frame(key) {
   const s = sessions.get(key);
   if (!s?.page || s.page.isClosed()) return null;
   try {
-    const png = await s.page.screenshot({ type: 'jpeg', quality: 55, timeout: 5000 });
+    const png = await s.page.screenshot({ type: 'jpeg', quality: 55, timeout: 15000 });
     return { url: s.page.url(), title: await s.page.title().catch(() => ''), data: png.toString('base64') };
   } catch { return null; }
 }

@@ -690,7 +690,12 @@ handle('git:message', async (root, model) => {
 app.whenReady().then(async () => {
   app.setAppUserModelId('dev.drops.agent');
   // Saved API keys are decrypted once, with the OS key store's asynchronous calls, before anything reads them.
-  await store.init().catch((e) => console.error('Could not open the saved keys:', e));
+  // The window never waits more than 3 s for that: a key store waiting on a permission prompt (the macOS
+  // keychain) must not leave the user with no window; keys open as soon as it answers.
+  await Promise.race([
+    store.init().catch((e) => console.error('Could not open the saved keys:', e)),
+    new Promise((r) => setTimeout(r, 3000)),
+  ]);
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showWindow(); });
   if (startHidden && keepInBackground()) ensureTray();

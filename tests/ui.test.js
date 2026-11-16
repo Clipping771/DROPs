@@ -354,7 +354,7 @@ test('chapters with a table of contents, the live browser pane, and split view',
 
     // Live browser pane: the page the agent saw, with its address and step.
     await win.click('#inspTabs button[data-tab="browser"]');
-    await win.waitForSelector('#browserBody img.bp-shot', { timeout: 10000 });
+    await win.waitForSelector('#browserBody img.bp-shot', { timeout: 30000 }); // a slow machine needs a while for the picture
     assert.match(await win.textContent('#browserBody .bp-url'), /127\.0\.0\.1:\d+\//);
     assert.ok((await win.getAttribute('#browserBody img.bp-shot', 'src')).startsWith('data:image/jpeg;base64,'));
 

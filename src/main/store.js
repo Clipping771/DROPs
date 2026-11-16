@@ -115,6 +115,8 @@ const encrypt = (v) => (safeStorage && (asyncKeyStore ?? safeStorage.isEncryptio
   ? 'enc:' + safeStorage.encryptString(v).toString('base64')
   : 'raw:' + Buffer.from(v).toString('base64'));
 async function encryptAsync(v) {
+  // Not asked at start (nothing was saved yet): ask now, when the user saves a key.
+  if (asyncKeyStore === null && safeStorage?.isAsyncEncryptionAvailable) asyncKeyStore = !!(await safeStorage.isAsyncEncryptionAvailable());
   if (safeStorage?.encryptStringAsync && asyncKeyStore) {
     const enc = 'enc:' + (await safeStorage.encryptStringAsync(v)).toString('base64');
     decrypted.set(enc, v);
@@ -125,6 +127,12 @@ async function encryptAsync(v) {
 /** Asks the OS key store once (after the app is ready) and decrypts every saved key into memory. */
 async function init() {
   if (!safeStorage?.isAsyncEncryptionAvailable) return;
+  // Asking the OS key store can wait on the user (the macOS keychain may ask for permission), so it is
+  // asked at start only when there is a saved key to open or a plain-text key file to move in. Otherwise
+  // it is asked the first time a key is saved.
+  const pre = getSettingsRaw();
+  const anySaved = [pre.apiKeyEnc, pre.geminiKeyEnc, ...Object.values(pre.providerKeysEnc || {})].some((k) => String(k || '').startsWith('enc:'));
+  if (!anySaved && !plainKeyFile()) return;
   asyncKeyStore = !!(await safeStorage.isAsyncEncryptionAvailable());
   if (!asyncKeyStore) return;
   const s = getSettingsRaw();
