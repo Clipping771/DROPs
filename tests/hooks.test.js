@@ -100,7 +100,7 @@ test('hooks: PreToolUse blocks, PostToolUse adds output, UserPromptSubmit and Se
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
 
-test('hooks: a UserPromptSubmit hook can block the request; project hooks need approval outside full auto', async () => {
+test('hooks: a UserPromptSubmit hook can block the request; project hooks need approval in every mode', async () => {
   const dir = project({ '.drops/hooks.json': JSON.stringify({ hooks: { UserPromptSubmit: [{ command: 'node block.js' }] } }), 'block.js': "process.stderr.write('Not on Fridays');process.exit(2)" });
   // Denied: the project's hooks do not run, the request goes on.
   const perms = [];
@@ -112,11 +112,27 @@ test('hooks: a UserPromptSubmit hook can block the request; project hooks need a
     assert.match(perms[0].input.command, /\[UserPromptSubmit\] node block\.js/);
     assert.equal(a1.calls.length, 1, 'the model was called');
   } finally { a1.agent.dispose(); providers.callModel = realCallModel; }
-  // Full auto: the hook runs and blocks; the model is never called.
-  const a2 = agentWith(dir, [{ text: 'should not happen' }]);
+  // Full auto asks too (a cloned repo must not run commands by being opened). Approved: the hook runs and
+  // blocks; the model is never called. The same session is not asked again for the same hooks.
+  const perms2 = [];
+  const a2 = agentWith(dir, [{ text: 'should not happen' }], {}, (a, type, p) => { if (type === 'permission') { perms2.push(p); setImmediate(() => a.respond(p.reqId, 'allow')); } });
   try {
     await run(a2.agent, 'hi');
+    assert.equal(perms2.length, 1, 'asked in full auto');
+    assert.equal(perms2[0].dangerous, false);
     assert.equal(a2.calls.length, 0);
     assert.match(JSON.stringify(a2.data.messages[a2.data.messages.length - 1].content), /A hook blocked this request: Not on Fridays/);
+    await run(a2.agent, 'again');
+    assert.equal(perms2.length, 1, 'not asked twice for the same hooks');
   } finally { a2.agent.dispose(); providers.callModel = realCallModel; }
+
+  // A destructive hook command makes the question dangerous (the headless CLI refuses it).
+  const bad = project({ '.drops/hooks.json': JSON.stringify({ hooks: { SessionStart: [{ command: 'rm -rf build' }] } }) });
+  const perms3 = [];
+  const a3 = agentWith(bad, [{ text: 'ok' }], {}, (a, type, p) => { if (type === 'permission') { perms3.push(p); setImmediate(() => a.respond(p.reqId, 'deny')); } });
+  try {
+    await run(a3.agent, 'hi');
+    assert.equal(perms3[0].dangerous, true);
+    assert.match(perms3[0].reason, /destructive/);
+  } finally { a3.agent.dispose(); providers.callModel = realCallModel; }
 });

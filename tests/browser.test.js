@@ -194,3 +194,9 @@ test('browser: a test id rendered in two different places is reported; repeated 
     assert.doesNotMatch(r.text, /contact-row ×|contact-name ×/, 'rows of one table are not duplicates');
   } finally { await browser.act(k, { action: 'close' }).catch(() => {}); s.close(); }
 });
+
+test('browser: reaches this computer and the internet, not the private network or cloud metadata', async () => {
+  const b = require('../src/main/browser');
+  for (const h of ['localhost', '127.0.0.1', 'app.localhost', '::1']) assert.equal(await b.hostAllowed(h), true, h);
+  for (const h of ['192.168.1.1', '10.0.0.5', '172.20.0.1', '169.254.169.254']) assert.equal(await b.hostAllowed(h), false, h);
+});

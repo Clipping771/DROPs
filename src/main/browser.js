@@ -8,6 +8,41 @@ try { pw = require('playwright-core'); } catch { /* optional dependency */ }
 
 const IDLE_MS = 10 * 60_000;
 const ACTION_TIMEOUT = 10_000;
+
+// ---- which addresses the browser may reach ----
+// This machine (localhost, 127.x, ::1, *.localhost) for the app being built, and the public internet.
+// Not other machines on the home or office network, and not cloud-metadata addresses (169.254.169.254):
+// fetch_url blocks those too. Checked for every request, so a link, redirect or script cannot get there.
+const net = require('net');
+const dns = require('dns').promises;
+const hostVerdict = new Map(); // hostname -> { at, ok }
+function isLoopbackHost(host) {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
+  return net.isIP(h) === 4 && h.startsWith('127.');
+}
+async function hostAllowed(host) {
+  if (isLoopbackHost(host)) return true;
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  const hit = hostVerdict.get(h);
+  if (hit && Date.now() - hit.at < 60_000) return hit.ok;
+  const { isPrivateAddress } = require('./tools');
+  let ok;
+  try {
+    const addrs = net.isIP(h) ? [{ address: h }] : await dns.lookup(h, { all: true, verbatim: true });
+    ok = addrs.length > 0 && !addrs.some((a) => isPrivateAddress(a.address));
+  } catch { ok = true; } // a name that does not resolve fails on its own
+  hostVerdict.set(h, { at: Date.now(), ok });
+  if (hostVerdict.size > 500) hostVerdict.clear();
+  return ok;
+}
+async function guardRequest(route) {
+  let u;
+  try { u = new URL(route.request().url()); } catch { return route.continue(); }
+  if (!/^(https?|wss?):$/.test(u.protocol)) return route.continue(); // data:, blob: and the like
+  if (await hostAllowed(u.hostname)) return route.continue();
+  return route.abort('addressunreachable');
+}
 const sessions = new Map();
 
 const available = () => !!pw;
@@ -40,6 +75,7 @@ class BrowserSession {
     }
     if (!this.browser || !this.browser.isConnected()) this.browser = await launch();
     const context = await this.browser.newContext({ viewport: viewport || { width: 1280, height: 800 } });
+    await context.route('**/*', guardRequest);
     this.page = await context.newPage();
     this.attach(this.page);
     return this.page;
@@ -244,6 +280,7 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
       if (!input.url) throw new Error('open needs a url.');
       const url = mapUrl(String(input.url));
       if (!/^https?:\/\//i.test(url)) throw new Error('Only http(s) addresses can be opened.');
+      if (!(await hostAllowed(new URL(url).hostname))) throw new Error(`${new URL(url).hostname} is on a private network. The browser opens this computer (localhost) and the public internet only.`);
       const r = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => { throw new Error(`Could not open ${input.url}: ${String(e.message).split('\n')[0]}. Is the app running (start_process) and listening on that port?`); });
       s.lastStatus = r?.status() ?? null;
       await settle();
@@ -328,4 +365,4 @@ async function frame(key) {
   } catch { return null; }
 }
 
-module.exports = { available, act, closeAll, closeKey, isOpen, locate, frame };
+module.exports = { available, act, closeAll, closeKey, isOpen, locate, frame, hostAllowed };

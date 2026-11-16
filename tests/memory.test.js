@@ -73,7 +73,7 @@ test('unfinished work: what one session leaves open is in the next session\'s pr
   } finally { third.agent.dispose(); providers.callModel = realCallModel; }
 });
 
-test('searchSessions: finds matches inside saved conversation messages as well as titles', () => {
+test('searchSessions: finds matches inside saved conversation messages as well as titles', async () => {
   const store = require('../src/main/store');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-search-'));
   const s1 = store.newSession(dir);
@@ -86,12 +86,12 @@ test('searchSessions: finds matches inside saved conversation messages as well a
   s2.messages = [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }];
   store.saveSession(s2);
 
-  const byMsg = store.searchSessions('postgresql');
+  const byMsg = await store.searchSessions('postgresql');
   assert.equal(byMsg.length, 1);
   assert.equal(byMsg[0].id, s1.id);
   assert.match(byMsg[0].snippet, /PostgreSQL/i);
 
-  const byTitle = store.searchSessions('redis');
+  const byTitle = await store.searchSessions('redis');
   assert.equal(byTitle.length, 1);
   assert.equal(byTitle[0].id, s2.id);
 });

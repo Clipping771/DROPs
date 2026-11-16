@@ -10,6 +10,16 @@
 - Fixed: computer use no longer stops when a control refuses to be clicked; it clicks with the mouse instead.
 - Tool definitions moved to agent-defs.js.
 
+### Security and reliability (full scan)
+- Pictures in answers never load from the web (a prompt injection could send data out that way): they become links. The window loads no web images at all.
+- A project's hooks need your yes in every mode, Full auto included, and a destructive hook is flagged. Editing hook files, Husky, VS Code tasks, CI workflows or .npmrc always asks.
+- Commit refuses new secret files (.env, keys); the diff sent for an AI commit message is masked.
+- The browser tool reaches this computer and the internet, not the private network or cloud-metadata addresses. fetch_url checks the address again when it connects (no DNS rebinding).
+- A scheduled run is not held forever by a question nobody answers: it is declined after 30 minutes.
+- A plain-text ~/.h2o/openrouter.key is copied into the encrypted store, and Settings warns until it is deleted.
+- Lighter sessions: long tool output and pictures are stored once, outside the session file. Session search no longer blocks the window. Old task files are cleaned up. Ctrl+K file search reuses the file list.
+- Tests never write into your real DROPs data; CI also runs the UI tests.
+
 ## 2.3.0 (2026-11-16)
 
 Everything since 2.2.0.

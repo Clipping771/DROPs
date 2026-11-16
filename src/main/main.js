@@ -498,10 +498,17 @@ handle('fs:read', async (root, rel) => {
 handle('fs:write', async (root, rel, content) => { await fs.promises.writeFile(resolveInRoot(projectRoot(root), rel), String(content), 'utf8'); return true; });
 handle('fs:openPath', (root, rel) => shell.openPath(resolveInRoot(projectRoot(root), rel || '.')));
 handle('fs:reveal', (root, rel) => shell.showItemInFolder(resolveInRoot(projectRoot(root), rel || '.')));
+// Ctrl+K searches as you type: the project's file list is listed once and reused for a few seconds.
+let fileListCache = null; // { root, at, files }
 handle('fs:search', async (root, q) => {
-  const fg = require('fast-glob');
-  const files = await fg('**/*', { cwd: projectRoot(root), ignore: IGNORE, onlyFiles: true, suppressErrors: true, deep: 12 });
-  const needle = q.toLowerCase();
+  const dir = projectRoot(root);
+  let files;
+  if (fileListCache && fileListCache.root === dir && Date.now() - fileListCache.at < 10_000) files = fileListCache.files;
+  else {
+    files = await require('fast-glob')('**/*', { cwd: dir, ignore: IGNORE, onlyFiles: true, suppressErrors: true, deep: 12 });
+    fileListCache = { root: dir, at: Date.now(), files };
+  }
+  const needle = String(q || '').toLowerCase();
   const score = (f) => { const l = f.toLowerCase(); const b = l.split('/').pop(); return (b.startsWith(needle) ? 0 : b.includes(needle) ? 1 : 2) * 1000 + f.length; };
   return files.filter((f) => f.toLowerCase().includes(needle)).sort((a, b) => score(a) - score(b)).slice(0, 40);
 });

@@ -33,6 +33,23 @@ class TaskManager {
     this.seqCounters = new Map(); // taskId -> int
     this.ensureDirs();
     this.recoverStaleTasks();
+    this.pruneOrphans();
+  }
+
+  /** The index keeps the newest 200 tasks; the files of tasks it no longer lists (older than a day) are
+   *  removed, so the tasks folder does not grow forever. The app never shows them anyway. */
+  pruneOrphans(maxAgeMs = 24 * 3600_000) {
+    try {
+      const listed = new Set(this.readIndex().tasks.map((t) => `${t.task_id}.json`));
+      const cutoff = Date.now() - maxAgeMs;
+      let removed = 0;
+      for (const f of fs.readdirSync(TASKS_DIR())) {
+        if (!/^task_[\w-]+\.json$/.test(f) || listed.has(f)) continue;
+        const full = path.join(TASKS_DIR(), f);
+        try { if (fs.statSync(full).mtimeMs < cutoff) { fs.rmSync(full); removed++; } } catch { /* in use */ }
+      }
+      return removed;
+    } catch { return 0; }
   }
 
   ensureDirs() {

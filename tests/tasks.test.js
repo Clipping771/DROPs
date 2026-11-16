@@ -377,3 +377,18 @@ test('TEST 9B: Parallel agents on isolated workspaces avoid shared-file conflict
   assert.equal(typeof git.worktreeAdd, 'function');
   assert.equal(typeof git.worktreeRemove, 'function');
 });
+
+test('task files the index no longer lists are removed after a day; listed ones stay', () => {
+  const dir = path.join(require('../src/main/brand').appDataDir(), 'tasks');
+  const manager = new TaskManager({ getAgent: () => null, sendEvent: () => {} });
+  const listed = manager.createTask({ session_id: 'p', workspace_id: os.tmpdir(), prompt: 'kept' });
+  const orphan = path.join(dir, 'task_orphan-old.json'), fresh = path.join(dir, 'task_orphan-new.json');
+  fs.writeFileSync(orphan, '{}'); fs.writeFileSync(fresh, '{}');
+  const old = new Date(Date.now() - 2 * 24 * 3600_000);
+  fs.utimesSync(orphan, old, old);
+  fs.utimesSync(path.join(dir, `${listed.task_id}.json`), old, old);
+  assert.equal(manager.pruneOrphans(), 1);
+  assert.ok(!fs.existsSync(orphan), 'an old file nobody lists is removed');
+  assert.ok(fs.existsSync(fresh), 'a recent one is kept');
+  assert.ok(fs.existsSync(path.join(dir, `${listed.task_id}.json`)), 'a listed task is kept, however old');
+});

@@ -23,8 +23,8 @@ function appDataDir() {
   return pick(path.join(base, NAME), path.join(base, 'H2O'));
 }
 
-/** The per-user folder for lessons and other cross-project files. */
-const homeDir = () => pick(path.join(os.homedir(), '.drops'), path.join(os.homedir(), '.h2o'));
+/** The per-user folder for lessons and other cross-project files (DROPS_USER_DIR moves it, e.g. for tests). */
+const homeDir = () => env('USER_DIR') || pick(path.join(os.homedir(), '.drops'), path.join(os.homedir(), '.h2o'));
 
 /** Project folder names for commands, rules and instructions: new name first. */
 const PROJECT_DIRS = ['.drops', '.h2o'];

@@ -176,3 +176,22 @@ test('rewind also undoes what shell commands changed, but keeps files the user e
     assert.deepEqual(r.kept, ['user.txt']);
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
+
+test('a scheduled run is not held forever by a question nobody answers', { timeout: 30_000 }, async () => {
+  const { agent, data, events } = session({ scheduleAnswerMinutes: 0.002 }); // about 0.1 s
+  data.scheduleId = 'nightly';
+  let call = 0;
+  providers.callModel = async () => {
+    call++;
+    if (call === 1) return { content: [{ type: 'tool_use', id: 'c1', name: 'shell', input: { command: 'npm publish' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+    return { content: [{ type: 'text', text: 'Skipped publishing: it needs you.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('release it', { model: 'claude-opus-5-5', effort: 'low', mode: 'auto-edit' });
+    assert.ok(events.some((e) => e.type === 'permission'), 'it asked');
+    assert.ok(events.some((e) => e.type === 'notice' && /Nobody answered within/.test(e.message)));
+    const result = data.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === 'tool_result');
+    assert.match(String(result.content), /scheduled run and the user is away/);
+    assert.equal(agent.busy, false, 'the run finished');
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});

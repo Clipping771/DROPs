@@ -314,10 +314,46 @@ async function assertPublicUrl(url) {
   }
 }
 // fetch() that re-checks the address of every redirect hop.
+// A GET whose DNS answer is checked at the moment of connecting, by the same lookup the socket uses: a
+// name that resolves to a public address for the check and to a private one for the connection (DNS
+// rebinding) cannot slip through. Returns what callers use of a fetch() Response: status, headers.get, text.
+const MAX_BODY = 20 * 1024 * 1024;
+function guardedLookup(hostname, options, cb) {
+  dns.lookup(hostname, { all: true, verbatim: true }).then((addrs) => {
+    if (!addrs.length || addrs.some((a) => isPrivateAddress(a.address))) {
+      return cb(new Error(`fetch_url blocked: ${hostname} points to a local or private network address.`));
+    }
+    if (options && options.all) cb(null, addrs);
+    else cb(null, addrs[0].address, addrs[0].family);
+  }, cb);
+}
+function pinnedGet(url, { signal, headers = {} } = {}) {
+  const u = new URL(url);
+  const lib = u.protocol === 'https:' ? require('https') : require('http');
+  return new Promise((resolve, reject) => {
+    const req = lib.request(u, { method: 'GET', headers: { 'accept-encoding': 'gzip, deflate, br', ...headers }, lookup: guardedLookup, signal }, (res) => {
+      const enc = String(res.headers['content-encoding'] || '').toLowerCase();
+      const zlib = require('zlib');
+      const body = enc === 'gzip' ? res.pipe(zlib.createGunzip()) : enc === 'deflate' ? res.pipe(zlib.createInflate()) : enc === 'br' ? res.pipe(zlib.createBrotliDecompress()) : res;
+      const chunks = []; let size = 0;
+      body.on('data', (c) => { size += c.length; if (size > MAX_BODY) { req.destroy(); body.destroy(); } else chunks.push(c); });
+      body.on('error', reject);
+      body.on('close', () => {
+        const buf = Buffer.concat(chunks);
+        const charset = (String(res.headers['content-type'] || '').match(/charset=([\w-]+)/i) || [])[1] || 'utf-8';
+        let text;
+        try { text = new TextDecoder(charset).decode(buf); } catch { text = buf.toString('utf8'); }
+        resolve({ status: res.statusCode, headers: { get: (n) => { const v = res.headers[String(n).toLowerCase()]; return Array.isArray(v) ? v.join(', ') : v ?? null; } }, text: async () => text });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
 async function safeFetch(url, opts, maxHops = 5) {
   for (let hop = 0; hop <= maxHops; hop++) {
-    await assertPublicUrl(url);
-    const r = await fetch(url, { ...opts, redirect: 'manual' });
+    await assertPublicUrl(url); // also covers addresses written as numbers, which skip the lookup
+    const r = await pinnedGet(url, opts);
     const loc = r.status >= 300 && r.status < 400 && r.headers.get('location');
     if (!loc) return r;
     url = new URL(loc, url).href;
@@ -491,7 +527,9 @@ async function atomicWrite(abs, content) {
     await fsp.writeFile(abs, content, 'utf8');
   }
 }
-const SENSITIVE_FILE = /(^|\/)(\.env(\.[^/]+)?|\.mcp\.json|\.git\/(config|hooks\/.*)|id_rsa|id_ed25519|.*\.(pem|key|pfx|p12))$/i;
+// Credentials, and files that make code run by themselves (git and Husky hooks, DROPs/Claude hooks and
+// settings, VS Code tasks, CI workflows): an edit always asks, in every mode.
+const SENSITIVE_FILE = /(^|\/)(\.env(\.[^/]+)?|\.npmrc|\.mcp\.json|\.git\/(config|hooks\/.*)|\.husky\/.+|\.(drops|h2o|claude)\/(hooks\.json|settings(\.local)?\.json)|\.vscode\/(tasks|launch)\.json|\.github\/workflows\/.+|id_rsa|id_ed25519|.*\.(pem|key|pfx|p12))$/i;
 const isSensitiveFile = (rel) => SENSITIVE_FILE.test(String(rel || '').replace(/\\/g, '/'));
 
 // --- instant diagnostics after every edit ---
@@ -964,4 +1002,4 @@ async function prepare(ctx, name, input) {
 const isDangerous = (cmd, root) => shell.assessCommand(cmd, root).dangerous;
 const isSafeCommand = shell.isSafeCommand;
 
-module.exports = { definitions, validate, registerDef, prepare, READ_ONLY, EDIT_TOOLS, EXPLORE_TOOLS, ProcessManager, isDangerous, isSafeCommand, isSensitiveFile, makeDiff, resolveInRoot, isPrivateAddress, assertPublicUrl, keylessSearch, parseDuckResults, IGNORE, stripAnsi };
+module.exports = { guardedLookup, definitions, validate, registerDef, prepare, READ_ONLY, EDIT_TOOLS, EXPLORE_TOOLS, ProcessManager, isDangerous, isSafeCommand, isSensitiveFile, makeDiff, resolveInRoot, isPrivateAddress, assertPublicUrl, keylessSearch, parseDuckResults, IGNORE, stripAnsi };

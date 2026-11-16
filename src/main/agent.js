@@ -1305,11 +1305,16 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (set.error) this.emit('notice', { message: `Hooks: ${set.error}` });
     let list = set.hooks;
     const proj = list.filter((h) => h.source === 'project');
-    if (proj.length && this.data.mode !== 'yolo' && this.trustedHookHash !== set.projectHash) {
+    // A project's hooks are code from the repository that runs by itself, so they need the user's yes in
+    // every mode, Full auto included (a cloned repo must not run commands just by being opened). The
+    // question comes once per session and again whenever the hooks file changes; a destructive hook marks
+    // it dangerous (the headless CLI then refuses it without --allow-dangerous).
+    if (proj.length && this.trustedHookHash !== set.projectHash) {
       if (this.deniedHookHash === set.projectHash) list = list.filter((h) => h.source !== 'project');
       else {
         const u = { id: `hooks-${Date.now()}`, name: 'hooks', input: { command: proj.map((h) => `[${h.event}${h.matcher ? ` ${h.matcher}` : ''}] ${h.command}`).join('\n') } };
-        const r = signal?.aborted ? { decision: 'deny' } : await this.askPermission(u, { kind: 'shell', summary: `Run this project's hooks (${require('path').relative(this.data.projectDir, set.projectFile)})` }, false, 'Hooks are commands from the project that run at fixed points of the work');
+        const risky = proj.find((h) => shell.assessCommand(h.command, this.data.projectDir).dangerous);
+        const r = signal?.aborted ? { decision: 'deny' } : await this.askPermission(u, { kind: 'shell', summary: `Run this project's hooks (${require('path').relative(this.data.projectDir, set.projectFile)})` }, !!risky, risky ? `A hook runs a destructive command: ${risky.command.slice(0, 120)}` : 'Hooks are commands from the project that run at fixed points of the work');
         if (r.decision === 'deny') { this.deniedHookHash = set.projectHash; list = list.filter((h) => h.source !== 'project'); }
         else this.trustedHookHash = set.projectHash;
       }
@@ -1876,7 +1881,22 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   askPermission(u, prep, dangerous, reason) {
     return new Promise((resolve) => {
       const reqId = `${u.id}:perm`;
-      this.pending.set(reqId, resolve);
+      // A scheduled run often happens with nobody at the computer: a question nobody answers is declined
+      // after a while (the agent is told why and works around it) instead of holding the task forever.
+      let timer = null;
+      const done = (r) => { clearTimeout(timer); resolve(r); };
+      this.pending.set(reqId, done);
+      if (this.data.scheduleId) {
+        const mins = Number(this.settings().scheduleAnswerMinutes) || 30;
+        timer = setTimeout(() => {
+          if (this.pending.get(reqId) !== done) return;
+          this.pending.delete(reqId);
+          this.emit('notice', { message: `Nobody answered within ${mins} minutes, so this scheduled run skipped: ${prep.summary || u.name}.` });
+          this.emit('permission-expired', { reqId, toolId: u.id });
+          done({ decision: 'deny', feedback: `Nobody approved this within ${mins} minutes: this is a scheduled run and the user is away. Do not retry it; finish what you can without it and say in your final answer what still needs the user.` });
+        }, mins * 60_000);
+        timer.unref?.();
+      }
       this.emit('permission', { reqId, toolId: u.id, name: u.name, kind: prep.kind, input: u.input, summary: prep.summary, diff: prep.preview, dangerous, reason });
     });
   }

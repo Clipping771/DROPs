@@ -74,3 +74,25 @@ test('repo map: a second build reuses the cached file list, symbols and graph', 
   assert.match(a, /src\/auth\.js: login/);
   assert.equal(ctx.repoMap(dir, 14000, 'fix auth'), a);
 });
+
+test('sessions: long tool output and pictures are stored as blobs, and come back unchanged', () => {
+  const big = 'line of output\n'.repeat(2000);
+  const pic = 'iVBORw0KGgo' + 'A'.repeat(8000);
+  const d = store.newSession('C:\proj');
+  d.messages = [
+    { role: 'user', content: [{ type: 'text', text: 'run it' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'shell', input: { command: 'x' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: big }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pic } }, { type: 'tool_result', tool_use_id: 't2', content: 'short' }] },
+  ];
+  d.toolMeta = { t1: { name: 'shell', output: big, status: 'done' } };
+  store.saveSession(d);
+  const raw = fs.readFileSync(path.join(dataDir, 'sessions', `${d.id}.json`), 'utf8');
+  assert.ok(raw.length < 3000, `session file stays small (${raw.length} bytes)`);
+  assert.equal(d.messages[2].content[0].content, big, 'the in-memory session is unchanged');
+  const back = store.loadSession(d.id);
+  assert.equal(back.messages[2].content[0].content, big);
+  assert.equal(back.messages[2].content[1].source.data, pic);
+  assert.equal(back.messages[2].content[2].content, 'short');
+  assert.equal(back.toolMeta.t1.output, big);
+  assert.equal(store.listSessions().find((x) => x.id === d.id).title, 'New session');
+});

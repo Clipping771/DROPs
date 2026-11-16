@@ -49,10 +49,25 @@ async function diffText(root, limit = 60000) {
   const st = await status(root);
   const untracked = (st.files || []).filter((f) => f.status === 'untracked').map((f) => f.path);
   if (untracked.length) d += `\n\nNew untracked files:\n${untracked.slice(0, 100).join('\n')}`;
+  // This text goes to the AI provider (commit message): keys and passwords in it are masked first, as in
+  // every tool output.
+  d = require('./shell').redact(d).text;
   return d.length > limit ? d.slice(0, limit) + '\n…(diff truncated)' : d;
 }
 
+/** New files that look like secrets (.env, keys, certificates): never committed by the Commit button. */
+async function secretUntracked(root) {
+  const { isSensitiveFile } = require('./tools');
+  const st = await status(root);
+  return (st.files || []).filter((f) => f.status === 'untracked' && /(^|\/)(\.env(\.[^/]+)?|\.npmrc|id_rsa|id_ed25519|[^/]*\.(pem|key|pfx|p12))$/i.test(f.path) && isSensitiveFile(f.path)).map((f) => f.path);
+}
+
 async function commit(root, message) {
+  // "Commit" stages everything; a secret file nobody added before must not slip in with it.
+  const secrets = await secretUntracked(root);
+  if (secrets.length) {
+    throw new Error(`Not committed: ${secrets.slice(0, 5).join(', ')}${secrets.length > 5 ? ', …' : ''} ${secrets.length === 1 ? 'looks like a secret' : 'look like secrets'} (keys or credentials). Add ${secrets.length === 1 ? 'it' : 'them'} to .gitignore, or commit ${secrets.length === 1 ? 'it' : 'them'} yourself with git if that is really intended.`);
+  }
   await git(root, ['add', '-A']);
   const out = await git(root, ['commit', '-F', '-'], { input: message });
   return out.trim().split('\n')[0];

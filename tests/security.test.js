@@ -120,3 +120,26 @@ test('secret shield: more token kinds, connection-string passwords and .env secr
     assert.equal(redact(text).text, text, text);
   }
 });
+
+test('git: Commit refuses new secret files, and the diff sent for an AI commit message is masked', async () => {
+  const git = require('../src/main/git');
+  const cp = require('node:child_process');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-gitsafe-'));
+  cp.execSync('git init -q && git config user.email t@t && git config user.name t', { cwd: d });
+  fs.writeFileSync(path.join(d, 'app.js'), 'x\n');
+  await git.commit(d, 'first');
+  fs.writeFileSync(path.join(d, 'app.js'), `const KEY = "sk-ant-api03-${'A'.repeat(40)}";\n`);
+  fs.writeFileSync(path.join(d, '.env'), 'DB_PASSWORD=supersecret\n');
+  await assert.rejects(git.commit(d, 'second'), /\.env looks like a secret/);
+  const diff = await git.diffText(d);
+  assert.ok(!diff.includes('A'.repeat(20)) && /REDACTED/.test(diff), 'the key in the diff is masked');
+  fs.writeFileSync(path.join(d, '.gitignore'), '.env\n');
+  assert.match(await git.commit(d, 'second'), /second/);
+});
+
+test('fetch_url: the address is checked again when connecting (no DNS rebinding between check and connect)', async () => {
+  const { guardedLookup } = require('../src/main/tools');
+  const look = (host) => new Promise((resolve) => guardedLookup(host, {}, (err, addr) => resolve(err ? 'blocked' : addr)));
+  assert.equal(await look('localhost'), 'blocked');
+  assert.match(await look('example.com'), /^[\d.:a-f]+$/);
+});

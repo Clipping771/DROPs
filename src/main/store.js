@@ -101,7 +101,7 @@ function getSettings() {
   const stored = [apiKeyEnc, geminiKeyEnc, ...Object.values(providerKeysEnc || {})].filter(Boolean);
   const keyStoreAvailable = safeStorage ? asyncKeyStore !== false : true;
   return {
-    ...pub, keyStoreAvailable, plainKeysSaved: stored.some((k) => String(k).startsWith('raw:')), hasAnthropic, hasGemini, providers, hasKey: hasAnthropic || hasGemini || anyOai,
+    ...pub, keyStoreAvailable, plainKeysSaved: stored.some((k) => String(k).startsWith('raw:')), plainKeyFile: plainKeyFile(), hasAnthropic, hasGemini, providers, hasKey: hasAnthropic || hasGemini || anyOai,
     keyFromEnv: !apiKeyEnc && !!process.env.ANTHROPIC_API_KEY,
     geminiFromEnv: !geminiKeyEnc && !!geminiEnv(),
   };
@@ -142,7 +142,21 @@ async function init() {
   if (s.apiKeyEnc) s.apiKeyEnc = await open(s.apiKeyEnc);
   if (s.geminiKeyEnc) s.geminiKeyEnc = await open(s.geminiKeyEnc);
   for (const id of Object.keys(s.providerKeysEnc || {})) s.providerKeysEnc[id] = await open(s.providerKeysEnc[id]);
+  // An OpenRouter key kept in a plain-text file (~/.h2o/openrouter.key, an older way to give the key) is
+  // copied into the encrypted store, so the file can be deleted. Settings keeps warning while it exists.
+  const legacy = plainKeyFile();
+  if (legacy && !(s.providerKeysEnc || {}).openrouter) {
+    try {
+      const k = fs.readFileSync(legacy, 'utf8').trim();
+      if (k) { s.providerKeysEnc = { ...(s.providerKeysEnc || {}), openrouter: await encryptAsync(k) }; changed = true; }
+    } catch { /* unreadable: left alone */ }
+  }
   if (changed) writeSettingsFile(s);
+}
+/** The plain-text OpenRouter key file, when it exists. */
+function plainKeyFile() {
+  const f = path.join(os.homedir(), '.h2o', 'openrouter.key');
+  return fs.existsSync(f) ? f : null;
 }
 let cachedOsCryptKey;
 function getOsCryptKey() {
@@ -319,9 +333,45 @@ const unpackFiles = (files) => {
   for (const [k, v] of Object.entries(files)) if (v && typeof v === 'object' && v.$blob) files[k] = getBlob(v.$blob);
   return files;
 };
-const packSession = (data) => (data.turns?.length ? { ...data, turns: data.turns.map((t) => ({ ...t, files: packFiles(t.files), ...(t.after ? { after: packFiles(t.after) } : {}) })) } : data);
+// Long tool output, base64 pictures and the window's copy of tool output go to the same blob store: a long
+// session's file used to be megabytes of tool output, rewritten on every step. The model and the window
+// still get plain strings: only the file on disk changes.
+const BIG = 4096;
+const blobRef = (s) => (typeof s === 'string' && s.length >= BIG ? { $blob: putBlob(s) } : s);
+const isRef = (v) => v && typeof v === 'object' && typeof v.$blob === 'string';
+const MISSING = '[This output is no longer stored.]';
+const fromRef = (v) => (isRef(v) ? getBlob(v.$blob) ?? MISSING : v);
+function packBlock(b) {
+  if (!b || typeof b !== 'object') return b;
+  if (b.type === 'tool_result' && typeof b.content === 'string' && b.content.length >= BIG) return { ...b, content: blobRef(b.content) };
+  if (b.type === 'tool_result' && Array.isArray(b.content)) return { ...b, content: b.content.map(packBlock) };
+  if (b.type === 'image' && b.source?.type === 'base64' && typeof b.source.data === 'string' && b.source.data.length >= BIG) return { ...b, source: { ...b.source, data: blobRef(b.source.data) } };
+  return b;
+}
+function unpackBlock(b) {
+  if (!b || typeof b !== 'object') return;
+  if (b.type === 'tool_result') { if (isRef(b.content)) b.content = fromRef(b.content); else if (Array.isArray(b.content)) b.content.forEach(unpackBlock); }
+  if (b.type === 'image' && isRef(b.source?.data)) b.source.data = fromRef(b.source.data);
+}
+const packMessages = (list) => (Array.isArray(list) ? list.map((m) => (Array.isArray(m?.content) ? { ...m, content: m.content.map(packBlock) } : m)) : list);
+const unpackMessages = (list) => { for (const m of Array.isArray(list) ? list : []) if (Array.isArray(m?.content)) m.content.forEach(unpackBlock); };
+function packMeta(meta) {
+  if (!meta || typeof meta !== 'object') return meta;
+  const out = {};
+  for (const [id, m] of Object.entries(meta)) out[id] = m && typeof m.output === 'string' && m.output.length >= BIG ? { ...m, output: blobRef(m.output) } : m;
+  return out;
+}
+function unpackMeta(meta) { for (const m of Object.values(meta || {})) if (m && isRef(m.output)) m.output = fromRef(m.output); }
+
+const packSession = (data) => ({
+  ...data,
+  ...(data.turns?.length ? { turns: data.turns.map((t) => ({ ...t, files: packFiles(t.files), ...(t.after ? { after: packFiles(t.after) } : {}) })) } : {}),
+  messages: packMessages(data.messages), archive: packMessages(data.archive), toolMeta: packMeta(data.toolMeta),
+});
 function unpackSession(d) {
-  for (const t of d?.turns || []) { unpackFiles(t.files); unpackFiles(t.after); }
+  if (!d) return d;
+  for (const t of d.turns || []) { unpackFiles(t.files); unpackFiles(t.after); }
+  unpackMessages(d.messages); unpackMessages(d.archive); unpackMeta(d.toolMeta);
   return d;
 }
 /** Deletes checkpoint blobs that no session refers to any more (run now and then, not on every delete). */
@@ -382,15 +432,18 @@ function listSessions() {
 }
 
 /** Searches all saved sessions by title and conversation text (without unpacking checkpoint blobs). */
-function searchSessions(query) {
+/** Searches every saved session's title and conversation text. Reads files one at a time without
+ *  blocking, so the window stays responsive however many and however large the sessions are. */
+async function searchSessions(query) {
   const q = String(query || '').trim().toLowerCase();
   if (!q) return [];
   let files = [];
-  try { files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json') && f !== '_index.json'); } catch { return []; }
+  try { files = (await fs.promises.readdir(sessionsDir())).filter((f) => f.endsWith('.json') && f !== '_index.json'); } catch { return []; }
   const hits = [];
   const blockText = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (b?.type === 'text' && b.text ? b.text : '')).filter(Boolean).join(' ') : '');
   for (const f of files) {
-    const d = readJson(path.join(sessionsDir(), f), null);
+    let d = null;
+    try { d = JSON.parse(await fs.promises.readFile(path.join(sessionsDir(), f), 'utf8')); } catch { continue; }
     if (!d?.id) continue;
     const titleHit = (d.title || '').toLowerCase().includes(q);
     let snippet = '';
