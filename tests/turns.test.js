@@ -90,7 +90,7 @@ test('Stop hands undelivered steering back to the user instead of losing or rese
 test('a short outage is retried; a quota error is not', { timeout: 30_000 }, async () => {
   let chats = 0, mode = 'outage';
   const srv = http.createServer((req, res) => {
-    let body = ''; req.on('data', (c) => { body += c; });
+    req.resume(); // the mock answers without reading the request
     req.on('end', () => {
       if (req.url === '/api/chat') {
         chats++;
