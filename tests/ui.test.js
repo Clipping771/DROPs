@@ -14,13 +14,13 @@ let app, win, tmp;
  *  zoomed out so it still lays out as a desktop window (the sidebar and right panel shown). */
 async function fitDesktop() {
   await app.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows()[0]; w.webContents.setZoomFactor(1); w.setBounds({ x: 0, y: 0, width: 1440, height: 900 }); });
-  await new Promise((r) => setTimeout(r, 300));
-  await app.evaluate(({ BrowserWindow }) => {
-    const w = BrowserWindow.getAllWindows()[0];
-    const [cw, ch] = w.getContentSize();
-    const zoom = Math.min(1, cw / 1400, ch / 820);
-    if (zoom < 1) w.webContents.setZoomFactor(Math.max(0.5, zoom));
-  });
+  // The page's own width, once the window has settled (macOS applies a new size a moment later and keeps
+  // a window inside a small screen): zoom out until it lays out as a desktop window.
+  await new Promise((r) => setTimeout(r, 800));
+  const { w, h } = await win.evaluate(() => ({ w: innerWidth, h: innerHeight }));
+  const zoom = Math.min(1, w / 1400, h / 820);
+  if (zoom < 1) await app.evaluate(({ BrowserWindow }, z) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(z), Math.max(0.5, zoom));
+  await win.waitForFunction(() => innerWidth > 1280, null, { timeout: 5000 }).catch(() => {});
 }
 const errors = [];
 
@@ -354,7 +354,13 @@ test('chapters with a table of contents, the live browser pane, and split view',
 
     // Live browser pane: the page the agent saw, with its address and step.
     await win.click('#inspTabs button[data-tab="browser"]');
-    await win.waitForSelector('#browserBody img.bp-shot', { timeout: 30000 }); // a slow machine needs a while for the picture
+    try {
+      await win.waitForSelector('#browserBody img.bp-shot', { timeout: 30000 }); // a slow machine needs a while for the picture
+    } catch (e) {
+      // Say why: what the agent's browser steps returned (a browser that cannot start, a blocked address …).
+      const steps = await win.evaluate(() => [...document.querySelectorAll('.tool[data-name="browser"]')].map((t) => t.textContent.replace(/\s+/g, ' ').trim().slice(0, 400)));
+      throw new Error(`No picture in the browser pane. Browser steps: ${JSON.stringify(steps)}. ${e.message.split('\n')[0]}`);
+    }
     assert.match(await win.textContent('#browserBody .bp-url'), /127\.0\.0\.1:\d+\//);
     assert.ok((await win.getAttribute('#browserBody img.bp-shot', 'src')).startsWith('data:image/jpeg;base64,'));
 
