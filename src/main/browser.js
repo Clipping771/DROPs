@@ -273,7 +273,18 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
     case 'read': break;
     case 'launch': await settle(); break; // the app was started above
     case 'screenshot': {
-      const png = await page.screenshot({ fullPage: !!input.full, type: 'png' });
+      // A slow machine (no GPU, software rendering) can need longer than one action's timeout. A desktop
+      // app that still does not answer is captured by Electron itself, which does not wait for fonts.
+      let png;
+      try { png = await page.screenshot({ fullPage: !!input.full, type: 'png', timeout: 30_000 }); } catch (e) {
+        if (!s.app) throw e;
+        const b64 = await s.app.evaluate(async ({ BrowserWindow }) => {
+          const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+          return w ? (await w.capturePage()).toPNG().toString('base64') : null;
+        });
+        if (!b64) throw e;
+        png = Buffer.from(b64, 'base64');
+      }
       const text = await snapshot(page, s);
       return { text: `${text}\n\n[screenshot of ${page.url()}: shown below]`, images: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } }] };
     }

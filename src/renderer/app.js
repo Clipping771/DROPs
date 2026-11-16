@@ -230,7 +230,7 @@ function addRewind(v, wrap, turnIndex) {
 // Tool calls and thinking between two pieces of assistant text collapse into one line such as
 // "Read 2 files, edited app.js, ran a command  +12 −3 ›". Click it to see each step. A group opens
 // by itself while a step waits for the user (approval or a question) and closes again afterwards.
-const STEP_KIND = (n) => (n === 'read_file' ? 'read' : ['list_dir', 'glob', 'grep'].includes(n) ? 'search'
+const STEP_KIND = (n) => (n === 'read_file' ? 'read' : n === 'list_dir' ? 'list' : ['glob', 'grep'].includes(n) ? 'search'
   : ['edit_file', 'multi_edit', 'write_file'].includes(n) ? 'edit' : isShellTool(n) || n === 'start_process' ? 'run'
     : n === 'fetch_url' || n === 'web_fetch' ? 'fetch' : n === 'web_search' ? 'web' : n === 'task' ? 'agent'
       : n.startsWith('mcp__') ? 'mcp' : n === 'ask_user' ? 'ask' : n === 'remember' ? 'note'
@@ -238,11 +238,13 @@ const STEP_KIND = (n) => (n === 'read_file' ? 'read' : ['list_dir', 'glob', 'gre
 const plural = (n, one, many) => (n === 1 ? one : `${n} ${many}`);
 function stepsPhrase(cards, thought) {
   const by = {};
-  for (const c of cards) (by[STEP_KIND(c.dataset.name || '')] ||= []).push(c);
+  // Only finished steps are told in the past tense; one waiting for approval has not run yet.
+  for (const c of cards) if (!c.classList.contains('waiting')) (by[STEP_KIND(c.dataset.name || '')] ||= []).push(c);
   const parts = [];
   if (thought) parts.push(thought);
   const files = (list) => [...new Set(list.map((c) => c.dataset.path || c.dataset.sum).filter(Boolean))];
   if (by.read) { const f = files(by.read); parts.push(f.length === 1 ? `read ${baseName(f[0])}` : `read ${f.length || by.read.length} files`); }
+  if (by.list) parts.push(plural(by.list.length, 'listed a folder', 'folders').replace(/^(\d+)/, 'listed $1'));
   if (by.search) parts.push(by.search.length === 1 ? 'searched the code' : `searched the code ${by.search.length} times`);
   if (by.edit) {
     const f = files(by.edit);
@@ -280,7 +282,9 @@ function stepsGroup(parent) {
       const lastThink = thinks[thinks.length - 1];
       const secs = thinks.reduce((n, t) => n + Number(t.dataset.secs || 0), 0);
       const thought = !thinks.length ? '' : lastThink.dataset.heading ? lastThink.dataset.heading.replace(/^./, (c) => c.toLowerCase()) : secs ? `thought for ${secs}s` : 'thought';
-      $('.steps-sum', head).textContent = stepsPhrase(cards, thought) || 'Thinking';
+      const phrase = stepsPhrase(cards, thought);
+      const waitFor = cards.some((c) => c.classList.contains('waiting') && c.dataset.name !== 'ask_user') ? 'approval' : 'answer';
+      $('.steps-sum', head).textContent = waiting ? (phrase ? `${phrase} · waiting for your ${waitFor}` : `Waiting for your ${waitFor}`) : phrase || 'Thinking';
       const now = running?.classList.contains('tool') ? `${toolInfo(running.dataset.name)[0]} ${running.dataset.sum || ''}`.trim() : '';
       $('.steps-now', head).textContent = now ? (now.length > 60 ? now.slice(0, 60) + '…' : now) + '…' : '';
       const add = cards.reduce((n, c) => n + Number(c.dataset.added || 0), 0), del = cards.reduce((n, c) => n + Number(c.dataset.removed || 0), 0);
@@ -372,7 +376,7 @@ function toolCard(v, id, name, parent) {
       tickTime(s === 'running' || s === 'composing');
       const st = $('.st', head);
       st.className = 'st ' + (s === 'composing' ? 'running' : s);
-      st.innerHTML = s === 'done' ? icon('check', 'xs') : s === 'error' || s === 'denied' ? icon('x', 'xs') : s === 'waiting' ? icon('alert', 'xs') : '';
+      st.innerHTML = s === 'done' ? icon('check', 'xs') : s === 'error' || s === 'denied' ? icon('x', 'xs') : s === 'waiting' ? icon('clock', 'xs') : '';
       el.classList.toggle('running', s === 'running' || s === 'composing');
       el.classList.toggle('done', s === 'done');
       el.classList.toggle('error', s === 'error' || s === 'denied');
@@ -869,24 +873,26 @@ function showQuestion(v, ev) {
   Panels.markSession(v);
   setWorking(v, false);
   const p = h('div', 'perm question');
-  p.innerHTML = `<div class="q">${icon('info', 'sm')}<span></span></div>`;
-  $('.q span', p).textContent = ev.question;
+  p.innerHTML = '<div class="q"><span class="q-label">Question</span><span class="q-t"></span></div>';
+  $('.q-t', p).textContent = ev.question;
+  const opts = h('div', 'q-opts');
   const btns = h('div', 'btns');
   const answer = (text) => {
     api.permission(v.id, ev.reqId, text ? 'answer' : 'skip', text || '');
     p.remove(); v.waiting.delete(ev.toolId); Panels.markSession(v);
     c.setStatus('running'); setWorking(v, true, 'Working');
   };
-  for (const o of ev.options || []) { const b = h('button', 'btn sm tonal'); b.textContent = o; b.onclick = () => answer(o); btns.appendChild(b); }
+  for (const o of ev.options || []) { const b = h('button', 'q-opt'); b.textContent = o; b.onclick = () => answer(o); opts.appendChild(b); }
   const fb = h('input'); fb.placeholder = ev.options?.length ? 'Or type your own answer…' : 'Type your answer…';
   fb.onkeydown = (e) => { if (e.key === 'Enter' && fb.value.trim()) answer(fb.value.trim()); };
   const send = h('button', 'btn sm primary', 'Answer'); send.onclick = () => fb.value.trim() && answer(fb.value.trim());
   const skip = h('button', 'btn sm ghost', 'Skip'); skip.title = 'Let the agent decide'; skip.onclick = () => answer('');
-  btns.append(fb, send, skip);
-  p.appendChild(btns);
+  btns.append(skip, send);
+  if (opts.children.length) p.appendChild(opts);
+  p.append(fb, btns);
   c.el.appendChild(p);
   autoScroll(v, true);
-  if (S.current === v.id) (ev.options?.length ? $('button', btns) : fb).focus();
+  if (S.current === v.id) (opts.firstChild || fb).focus();
   if (S.current !== v.id) toast(`“${v.data.title}” has a question for you`);
   if (!document.hasFocus() && S.settings?.notifyApproval !== false) new Notification('DROPs has a question', { body: `${v.data.title}: ${ev.question}`.slice(0, 140) });
 }
@@ -899,12 +905,13 @@ function showPermission(v, ev) {
   setWorking(v, false);
   const p = h('div', 'perm');
   const what = ev.kind === 'shell' ? 'Run this command?' : ev.kind === 'mcp' ? `Call MCP tool <b>${esc(ev.summary)}</b>?` : ev.kind === 'fetch' ? `Fetch <b>${esc(ev.summary)}</b>?` : ev.kind === 'search' ? `Search the web for <b>${esc(ev.summary)}</b>?` : (ev.kind === 'computer' || ev.kind === 'schedule') ? `<b>${esc(String(ev.summary).replace(/[.?]$/, ''))}</b>?` : ev.diff?.isNew ? `Create <b>${esc(ev.summary)}</b>?` : `Apply this change to <b>${esc(ev.summary)}</b>?`;
-  p.innerHTML = `<div class="q">${ev.dangerous ? `${icon('alert', 'sm')}<span class="danger">${esc(ev.reason || 'Potentially destructive.')}</span>` : icon('shield', 'sm')} <span>${what}</span></div>`;
+  p.classList.toggle('risky', !!ev.dangerous);
+  p.innerHTML = `<div class="q"><span class="q-label">Approval needed</span><span class="q-t">${what}</span></div>${ev.dangerous ? `<div class="perm-note">${icon('alert', 'xs')}<span>${esc(ev.reason || 'This action may be destructive or irreversible.')}</span></div>` : ''}`;
   const btns = h('div', 'btns');
   const allow = h('button', 'btn primary sm', 'Allow');
   const always = h('button', 'btn sm', ev.kind === 'edit' ? 'Allow all edits' : ev.kind === 'mcp' ? 'Always allow this server' : ev.kind === 'fetch' ? 'Always allow this site' : ev.kind === 'search' ? 'Always allow web search' : 'Allow all commands');
   const fb = h('input'); fb.placeholder = 'Or tell DROPs what to do instead…';
-  const deny = h('button', 'btn sm danger', 'Deny');
+  const deny = h('button', 'btn sm', 'Deny');
   const answer = (decision) => {
     api.permission(v.id, ev.reqId, decision, fb.value.trim());
     p.remove(); v.waiting.delete(ev.toolId); Panels.markSession(v);
@@ -916,8 +923,8 @@ function showPermission(v, ev) {
   deny.onclick = () => answer('deny');
   fb.onkeydown = (e) => { if (e.key === 'Enter') answer('deny'); };
   if (ev.dangerous || ev.kind === 'computer' || ev.kind === 'schedule') always.hidden = true;
-  btns.append(allow, always, fb, deny);
-  p.appendChild(btns);
+  btns.append(deny, always, allow);
+  p.append(fb, btns);
   c.el.appendChild(p);
   autoScroll(v, true);
   if (S.current === v.id && !$('#input').value) allow.focus();

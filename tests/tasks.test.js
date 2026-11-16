@@ -14,9 +14,9 @@ test('task tests write to a throwaway folder, not the user\'s DROPs data', () =>
 // Helper to create a fake agent
 function createFakeAgent(sessionId) {
   let busy = false;
-  let currentTask = null;
+  let _currentTask = null;
   let messages = [];
-  let cancelled = false;
+  let _cancelled = false;
 
   return {
     get busy() { return busy; },
@@ -28,12 +28,12 @@ function createFakeAgent(sessionId) {
     },
     async send(text, opts, images, extra = {}) {
       busy = true;
-      currentTask = extra.taskId;
+      _currentTask = extra.taskId;
       const signal = extra.signal;
       try {
         for (let i = 0; i < 5; i++) {
           if (signal?.aborted) {
-            cancelled = true;
+            _cancelled = true;
             throw new Error('aborted');
           }
           if (extra.onProgress) extra.onProgress({ step: i + 1, maxSteps: 5, percent: ((i + 1) / 5) * 100 });
@@ -42,7 +42,7 @@ function createFakeAgent(sessionId) {
         messages.push({ role: 'user', content: text });
       } finally {
         busy = false;
-        currentTask = null;
+        _currentTask = null;
       }
     },
     steer(text) {

@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 (2026-11-16)
+
+Everything since 2.2.0.
 
 ### Fixes and safety
+- Root-cause debugging finds the failing line also when the project is opened through a link or a short path; a project with an unreadable folder no longer stops every request.
+- Dependencies: patched DOMPurify and minimatch (npm audit: 0 vulnerabilities).
 - A message typed just as a task ended is no longer lost: it runs next, ahead of queued messages.
 - Source control only works on the open project.
 - Shortened PowerShell flags (`-Recu`) and inline delete code (`node -e`, `python -c`) always ask first; `git diff --output` and `git branch -D` are no longer treated as read-only.
@@ -14,6 +18,12 @@
 - The session list, settings and saved keys are cached.
 - The repository map reuses what has not changed (about 100x faster on a repeat request); grep reads files in parallel.
 - Long answers stream without slowing down; idle sessions are released from memory.
+
+### Look
+- A plainer, more professional interface: no pill-shaped buttons, glows or pulsing dots; 6–8px corners; one solid colour for the main action.
+- Approval and question cards are calm panels: the question, a one-line risk note, the answer box, and the buttons on the right. Options are a plain list.
+- Step headers say "waiting for your approval" or "waiting for your answer" instead of "ran a command" while nothing has run yet.
+- Light mode: code blocks and the selected session are readable again.
 
 ### New
 - Rewind also undoes changes made by shell commands (formatters, generators), in git projects.
