@@ -26,7 +26,8 @@ const Panels = (() => {
     // Every project with its sessions, the open project first (like a workspace sidebar).
     const all = q ? S.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : S.sessions;
     const byProject = new Map();
-    for (const s of [...all].sort((a, b) => b.updated - a.updated)) {
+    // Pinned sessions first, then the most recent.
+    for (const s of [...all].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated)) {
       if (!byProject.has(s.projectDir)) byProject.set(s.projectDir, []);
       byProject.get(s.projectDir).push(s);
     }
@@ -51,15 +52,16 @@ const Panels = (() => {
       if (!items.length) { const e = h('div', 'proj-empty', 'No sessions yet'); list.appendChild(e); continue; }
       const limit = p === S.project || q ? items.length : 8;
       for (const s of items.slice(0, limit)) {
-        const it = h('div', 'row session' + (s.id === S.current ? ' on' : ''));
+        const it = h('div', 'row session' + (s.id === S.current ? ' on' : '') + (s.pinned ? ' pinned' : ''));
         it.dataset.id = s.id;
         it.dataset.failed = s.failed ? '1' : '';
-        it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${timeAgo(s.updated)}${s.cost ? ' · ' + fmtCost(s.cost) : ''}</span></span><span class="acts"><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
+        it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${timeAgo(s.updated)}${s.cost ? ' · ' + fmtCost(s.cost) : ''}</span></span><span class="acts"><button class="pin-btn" title="${s.pinned ? 'Unpin' : 'Pin to the top'}">${icon('pin', 'xs')}</button><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
         $('.tt', it).textContent = s.title;
         it.title = s.title;
         applyStatus(it, S.views.get(s.id), s);
         it.onclick = () => openSession(s.id);
-        const [ren, del] = $$('.acts button', it);
+        const [pin, ren, del] = $$('.acts button', it);
+        pin.onclick = async (e) => { e.stopPropagation(); await api.pinSession(s.id, !s.pinned); s.pinned = !s.pinned; const v = S.views.get(s.id); if (v) v.data.pinned = s.pinned; renderSessions(); };
         ren.onclick = async (e) => {
           e.stopPropagation();
           const name = await promptBox('Rename session', s.title);
@@ -389,12 +391,13 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
       badge.textContent = activeCount;
     }
 
+    const wrap = h('div', 'tasks-list');
+    await renderSchedules(wrap);
     if (!tasks.length) {
-      box.innerHTML = '<div class="empty">No tasks recorded yet.<br><small style="color:var(--dim)">Coding tasks run in the background independently from chat.</small></div>';
+      wrap.appendChild(h('div', 'empty', 'No tasks yet. Requests run here in the background, and scheduled ones start by themselves.'));
+      box.appendChild(wrap);
       return;
     }
-
-    const wrap = h('div', 'tasks-list');
 
     if (activeTasks.length) {
       wrap.appendChild(h('div', 'glance-title', `Active (${activeTasks.length})`));
@@ -472,6 +475,76 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     }
 
     box.appendChild(wrap);
+  }
+
+  // ---------- scheduled tasks ----------
+  async function renderSchedules(wrap) {
+    let list = [];
+    try { list = await api.scheduleList(); } catch { list = []; }
+    const head = h('div', 'glance-title sched-head');
+    head.innerHTML = '<span>Scheduled</span>';
+    const add = h('button', 'btn ghost sm', 'New'); add.onclick = () => editSchedule(null);
+    head.appendChild(add); wrap.appendChild(head);
+    if (!list.length) { wrap.appendChild(h('div', 'sched-empty', 'Nothing scheduled. A scheduled task runs a prompt by itself, once or on a repeat, in a new session.')); return; }
+    for (const s of list) {
+      const row = h('div', 'task-row sched' + (s.enabled === false ? ' off' : ''));
+      const next = s.enabled !== false && s.nextRun ? `next ${new Date(s.nextRun).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'off';
+      row.innerHTML = `<span class="tr-mark">${icon('clock', 'sm')}</span><div class="tr-main"><div class="task-title"></div><div class="sched-when"></div>${s.lastError ? '<div class="task-error"></div>' : ''}</div><span class="sched-acts"><button class="btn ghost sm" data-a="run">Run now</button><button class="btn ghost sm" data-a="edit">Edit</button><button class="btn ghost sm" data-a="toggle">${s.enabled === false ? 'Turn on' : 'Pause'}</button><button class="btn ghost sm" data-a="del">Delete</button></span>`;
+      $('.task-title', row).textContent = s.name;
+      $('.sched-when', row).textContent = `${s.when} · ${next} · ${baseName(s.projectDir)}`;
+      if (s.lastError) $('.task-error', row).textContent = `Last run failed: ${s.lastError}`;
+      row.querySelectorAll('[data-a]').forEach((b) => (b.onclick = async () => {
+        const a = b.dataset.a;
+        if (a === 'run') { const r = await api.scheduleRunNow(s.id); if (r?.error) toast(r.error); }
+        else if (a === 'edit') return editSchedule(s);
+        else if (a === 'toggle') { const r = await api.scheduleSave({ ...s, enabled: s.enabled === false }); if (r?.error) toast(r.error); }
+        else if (a === 'del') { if (!(await confirmBox('Delete this scheduled task?', s.name, 'Delete'))) return; await api.scheduleDelete(s.id); }
+        renderTasks();
+      }));
+      wrap.appendChild(row);
+    }
+  }
+  function editSchedule(s) {
+    if (!S.project && !s) { toast('Open a project first.'); return; }
+    const o = h('div', 'overlay center');
+    const m = h('div', 'modal sched-modal'); m.style.width = 'min(520px, 94vw)';
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    m.innerHTML = `<div class="modal-head"><h2>${s ? 'Edit scheduled task' : 'New scheduled task'}</h2></div>
+      <div class="modal-body sched-form">
+        <label>Name<input class="input" id="schName" placeholder="Morning test run"></label>
+        <label>What DROPs should do<textarea class="textarea" id="schPrompt" rows="4" placeholder="Run the tests. If any fail, find the cause and tell me in a short report."></textarea></label>
+        <div class="sched-grid">
+          <label>Repeat<select class="input" id="schRepeat"><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekly">Every week</option><option value="hourly">Every hour</option><option value="once">Once</option></select></label>
+          <label id="schTimeL">Time<input class="input" id="schTime" type="time" value="09:00"></label>
+          <label id="schDayL">Day<select class="input" id="schDay">${days.map((d, i) => `<option value="${i}">${d}</option>`).join('')}</select></label>
+          <label id="schAtL">Date and time<input class="input" id="schAt" type="datetime-local"></label>
+          <label>Permissions<select class="input" id="schMode"><option value="ask">Ask before changes</option><option value="auto-edit">Edits on its own</option><option value="yolo">Full auto</option></select></label>
+        </div>
+        <div class="sched-note">Runs in a new session of <b></b> with the model ${esc(s?.model || $('#modelSel').value || 'auto')}. Questions it asks wait for you in that session.</div>
+      </div>`;
+    const f = h('div', 'modal-foot'); const no = h('button', 'btn', 'Cancel'); const yes = h('button', 'btn primary', s ? 'Save' : 'Schedule');
+    f.append(no, yes); m.appendChild(f); o.appendChild(m); document.body.appendChild(o);
+    $('.sched-note b', m).textContent = baseName(s?.projectDir || S.project);
+    const v = (id) => $(id, m);
+    v('#schName').value = s?.name || ''; v('#schPrompt').value = s?.prompt || '';
+    v('#schRepeat').value = s?.repeat || 'daily'; v('#schTime').value = s?.time || '09:00'; v('#schDay').value = String(s?.weekday ?? 1);
+    v('#schMode').value = s?.mode || (currentOpts().mode === 'plan' ? 'ask' : currentOpts().mode) || 'auto-edit';
+    if (s?.at) { const d = new Date(s.at); v('#schAt').value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
+    const sync = () => { const r = v('#schRepeat').value; v('#schTimeL').hidden = r === 'once'; v('#schDayL').hidden = r !== 'weekly'; v('#schAtL').hidden = r !== 'once'; };
+    v('#schRepeat').onchange = sync; sync();
+    const close = () => o.remove();
+    no.onclick = close;
+    o.onclick = (e) => { if (e.target === o) close(); };
+    yes.onclick = async () => {
+      const r = await api.scheduleSave({
+        ...(s || {}), name: v('#schName').value, prompt: v('#schPrompt').value, repeat: v('#schRepeat').value, time: v('#schTime').value,
+        weekday: +v('#schDay').value, at: v('#schAt').value ? new Date(v('#schAt').value).getTime() : undefined, mode: v('#schMode').value,
+        projectDir: s?.projectDir || S.project, model: s?.model || $('#modelSel').value, effort: s?.effort || $('#effortSel').value,
+      });
+      if (r?.error) { toast(r.error); return; }
+      close(); toast(`Scheduled: ${r.name} (${r.when})`); renderTasks();
+    };
+    v('#schPrompt').focus();
   }
 
   function renderPlan() {
@@ -614,6 +687,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     const u = v?.data.usage;
     const running = v ? [...v.procs.values()].filter((p) => p.running).length : 0;
     const modeLabel = { plan: 'Plan mode', ask: 'Ask mode', 'auto-edit': 'Auto-edit', yolo: 'Full auto' }[o.mode];
+    S.sbYolo = o.mode === 'yolo';
     sb.innerHTML = '';
     const item = (html, title, onclick, cls = '') => { const e = h(onclick ? 'button' : 'span', 'sb ' + cls); e.innerHTML = html; if (title) e.title = title; if (onclick) e.onclick = onclick; sb.appendChild(e); };
     if (v?.data.worktree) item(`${icon('merge')}${esc(v.data.worktree.branch)}`, 'This session works in its own git worktree — see the Changes tab to merge it', () => switchTab('changes'), 'warn');
@@ -795,6 +869,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
             ${setItem('Independent QA agent', 'When a task names SPEC.md, a separate QA call writes browser or HTTP checks from the spec alone before coding starts.', tgl('setQaAgent'))}
             ${setItem('Auto-compact context at (tokens)', 'Older turns are summarised past this size. Lower is cheaper; higher keeps more detail.', '<input class="input num" type="number" id="setCompact" min="20000" step="10000">')}
             ${setItem('Maximum steps per request', 'Safety limit on agent iterations for one message.', '<input class="input num" type="number" id="setSteps" min="10" step="10">')}
+            ${setItem('Hooks (JSON)', 'Your commands at fixed points of the work: <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>PreToolUse</code>, <code>PostToolUse</code>, <code>Stop</code>. Each gets the event as JSON on stdin; exit code 2 blocks (or, for Stop, sends the agent back) with stderr as the reason; stdout is added as context. A project can have its own in <code>.drops/hooks.json</code> (you approve it once per session).', '<textarea class="textarea mono" id="setHooks" rows="6" spellcheck="false" placeholder="{&quot;hooks&quot;: {&quot;PostToolUse&quot;: [{&quot;matcher&quot;: &quot;write_file|edit_file&quot;, &quot;command&quot;: &quot;npm run lint --silent&quot;}]}}"></textarea>', 'stack')}
             ${setItem('After-edit command', 'Runs after every file the agent changes, e.g. a formatter or linter. <code>{file}</code> is the changed file. Its output goes back to the agent. Leave empty to turn off.', '<input class="input" id="setAfterEdit" placeholder="npx prettier --write {file}" spellcheck="false">')}
           </div>
           <div class="set-card"><div class="set-sub">Language & learning</div>
@@ -905,7 +980,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     val('#setEffort', s.effort); val('#setMode', s.mode); val('#setCompact', s.compactAt); val('#setSteps', s.maxSteps); val('#setInstr', s.customInstructions);
     val('#setLang', s.responseLanguage || 'auto'); val('#setAutoProv', s.autoProvider || 'auto'); val('#setMaxCost', s.maxCostPerTask || 0); val('#setMaxTok', s.maxTokensPerTask || 0);
     val('#setOllamaUrl', s.ollamaUrl || 'http://localhost:11434'); val('#setOllamaCtx', s.ollamaCtx || 16384); val('#setSandboxImg', s.sandboxImage || 'node:22-bookworm');
-    val('#setAllowCmds', (s.allowCommands || '')); val('#setDenyCmds', (s.denyCommands || '')); val('#setAfterEdit', s.afterEditCommand || '');
+    val('#setAllowCmds', (s.allowCommands || '')); val('#setDenyCmds', (s.denyCommands || '')); val('#setAfterEdit', s.afterEditCommand || ''); val('#setHooks', typeof s.hooks === 'string' ? s.hooks : s.hooks ? JSON.stringify(s.hooks, null, 2) : '');
     $('#openUserCmds', m).onclick = () => api.openCommandsFolder('user');
     $('#openProjCmds', m).onclick = () => (S.project ? api.openCommandsFolder('project') : toast('Open a project first'));
     $('#openProjCmds', m).disabled = !S.project;
@@ -1064,7 +1139,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
         maxCostPerTask: Math.max(0, Number($('#setMaxCost', m).value) || 0), maxTokensPerTask: Math.max(0, Number($('#setMaxTok', m).value) || 0),
         ollamaEnabled: T.ollama.classList.contains('on'), ollamaUrl: $('#setOllamaUrl', m).value.trim() || 'http://localhost:11434', ollamaCtx: num('#setOllamaCtx', 16384, 4096),
         mcpServers, allowProjectMcp: T.projMcp.classList.contains('on'),
-        allowCommands: $('#setAllowCmds', m).value.trim(), denyCommands: $('#setDenyCmds', m).value.trim(), afterEditCommand: $('#setAfterEdit', m).value.trim(),
+        allowCommands: $('#setAllowCmds', m).value.trim(), denyCommands: $('#setDenyCmds', m).value.trim(), afterEditCommand: $('#setAfterEdit', m).value.trim(), hooks: $('#setHooks', m).value.trim(),
         restoreLastProject: T.restore.classList.contains('on'), notifyApproval: T.notify.classList.contains('on'), sendKey: $('#setSendKey', m).value,
         chatSize: $('#setChatSize', m).value, chatWidth: $('#setChatWidth', m).value, density: $('#setDensity', m).value,
         sandbox: T.sandbox.classList.contains('on'), sandboxImage: $('#setSandboxImg', m).value.trim() || 'node:22-bookworm', sandboxNetwork: T.net.classList.contains('on'),

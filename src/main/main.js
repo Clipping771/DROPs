@@ -71,7 +71,46 @@ const deps = {
   getGeminiKey: () => store.getGeminiKey(),
   getProviderKey: (id) => store.getProviderKey(id),
   mcp,
+  // The agent's `schedule` tool (it asks the user before saving or deleting).
+  schedules: {
+    list: () => scheduleList(),
+    save: (input) => saveSchedule(input),
+    remove: (id) => deleteSchedule(id),
+  },
 };
+
+// ---------- scheduled tasks ----------
+const schedule = require('./schedule');
+const scheduleList = () => (store.getSettings().schedules || []).map((s) => ({ ...s, when: schedule.describe(s) }));
+const writeSchedules = (list) => store.setSettings({ schedules: list.map(({ when, ...s }) => s) });
+function saveSchedule(input) {
+  const list = store.getSettings().schedules || [];
+  const old = input.id ? list.find((x) => x.id === input.id) : null;
+  const s = schedule.normalize(input, old || {});
+  writeSchedules(old ? list.map((x) => (x.id === s.id ? s : x)) : [...list, s]);
+  return { ...s, when: schedule.describe(s) };
+}
+function deleteSchedule(id) {
+  const list = store.getSettings().schedules || [];
+  if (!list.some((x) => x.id === id)) return false;
+  writeSchedules(list.filter((x) => x.id !== id));
+  return true;
+}
+/** Starts one scheduled task in a new session of its project. */
+async function runSchedule(s) {
+  if (!s.projectDir || !fs.existsSync(s.projectDir)) throw new Error('The project folder no longer exists.');
+  const data = store.newSession(s.projectDir, {});
+  data.title = `Scheduled: ${s.name}`; data.scheduleId = s.id;
+  store.saveSession(data);
+  agents.set(data.id, new AgentSession(data, deps));
+  if (win && !win.isDestroyed()) win.webContents.send('schedule:ran', { id: s.id, sessionId: data.id, name: s.name });
+  const st = store.getSettings();
+  await taskManager.submitTask({
+    session_id: data.id, workspace_id: s.projectDir, prompt: s.prompt, images: [],
+    opts: { model: s.model || st.defaultModel || 'auto', effort: s.effort || st.effort || 'high', mode: s.mode || 'auto-edit' },
+  }, { action: 'queue' });
+}
+const scheduler = new schedule.Scheduler({ list: () => store.getSettings().schedules || [], save: writeSchedules, run: runSchedule });
 
 function getAgent(id) {
   if (!agents.has(id)) {
@@ -367,7 +406,13 @@ handle('fs:search', async (root, q) => {
 handle('commands:list', (root) => {
   let project = null;
   try { project = projectRoot(root); } catch { /* no project open */ }
-  return listCommands(project, path.join(app.getPath('userData'), 'commands'));
+  const cmds = listCommands(project, path.join(app.getPath('userData'), 'commands'));
+  // Skills can be called by name too: /release-notes runs the request with that skill.
+  const have = new Set(cmds.map((c) => c.name));
+  const skills = require('./commands').listSkills(project, path.join(app.getPath('userData'), 'skills'))
+    .filter((k) => !have.has(k.name))
+    .map((k) => ({ name: k.name, description: `Skill: ${k.description}`, prompt: `Use the "${k.name}" skill (load it with the skill tool) for this: $ARGUMENTS`, source: k.source }));
+  return [...cmds, ...skills];
 });
 handle('commands:openFolder', async (where) => {
   const dir = where === 'project' && currentProject ? path.join(currentProject, '.drops', 'commands') : path.join(app.getPath('userData'), 'commands');
@@ -436,6 +481,7 @@ handle('session:fork', (id) => {
 });
 handle('session:load', (id) => { const a = getAgent(id); return a ? { ...a.data, busy: a.busy, procs: a.procs.list() } : null; });
 handle('session:delete', (id) => { agents.get(id)?.dispose(); agents.delete(id); store.deleteSession(id); return true; });
+handle('session:pin', (id, on) => { const a = getAgent(id); if (!a) return false; a.data.pinned = !!on; a.save(true); return true; });
 handle('session:rename', (id, title) => { const a = getAgent(id); if (!a) return false; a.data.title = title; a.save(true); return true; });
 handle('session:setOptions', (id, opts) => {
   const a = getAgent(id);
@@ -532,3 +578,13 @@ app.whenReady().then(() => {
 });
 app.on('window-all-closed', () => { for (const a of agents.values()) a.dispose(); mcp.closeAll().finally(() => app.quit()); });
 app.whenReady().then(() => syncMcp().catch(() => {}));
+app.whenReady().then(() => setTimeout(() => scheduler.start(), 5000));
+handle('schedule:list', () => scheduleList());
+handle('schedule:save', (input) => { try { return saveSchedule(input || {}); } catch (e) { return { error: e.message }; } });
+handle('schedule:delete', (id) => deleteSchedule(id));
+handle('schedule:runNow', async (id) => {
+  const list = store.getSettings().schedules || [];
+  const s = list.find((x) => x.id === id);
+  if (!s) return { error: 'No such scheduled task.' };
+  try { await runSchedule(s); s.lastRun = Date.now(); writeSchedules(list); return { ok: true }; } catch (e) { return { error: e.message }; }
+});

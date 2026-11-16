@@ -49,7 +49,7 @@ const TOOL_INFO = {
   list_dir: ['List', 'folder'], glob: ['Find', 'search'], grep: ['Search', 'textSearch'], powershell: ['Run', 'terminal'], shell: ['Run', 'terminal'],
   todo_write: ['Plan', 'list'], check_requirement: ['Verify', 'shield'], web_search: ['Web search', 'globe'], web_fetch: ['Fetch', 'globe'], fetch_url: ['Fetch', 'globe'],
   start_process: ['Start process', 'play'], process_output: ['Process output', 'terminal'], stop_process: ['Stop process', 'square'],
-  task: ['Sub-agent', 'bot'], app: ['App', 'monitor'], computer: ['Computer', 'monitor'], impact: ['Impact', 'branch'], find_breaking_change: ['Find the breaking change', 'search'], audit: ['Audit', 'shield'], remember: ['Remember', 'bookmark'], ask_user: ['Question', 'info'],
+  task: ['Sub-agent', 'bot'], app: ['App', 'monitor'], computer: ['Computer', 'monitor'], skill: ['Skill', 'bookmark'], schedule: ['Schedule', 'clock'], impact: ['Impact', 'branch'], find_breaking_change: ['Find the breaking change', 'search'], audit: ['Audit', 'shield'], remember: ['Remember', 'bookmark'], ask_user: ['Question', 'info'],
 };
 const isShellTool = (n) => n === 'shell' || n === 'powershell';
 const toolInfo = (name) => TOOL_INFO[name] || (name.startsWith('mcp__') ? ['MCP', 'plug'] : [name, 'file']);
@@ -891,7 +891,7 @@ function showPermission(v, ev) {
   Panels.markSession(v);
   setWorking(v, false);
   const p = h('div', 'perm');
-  const what = ev.kind === 'shell' ? 'Run this command?' : ev.kind === 'mcp' ? `Call MCP tool <b>${esc(ev.summary)}</b>?` : ev.kind === 'fetch' ? `Fetch <b>${esc(ev.summary)}</b>?` : ev.kind === 'search' ? `Search the web for <b>${esc(ev.summary)}</b>?` : ev.kind === 'computer' ? `<b>${esc(String(ev.summary).replace(/[.?]$/, ''))}</b>?` : ev.diff?.isNew ? `Create <b>${esc(ev.summary)}</b>?` : `Apply this change to <b>${esc(ev.summary)}</b>?`;
+  const what = ev.kind === 'shell' ? 'Run this command?' : ev.kind === 'mcp' ? `Call MCP tool <b>${esc(ev.summary)}</b>?` : ev.kind === 'fetch' ? `Fetch <b>${esc(ev.summary)}</b>?` : ev.kind === 'search' ? `Search the web for <b>${esc(ev.summary)}</b>?` : (ev.kind === 'computer' || ev.kind === 'schedule') ? `<b>${esc(String(ev.summary).replace(/[.?]$/, ''))}</b>?` : ev.diff?.isNew ? `Create <b>${esc(ev.summary)}</b>?` : `Apply this change to <b>${esc(ev.summary)}</b>?`;
   p.innerHTML = `<div class="q">${ev.dangerous ? `${icon('alert', 'sm')}<span class="danger">${esc(ev.reason || 'Potentially destructive.')}</span>` : icon('shield', 'sm')} <span>${what}</span></div>`;
   const btns = h('div', 'btns');
   const allow = h('button', 'btn primary sm', 'Allow');
@@ -908,7 +908,7 @@ function showPermission(v, ev) {
   always.onclick = () => answer('always');
   deny.onclick = () => answer('deny');
   fb.onkeydown = (e) => { if (e.key === 'Enter') answer('deny'); };
-  if (ev.dangerous || ev.kind === 'computer') always.hidden = true;
+  if (ev.dangerous || ev.kind === 'computer' || ev.kind === 'schedule') always.hidden = true;
   btns.append(allow, always, fb, deny);
   p.appendChild(btns);
   c.el.appendChild(p);

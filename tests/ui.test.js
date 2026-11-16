@@ -360,6 +360,39 @@ test('chapters with a table of contents, the live browser pane, and split view',
   } finally { srv.close(); site.close(); }
 });
 
+test('skills show up as / commands, a scheduled task can be made, paused and deleted, and a session can be pinned', async () => {
+  const proj = path.join(tmp, 'proj-skills');
+  fs.mkdirSync(path.join(proj, '.drops', 'skills', 'release-notes'), { recursive: true });
+  fs.writeFileSync(path.join(proj, '.drops', 'skills', 'release-notes', 'SKILL.md'), '---\nname: release-notes\ndescription: Release notes in our style\n---\nAdded, Fixed, Changed.');
+  await win.evaluate(async (projDir) => { await window.drops.setSettings({ recentProjects: [projDir] }); await setProject(projDir); await newSession(); }, proj);
+  await win.fill('#input', '/rel');
+  await win.waitForSelector('#popup .opt');
+  assert.match(await win.textContent('#popup'), /release-notes[\s\S]*Skill: Release notes in our style/);
+  await win.fill('#input', '');
+  await win.keyboard.press('Escape');
+
+  await win.evaluate(() => { const b = document.querySelector('#body'); if (b.classList.contains('no-insp') || (window.innerWidth <= 1280 && !b.classList.contains('force-insp'))) toggleInspector(); Panels.switchTab('tasks'); });
+  await win.waitForSelector('.sched-head button');
+  await win.click('.sched-head button');
+  await win.fill('#schName', 'Morning tests');
+  await win.fill('#schPrompt', 'Run the tests and tell me what failed');
+  await win.selectOption('#schRepeat', 'weekdays');
+  await win.click('.sched-modal .btn.primary');
+  await win.waitForSelector('.task-row.sched');
+  assert.match(await win.textContent('.task-row.sched'), /Morning tests[\s\S]*weekdays at 09:00/);
+  await win.click('.task-row.sched [data-a="toggle"]');
+  await win.waitForSelector('.task-row.sched.off');
+  const list = await win.evaluate(() => window.drops.scheduleList());
+  assert.equal(list.length, 1); assert.equal(list[0].enabled, false); assert.equal(path.resolve(list[0].projectDir).toLowerCase(), path.resolve(proj).toLowerCase());
+  await win.evaluate(async (id) => { await window.drops.scheduleDelete(id); await Panels.renderTasks(); }, list[0].id);
+  await win.waitForSelector('.sched-empty');
+
+  await win.evaluate(async () => { await newSession(); await Panels.renderSessions(); });
+  const target = await win.evaluate(() => document.querySelectorAll('.row.session')[1]?.dataset.id);
+  await win.evaluate((id) => document.querySelector(`.row.session[data-id="${id}"] .pin-btn`).click(), target);
+  await win.waitForFunction((id) => { const first = document.querySelector('.row.session'); return first?.dataset.id === id && first.classList.contains('pinned'); }, target);
+});
+
 test('Ctrl+Shift+L switches between light and dark themes', async () => {
   const theme = () => win.evaluate(() => document.documentElement.dataset.theme || document.body.dataset.theme || document.documentElement.className);
   const first = await theme();

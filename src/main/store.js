@@ -204,7 +204,7 @@ function listSessions() {
     // The last turn stopped on an error (agent.js STOPPED_BY_ERROR), so the sidebar can say so.
     const last = (d.messages || [])[d.messages?.length - 1];
     const lastText = last && last.role === 'assistant' && Array.isArray(last.content) ? last.content.map((b) => b.text || '').join(' ') : '';
-    return { id: d.id, title: d.title, projectDir: d.projectDir, updated: d.updated, cost: d.usage?.cost || 0, turns: d.turns?.length || 0, failed: lastText.startsWith('[DROPs] Stopped by an error:') };
+    return { id: d.id, title: d.title, projectDir: d.projectDir, updated: d.updated, cost: d.usage?.cost || 0, turns: d.turns?.length || 0, pinned: !!d.pinned, failed: lastText.startsWith('[DROPs] Stopped by an error:') };
   }).filter(Boolean).sort((a, b) => b.updated - a.updated);
 }
 

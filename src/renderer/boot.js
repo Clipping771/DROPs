@@ -67,6 +67,7 @@ async function init() {
   syncPills();
 
   api.onEvent(onEvent);
+  api.onSchedule?.((ev) => { toast(`Scheduled task started: ${ev.name}`); Panels.renderSessions(); Panels.renderTasks(); });
   api.onTheme((t) => applyThemeAttr(t));
   document.documentElement.dataset.platform = S.info.platform || 'win32';
   S.mcp = await api.mcpStatus();

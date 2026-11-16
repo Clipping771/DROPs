@@ -204,6 +204,30 @@ const COMPUTER_DEF = {
 };
 tools.registerDef(COMPUTER_DEF);
 
+const SKILL_DEF = {
+  name: 'skill',
+  description: 'Load a skill: written instructions for a kind of task (a house style, a release process, a checklist), listed under "Skills" in your instructions. Call it with the skill name before starting a task that matches its description, then follow it. A skill may point to its own files (templates, scripts): read them with {name, file}.',
+  input_schema: { type: 'object', properties: { name: { type: 'string' }, file: { type: 'string', description: 'A file inside the skill folder, e.g. "template.md"' } }, required: ['name'] },
+};
+tools.registerDef(SKILL_DEF);
+
+const SCHEDULE_DEF = {
+  name: 'schedule',
+  description: 'Scheduled tasks: a prompt DROPs runs by itself later, in a new session of this project ("every weekday at 9 run the tests and tell me what broke"). Use it only when the user asks for something to happen later or on a repeat. Creating or deleting asks the user. Actions: list; create {name, prompt, repeat: once|hourly|daily|weekdays|weekly, time: "HH:MM", weekday: 0-6 (weekly, 0 = Sunday), at: "YYYY-MM-DDTHH:MM" (once), mode: ask|auto-edit|yolo}; delete {id}. Write the prompt so it stands alone: the later session has none of this conversation.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['list', 'create', 'delete'] },
+      id: { type: 'string' }, name: { type: 'string' }, prompt: { type: 'string' },
+      repeat: { type: 'string', enum: ['once', 'hourly', 'daily', 'weekdays', 'weekly'] },
+      time: { type: 'string' }, weekday: { type: 'integer' }, at: { type: 'string' },
+      mode: { type: 'string', enum: ['ask', 'auto-edit', 'yolo'] },
+    },
+    required: ['action'],
+  },
+};
+tools.registerDef(SCHEDULE_DEF);
+
 const WRAP_UP_DEF = {
   name: 'wrap_up',
   description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
@@ -461,6 +485,7 @@ class AgentSession {
     return [
       `You are DROPs, an elite autonomous software engineer working inside the user's project. You plan, read and search code, edit files, run commands, and verify your work end to end. You are precise, fast, and honest about what you did and did not verify.`,
       `# Environment\n- OS: ${osName} ${os.release()}\n- ${shellNote}\n- Project root: ${root} (file tools take paths relative to it and cannot leave it)\n- Today: ${day}\n- Model: ${model}`,
+      this.skillsSection(),
       mcp.length ? `# Connected MCP servers\n${mcp.map((m) => `- ${m.name}: tools ${m.tools.map((t) => '`' + t + '`').join(', ')} (exposed as mcp__${m.name}__<tool>)`).join('\n')}` : '',
       lang ? `# Language\nWrite all explanations, progress notes and the final report in ${lang}. Keep code, identifiers, file paths, commands and error messages in their original form.`
         : `# Language\nReply in the language AND the writing system of the user's latest message: English → English; Bangla, Hindi or Urdu typed in Latin letters (e.g. "kaj koro", "kya hai") → the same, in Latin letters; Bangla script → Bangla script; Devanagari → Devanagari; Arabic script → Arabic script; any other language → that language. Never switch writing systems inside an answer. Keep code, file names, commands and error messages as they are.`,
@@ -503,7 +528,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -612,6 +637,24 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         this.emit('requirements', { requirements: this.data.requirements });
       }
     }
+    // Hooks: SessionStart (first request) and UserPromptSubmit add context or block the request.
+    let hookBlock = null;
+    const hookList = await this.prepareHooks(signal).catch((e) => { this.emit('notice', { message: `Hooks: ${e.message}` }); return []; });
+    if (hookList.length) {
+      const hk = require('./hooks');
+      const opt = { cwd: this.data.projectDir, signal };
+      const add = [];
+      if (!this.data.messages.some((m) => m.role === 'assistant') && hookList.some((h) => h.event === 'SessionStart')) {
+        const r = await hk.runHooks(hookList, 'SessionStart', this.hookPayload(), opt);
+        add.push(...r.context); for (const n of r.notes) this.emit('notice', { message: `Hook: ${n}` });
+      }
+      if (hookList.some((h) => h.event === 'UserPromptSubmit')) {
+        const r = await hk.runHooks(hookList, 'UserPromptSubmit', this.hookPayload({ prompt: text }), opt);
+        add.push(...r.context); for (const n of r.notes) this.emit('notice', { message: `Hook: ${n}` });
+        if (r.blocked) hookBlock = r.reason;
+      }
+      if (add.length) userBlocks.push({ type: 'text', text: `[Context from the user's hooks]\n${add.join('\n\n')}` });
+    }
     this.pushUser(userBlocks);
     const turn = { msgIndex: this.data.messages.length - 1, text, files: {}, at: Date.now() };
     this.data.turns.push(turn);
@@ -619,6 +662,11 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     this.emit('status', { busy: true });
     this.save(true);
 
+    if (hookBlock) {
+      this.emit('notice', { message: `A hook blocked this request: ${hookBlock.slice(0, 200)}` });
+      this.data.messages.push({ role: 'assistant', content: [{ type: 'text', text: `A hook blocked this request: ${hookBlock}` }] });
+      this.finish(opts); return;
+    }
     const ctx = this.makeCtx(turn, signal);
     const run = {
       model: opts.model,
@@ -827,6 +875,17 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
             this.data.messages.push({ role: 'user', content: [{ type: 'text', text: '[DROPs report] You finished without writing anything to the user. Write your final answer now, without calling tools: start with the outcome in one or two plain sentences (what is now true), then short bullets for what changed (path:line) and how it was verified, and anything not done.' }] });
             continue;
           }
+          // Stop hooks: a command can say the work is not done yet (exit 2), up to three times.
+          if ((this.activeHooks || []).some((h) => h.event === 'Stop') && (run.stopHooks || 0) < 3 && !signal.aborted) {
+            const r = await require('./hooks').runHooks(this.activeHooks, 'Stop', this.hookPayload({ last_message: finalText.slice(0, 8000) }), { cwd: this.data.projectDir, signal });
+            for (const n of r.notes) this.emit('notice', { message: `Hook: ${n}` });
+            if (r.blocked) {
+              run.stopHooks = (run.stopHooks || 0) + 1;
+              this.emit('notice', { message: `A Stop hook sent the agent back: ${r.reason.slice(0, 160)}` });
+              this.data.messages.push({ role: 'user', content: [{ type: 'text', text: `[DROPs hook] A Stop hook says the work is not finished:\n${r.reason}\nDo what it asks, then finish.` }] });
+              continue;
+            }
+          }
           break;
         }
 
@@ -1007,7 +1066,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return results;
   }
 
-  async runOne(u, ctx, opts, run) {
+  async runOneInner(u, ctx, opts, run) {
     const meta = { name: u.name, input: u.input, status: 'running', output: '' };
     this.data.toolMeta[u.id] = meta;
     const fail = (msg, blocked) => {
@@ -1047,6 +1106,8 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
     if (u.name === 'app') return this.runApp(u, meta, ctx, run);
     if (u.name === 'computer') return this.runComputer(u, meta, ctx, run);
+    if (u.name === 'skill') return this.runSkill(u, meta);
+    if (u.name === 'schedule') return this.runSchedule(u, meta, opts);
     if (u.name === 'audit') {
       const area = ['security', 'performance'].includes(u.input.area) ? u.input.area : 'all';
       meta.summary = area; this.emit('tool-start', { id: u.id, name: 'audit', input: u.input, summary: area });
@@ -1246,6 +1307,117 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     } catch (e) {
       return done(`App ${action} failed: ${String(e.message || e).split('\n')[0]}`, false);
     }
+  }
+
+  // ---------- skills ----------
+  skills() {
+    try { return require('./commands').listSkills(this.data.projectDir, require('path').join(require('./brand').appDataDir(), 'skills')); } catch { return []; }
+  }
+  skillsSection() {
+    const list = this.skills();
+    if (!list.length) return '';
+    return `# Skills\nInstructions written by the user for kinds of tasks. When a task matches a skill's description, load it with the \`skill\` tool first and follow it.\n${list.slice(0, 60).map((k) => `- ${k.name}: ${k.description}`).join('\n')}`;
+  }
+  runSkill(u, meta) {
+    const name = String(u.input.name || '').trim().toLowerCase().replace(/^\//, '');
+    meta.summary = u.input.file ? `${name} · ${u.input.file}` : name;
+    this.emit('tool-start', { id: u.id, name: 'skill', input: u.input, summary: meta.summary });
+    const done = (text, ok) => { meta.status = ok ? 'done' : 'error'; meta.output = text.slice(0, 20000); this.emit('tool-end', { id: u.id, ok, output: meta.output }); return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }) }; };
+    const list = this.skills();
+    const sk = list.find((k) => k.name === name);
+    if (!sk) return done(`No skill named "${name}". Skills: ${list.map((k) => k.name).join(', ') || 'none'}.`, false);
+    if (u.input.file) {
+      try { return done(require('./commands').readSkillFile(sk, u.input.file), true); } catch (e) { return done(`Could not read ${u.input.file}: ${e.message}`, false); }
+    }
+    let files = [];
+    try { files = fs.readdirSync(sk.dir).filter((f) => f !== require('path').basename(sk.file)).slice(0, 40); } catch { /* none */ }
+    return done(`# Skill: ${sk.name}\n${sk.body}${files.length && sk.dir !== require('path').dirname(sk.file) ? '' : ''}${files.length ? `\n\n(Files in this skill's folder, readable with {name: "${sk.name}", file}: ${files.join(', ')})` : ''}`, true);
+  }
+
+  // ---------- scheduled tasks ----------
+  async runSchedule(u, meta, opts) {
+    const a = String(u.input.action || 'list');
+    meta.summary = a === 'create' ? `create ${u.input.name || ''}`.trim() : a === 'delete' ? `delete ${u.input.id || ''}` : 'list';
+    this.emit('tool-start', { id: u.id, name: 'schedule', input: u.input, summary: meta.summary });
+    const done = (text, ok) => { meta.status = ok ? 'done' : 'error'; meta.output = text; this.emit('tool-end', { id: u.id, ok, output: text }); return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }) }; };
+    const api = this.deps.schedules;
+    if (!api) return done('Scheduled tasks are available in the DROPs app only.', false);
+    if (a === 'list') return done(this.scheduleText(api.list()), true);
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return done('This read-only mode cannot change scheduled tasks.', false);
+    if (a === 'delete') {
+      const s = api.list().find((x) => x.id === u.input.id);
+      if (!s) return done(`No scheduled task with id "${u.input.id}". ${this.scheduleText(api.list())}`, false);
+      const r = await this.askPermission(u, { kind: 'schedule', summary: `Delete the scheduled task "${s.name}" (${s.when})` }, false, 'Scheduled tasks');
+      if (r.decision === 'deny') return done(`The user kept it.${r.feedback ? ` Their words: ${r.feedback}` : ''}`, false);
+      api.remove(s.id);
+      return done(`Deleted "${s.name}".`, true);
+    }
+    if (a !== 'create') return done(`Unknown action "${a}".`, false);
+    let s;
+    try {
+      // Check it first (a bad time is reported before asking the user).
+      s = require('./schedule').normalize({ ...u.input, id: undefined, projectDir: this.data.projectDir, model: opts.model, effort: opts.effort });
+    } catch (e) { return done(e.message, false); }
+    const when = require('./schedule').describe(s);
+    const r = await this.askPermission(u, { kind: 'schedule', summary: `Schedule "${s.name}" ${when} in this project (${s.mode === 'yolo' ? 'full auto' : s.mode}): ${s.prompt.slice(0, 160)}` }, s.mode === 'yolo', 'Scheduled tasks run by themselves later');
+    if (r.decision === 'deny') return done(`The user did not schedule it.${r.feedback ? ` Their words: ${r.feedback}` : ''}`, false);
+    try {
+      const saved = api.save({ ...u.input, id: undefined, projectDir: this.data.projectDir, model: opts.model, effort: opts.effort });
+      return done(`Scheduled "${saved.name}" (${saved.when}), id ${saved.id}. Next run: ${new Date(saved.nextRun).toLocaleString()}. The user can see and change it in the Tasks panel.`, true);
+    } catch (e) { return done(e.message, false); }
+  }
+  scheduleText(list) {
+    if (!list.length) return 'No scheduled tasks.';
+    return `Scheduled tasks:\n${list.map((s) => `- ${s.id}: "${s.name}" ${s.when}${s.enabled === false ? ' (off)' : ''}${s.nextRun ? `, next ${new Date(s.nextRun).toLocaleString()}` : ''} · ${s.projectDir}`).join('\n')}`;
+  }
+
+  // ---------- hooks ----------
+  /** The hooks for this request. Project hooks are repository code: outside full auto the user approves them. */
+  async prepareHooks(signal) {
+    const hk = require('./hooks');
+    const set = hk.loadHooks(this.data.projectDir, this.settings());
+    if (set.error) this.emit('notice', { message: `Hooks: ${set.error}` });
+    let list = set.hooks;
+    const proj = list.filter((h) => h.source === 'project');
+    if (proj.length && this.data.mode !== 'yolo' && this.trustedHookHash !== set.projectHash) {
+      if (this.deniedHookHash === set.projectHash) list = list.filter((h) => h.source !== 'project');
+      else {
+        const u = { id: `hooks-${Date.now()}`, name: 'hooks', input: { command: proj.map((h) => `[${h.event}${h.matcher ? ` ${h.matcher}` : ''}] ${h.command}`).join('\n') } };
+        const r = signal?.aborted ? { decision: 'deny' } : await this.askPermission(u, { kind: 'shell', summary: `Run this project's hooks (${require('path').relative(this.data.projectDir, set.projectFile)})` }, false, 'Hooks are commands from the project that run at fixed points of the work');
+        if (r.decision === 'deny') { this.deniedHookHash = set.projectHash; list = list.filter((h) => h.source !== 'project'); }
+        else this.trustedHookHash = set.projectHash;
+      }
+    }
+    this.activeHooks = list;
+    return list;
+  }
+  hookPayload(extra = {}) { return { session_id: this.data.id, project_dir: this.data.projectDir, mode: this.data.mode, ...extra }; }
+  async runOne(u, ctx, opts, run) {
+    const hk = require('./hooks');
+    const list = this.activeHooks || [];
+    if (list.some((h) => h.event === 'PreToolUse' && hk.matches(h, u.name))) {
+      const r = await hk.runHooks(list, 'PreToolUse', this.hookPayload({ tool_name: u.name, tool_input: u.input }), { cwd: this.data.projectDir, signal: ctx.signal, toolName: u.name });
+      for (const n of r.notes) this.emit('notice', { message: `Hook: ${n}` });
+      if (r.blocked) {
+        const msg = `Blocked by a hook: ${r.reason}`;
+        this.data.toolMeta[u.id] = { name: u.name, input: u.input, status: 'error', output: msg };
+        this.emit('tool-start', { id: u.id, name: u.name, input: u.input, summary: 'blocked by a hook' });
+        this.emit('tool-end', { id: u.id, ok: false, output: msg });
+        return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: msg };
+      }
+    }
+    const res = await this.runOneInner(u, ctx, opts, run);
+    if (res && list.some((h) => h.event === 'PostToolUse' && hk.matches(h, u.name))) {
+      const out = typeof res.content === 'string' ? res.content : JSON.stringify(res.content || '');
+      const r = await hk.runHooks(list, 'PostToolUse', this.hookPayload({ tool_name: u.name, tool_input: u.input, tool_output: out.slice(0, 20000), is_error: !!res.is_error }), { cwd: this.data.projectDir, signal: ctx.signal, toolName: u.name });
+      for (const n of r.notes) this.emit('notice', { message: `Hook: ${n}` });
+      const add = [...r.context, ...(r.blocked ? [`A hook says: ${r.reason}`] : [])].join('\n').trim();
+      if (add) {
+        if (typeof res.content === 'string') res.content += `\n\n[hook] ${add}`;
+        else if (Array.isArray(res.content)) res.content.push({ type: 'text', text: `[hook] ${add}` });
+      }
+    }
+    return res;
   }
 
   // ---------- computer use: the user's own desktop apps ----------
