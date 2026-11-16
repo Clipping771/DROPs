@@ -200,7 +200,7 @@ class TaskManager {
 
   // Submit a task into the system. If session has an active running task,
   // queue it by default, unless action === 'steer' or concurrent === true.
-  async submitTask(taskParams, { action = 'queue', concurrent = false } = {}) {
+  async submitTask(taskParams, { action = 'queue', concurrent = false, front = false } = {}) {
     const task = this.createTask(taskParams);
     const sid = task.session_id;
 
@@ -226,11 +226,13 @@ class TaskManager {
     if (isRunning && !concurrent) {
       // Default: Queue message without interrupting active task
       task.status = STATUS.QUEUED;
-      queue.push(task.task_id);
+      // Steering left over from the turn that just ended goes first: the user sent it before anything queued.
+      if (front) queue.unshift(task.task_id); else queue.push(task.task_id);
+      const position = front ? 1 : queue.length;
       this.saveTask(task);
-      this.emitTaskEvent(task.task_id, 'queued', { queuePosition: queue.length });
-      this.notifySession(sid, 'task-queued', { task_id: task.task_id, position: queue.length });
-      return { task, queued: true, position: queue.length };
+      this.emitTaskEvent(task.task_id, 'queued', { queuePosition: position });
+      this.notifySession(sid, 'task-queued', { task_id: task.task_id, position });
+      return { task, queued: true, position };
     }
 
     // Run immediately in background
@@ -239,7 +241,7 @@ class TaskManager {
   }
 
   isSessionRunning(sessionId) {
-    for (const [id, active] of this.activeTasks) {
+    for (const active of this.activeTasks.values()) {
       if (active.task.session_id === sessionId && active.task.status === STATUS.RUNNING) {
         return true;
       }
@@ -249,7 +251,7 @@ class TaskManager {
   }
 
   getActiveTaskForSession(sessionId) {
-    for (const [id, active] of this.activeTasks) {
+    for (const active of this.activeTasks.values()) {
       if (active.task.session_id === sessionId && active.task.status === STATUS.RUNNING) {
         return active.task;
       }

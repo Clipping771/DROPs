@@ -131,13 +131,18 @@ function isUiFile(p) {
 function projectFrames(output, root) {
   const text = String(output || '');
   const norm = (p) => String(p).replace(/\\/g, '/');
-  const rootN = norm(root || '').replace(/\/+$/, '').toLowerCase();
+  // A stack trace names the real path, which can differ from the project path as given: a symlink
+  // (macOS /var is /private/var) or a Windows short name (C:\Users\RUNNER~1). Both spellings count.
+  const roots = [root];
+  try { if (root) roots.push(require('fs').realpathSync.native(root)); } catch { /* not on disk */ }
+  const rootsN = [...new Set(roots.filter(Boolean).map((r) => norm(r).replace(/\/+$/, '').toLowerCase()))];
   const out = [];
   const add = (file, line) => {
     let p = norm(file).replace(/^file:\/\/\/?/, '').replace(/^\.\//, '');
     if (/node_modules|^node:|internal\/|webpack-internal|<anonymous>|\.next\/|site-packages|\/lib\/python/i.test(p)) return;
     if (/^[^/]*:\d/.test(p)) return; // part of a URL (host:port/...), not a file
-    if (rootN && p.toLowerCase().startsWith(rootN + '/')) p = p.slice(rootN.length + 1);
+    const r = rootsN.find((x) => p.toLowerCase().startsWith(x + '/'));
+    if (r) p = p.slice(r.length + 1);
     if (/^[a-z]:\//i.test(p) || p.startsWith('/')) return; // outside the project
     const key = `${p}:${line}`;
     if (!out.includes(key)) out.push(key);

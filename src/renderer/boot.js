@@ -78,10 +78,23 @@ async function startupNotices() {
   api.onUpdate?.((r) => showUpdate(r));
 }
 function showUpdate(r) {
+  const canInstall = !!r.installer && S.info?.platform === 'win32';
   showBanner('updateBanner', `${icon('download', 'sm')}DROPs ${esc(r.version)} is available (you have ${esc(r.current)}).`, [
     ['Later', () => api.updateDismiss(r.version)],
-    ['Download', () => api.updateOpen(r.url), true],
-  ]);
+    canInstall ? ['Release notes', () => { api.updateOpen(r.url); return false; }] : null,
+    canInstall ? ['Install and restart', installUpdate, true] : ['Download', () => api.updateOpen(r.url), true],
+  ].filter(Boolean));
+}
+// Downloads the installer, checks it, starts it and closes DROPs; on any problem, offers the releases page.
+async function installUpdate() {
+  toast('Downloading the update…');
+  const off = api.onUpdateProgress?.((p) => { if (p.percent >= 0) toast(`Downloading the update… ${p.percent}%`); });
+  const r = await api.updateInstall().catch((e) => ({ error: e.message }));
+  off?.();
+  if (r?.ok) { toast('Starting the installer. DROPs will close.'); return true; }
+  toast(`Could not install the update: ${r?.error || 'unknown error'}`);
+  if (r?.url) api.updateOpen(r.url);
+  return true;
 }
 async function checkForUpdatesNow() {
   toast('Checking for updates…');
@@ -107,6 +120,16 @@ async function init() {
   syncPills();
 
   api.onEvent(onEvent);
+  // Screen readers: a button that shows only an icon gets its tooltip as its name, including buttons
+  // added later (the UI is built on the fly).
+  const nameIconButtons = (root) => {
+    for (const b of root.querySelectorAll?.('button[title]:not([aria-label]), [role="button"][title]:not([aria-label])') || []) {
+      if (!b.textContent.trim()) b.setAttribute('aria-label', b.getAttribute('title'));
+    }
+  };
+  nameIconButtons(document);
+  new MutationObserver((muts) => { for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) nameIconButtons(n.parentElement || n); })
+    .observe(document.body, { childList: true, subtree: true });
   api.onSchedule?.((ev) => { toast(`Scheduled task started: ${ev.name}`); Panels.renderSessions(); Panels.renderTasks(); });
   api.onTheme((t) => applyThemeAttr(t));
   document.documentElement.dataset.platform = S.info.platform || 'win32';

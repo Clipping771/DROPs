@@ -120,3 +120,59 @@ test('a short outage is retried; a quota error is not', { timeout: 30_000 }, asy
     assert.equal(chats, 1, 'a quota error is not retried');
   } finally { srv.close(); }
 });
+
+test('steering that misses the final answer runs next, ahead of a queued message, and is never dropped', async () => {
+  const { TaskManager } = require('../src/main/tasks');
+  const { agent, data } = session();
+  const tm = new TaskManager({ getAgent: () => agent, sendEvent: () => {}, store: null });
+  const lost = [];
+  agent.deps.send = (id, type, p) => { if (type === 'steer-returned') lost.push(p); };
+  agent.deps.resend = (sid, text, o, images) => tm.submitTask({ session_id: sid, workspace_id: data.projectDir, prompt: text, images, opts: o }, { action: 'queue', front: true });
+  const seen = [];
+  providers.callModel = async ({ messages }) => {
+    seen.push(textOf(messages[messages.length - 1]));
+    return { content: [{ type: 'text', text: 'Done.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  // Typed after the model's final answer but before the turn ended (during the last checks): too late for it.
+  const finish = agent.finish.bind(agent);
+  let once = true;
+  agent.finish = (o) => { if (once) { once = false; agent.steer('also update the docs'); } return finish(o); };
+  try {
+    await tm.submitTask({ session_id: 's', workspace_id: data.projectDir, prompt: 'first task', opts }, { action: 'queue' });
+    // A message queued (Ctrl+Enter) while the first task runs.
+    await tm.submitTask({ session_id: 's', workspace_id: data.projectDir, prompt: 'queued task', opts }, { action: 'queue' });
+    for (let i = 0; i < 100 && (seen.length < 3 || agent.busy); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(seen.length, 3, `three turns ran: ${JSON.stringify(seen)}`);
+    assert.match(seen[0], /first task/);
+    assert.match(seen[1], /also update the docs/, 'the steering runs right after the turn it missed');
+    assert.match(seen[2], /queued task/);
+    assert.deepEqual(lost, [], 'nothing handed back');
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});
+
+test('rewind also undoes what shell commands changed, but keeps files the user edited afterwards', { timeout: 60_000 }, async () => {
+  const cp = require('node:child_process');
+  const { agent, data } = session();
+  const dir = data.projectDir;
+  cp.execSync('git init -q && git config user.email t@t && git config user.name t && git add -A && git commit -qm init', { cwd: dir });
+  fs.writeFileSync(path.join(dir, 'user.txt'), 'mine\n');
+  const write = (f, t) => `node -e "require('fs').writeFileSync('${f}','${t}')"`;
+  let call = 0;
+  providers.callModel = async () => {
+    call++;
+    if (call === 1) return { content: [{ type: 'tool_use', id: 'c1', name: 'shell', input: { command: `${write('a.txt', 'by shell')} ; ${write('gen.txt', 'generated')} ; ${write('user.txt', 'shell too')}` } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+    return { content: [{ type: 'text', text: 'Done.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('run the generator', opts);
+    assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'by shell', 'the command ran');
+    assert.ok(data.turns[0].snap, 'a snapshot was taken before the turn');
+    await agent.endSnap;
+    fs.writeFileSync(path.join(dir, 'user.txt'), 'the user changed it again\n'); // after the turn
+    const r = await agent.rewind(0);
+    assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'hello\n', 'shell edit undone');
+    assert.ok(!fs.existsSync(path.join(dir, 'gen.txt')), 'file the shell created is removed');
+    assert.equal(fs.readFileSync(path.join(dir, 'user.txt'), 'utf8'), 'the user changed it again\n', 'the user\'s later edit is kept');
+    assert.deepEqual(r.kept, ['user.txt']);
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});

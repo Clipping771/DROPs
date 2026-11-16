@@ -141,7 +141,7 @@ async function run(cmd, { cwd, sandbox, signal, timeoutMs = 120000, onChunk, env
 // Always ask, in every permission mode.
 const DANGEROUS = [
   // destructive file operations
-  /\brm\s+(-\w*r\w*f|-\w*f\w*r|-r\b|--recursive)/i, /\b(Remove-Item|ri|rmdir|rd)\b[^\n]*-(Recurse|r)\b/i, /\b(del|erase)\s+[^\n]*\/[sq]\b/i, /\b(rd|rmdir)\s+\/s\b/i,
+  /\brm\s+(-\w*r\w*f|-\w*f\w*r|-r\b|--recursive)/i, /\b(Remove-Item|ri|rmdir|rd)\b[^\n]*-r(e(c(u(r(s(e)?)?)?)?)?)?\b/i, /\b(del|erase)\s+[^\n]*\/[sq]\b/i, /\b(rd|rmdir)\s+\/s\b/i,
   /\bRemove-Item\b[^\n]*\s[A-Za-z]:\\?\s*($|[;|])/i, /\bformat(\.com)?\s+[a-z]:/i, /\bdiskpart\b/i, /\bcipher\s+\/w/i, /\bmkfs(\.\w+)?\b/i, /\bdd\s+if=/i, /\bshred\b/i,
   // system state
   /\b(Stop-Computer|Restart-Computer|shutdown|reboot|halt)\b/i, /\bSet-ExecutionPolicy\b/i, /\breg(\.exe)?\s+(delete|add|import)\b/i, /\b(Set|New|Remove)-ItemProperty\b[^\n]*HK(LM|CU)/i,
@@ -158,6 +158,10 @@ const DANGEROUS = [
   /\b(powershell|pwsh)(\.exe)?\b[^\n]*\s-(e|enc|encodedcommand)\s+[A-Za-z0-9+/=]{16,}/i,
   /\bStart-Process\b[^\n]*-Verb\s+RunAs/i,
   /\.git[\\/]hooks[\\/]/i,
+  // Inline code that deletes files or trees (node -e, python -c, perl/ruby -e) has no shell verb to see.
+  /\b(node|deno|bun)(\.exe)?\b[^\n]*\s(-e|-p|--eval|--print)\b[^\n]*\b(rmSync|rmdirSync|unlinkSync|rm|rmdir|unlink)\s*\(/i,
+  /\bpy(thon[\d.]*)?(\.exe)?\b[^\n]*\s-c\b[^\n]*(shutil\.rmtree|os\.(remove|unlink|rmdir|removedirs)\b|\.unlink\(|\.rmdir\(|send2trash)/i,
+  /\b(perl|ruby)\b[^\n]*\s-e\b[^\n]*\b(unlink|rmtree|rm_rf|rm_r)\b/i,
 ];
 const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\bMove-Item\b|\bmv\b|\bmove\b|\bCopy-Item\b|\bcp\b|\bcopy\b|\bSet-Content\b|\bAdd-Content\b|\bOut-File\b|\bNew-Item\b|\bRename-Item\b|>)/i;
 
@@ -183,7 +187,9 @@ function assessCommand(cmd, root) {
 
 // Read-only commands that may run without asking in "ask" mode.
 const SAFE = /^\s*(git\s+(status|diff|log|show|branch|remote -v|rev-parse)|Get-ChildItem|Get-Content|Get-Location|Select-String|ls|dir|pwd|cat|type|head|tail|wc|where(\.exe)?|which|Test-Path|node\s+(-v|--version)|npm\s+(-v|--version|ls|list)|python3?\s+--version|dotnet\s+--(info|version)|go\s+version|cargo\s+--version)\b[^;|&>`$]*$/i;
-const isSafeCommand = (cmd) => SAFE.test(cmd) && !cmd.includes('\n');
+// `git diff/log --output=<file>` writes a file; `git branch -d/-D/-m/...` changes branches.
+const SAFE_EXCEPT = /--output\b|\bgit\s+branch\b[^\n]*\s(-[dDmMcCfu]\b|--(delete|move|copy|force|set-upstream-to|unset-upstream)\b)/;
+const isSafeCommand = (cmd) => SAFE.test(cmd) && !cmd.includes('\n') && !SAFE_EXCEPT.test(cmd);
 
 // ---------- user command rules ----------
 // One pattern per line (or comma-separated in a list); `*` matches anything. Lines starting with # are ignored.
@@ -216,11 +222,28 @@ const SECRET_PATTERNS = [
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, 'slack-token'], [/\bAKIA[0-9A-Z]{16}\b/g, 'aws-key'], [/\bsk_live_[0-9a-zA-Z]{20,}/g, 'stripe-key'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, 'private-key'],
   [/\b(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g, 'jwt'],
+  [/\bhf_[A-Za-z0-9]{30,}/g, 'huggingface-token'], [/\bgsk_[A-Za-z0-9]{40,}/g, 'groq-key'], [/\bnpm_[A-Za-z0-9]{36}\b/g, 'npm-token'],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, 'gitlab-token'], [/\b[rs]k_(live|test)_[0-9a-zA-Z]{20,}/g, 'stripe-key'], [/\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g, 'sendgrid-key'],
+];
+// Secrets that are only recognisable by their context: the value is masked and the name kept.
+const SECRET_CONTEXT = [
+  // user:password@ in a connection URL (postgres://, mysql://, mongodb+srv://, redis://, amqp://, https://…)
+  [/\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@'"]+:)([^\s@/'"]{3,})(@)/gi, 'password'],
+  // aws_secret_access_key = …
+  [/\b(aws_secret_access_key\s*[=:]\s*["']?)([A-Za-z0-9/+=]{40})\b/gi, 'aws-secret'],
+  // KEY=value lines (.env files, `env` / `set` output) whose name says it is a secret. The value must be
+  // the whole rest of the line and not code (os.getenv(...), process.env.X, $VAR, None), so source files
+  // the agent edits are left as they are.
+  [/^(\s*(?:export\s+|\$env:)?[A-Za-z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|ACCESS_KEY)[A-Za-z0-9_]*\s*[=:]\s*["']?)(?!(?:process|os|env|config|settings|self|this|import)\b|\$|None\b|null\b|undefined\b|true\b|false\b|[\d.]+["']?\s*(?:#.*)?$)([^\s"'#()[\]{},;]{6,})(?=["']?\s*(?:#.*)?$)/gim, 'secret'],
 ];
 function redact(text) {
   if (!text || typeof text !== 'string') return { text, count: 0 };
   let count = 0;
   for (const [re, label] of SECRET_PATTERNS) text = text.replace(re, () => { count++; return `[REDACTED ${label}]`; });
+  for (const [re, label] of SECRET_CONTEXT) {
+    // With two groups the callback's 4th argument is the match offset, not a third group.
+    text = text.replace(re, (m, pre, val, post) => { if (val.startsWith('[REDACTED')) return m; count++; return `${pre}[REDACTED ${label}]${typeof post === 'string' ? post : ''}`; });
+  }
   return { text, count };
 }
 

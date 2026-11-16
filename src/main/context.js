@@ -33,7 +33,8 @@ function projectProfile(root) {
   }
   if (exists(path.join(root, 'Cargo.toml'))) { lines.push('- Rust project (Cargo)'); verify.push('cargo check', 'cargo test'); }
   if (exists(path.join(root, 'go.mod'))) { lines.push('- Go module'); verify.push('go build ./...', 'go test ./...'); }
-  const sln = fg.sync(['*.sln', '*.csproj', '*/*.csproj'], { cwd: root, deep: 2 });
+  // suppressErrors: an unreadable folder (e.g. /tmp/snap-private-tmp) must not crash the request.
+  const sln = fg.sync(['*.sln', '*.csproj', '*/*.csproj'], { cwd: root, deep: 2, suppressErrors: true });
   if (sln.length) { lines.push(`- .NET project (${sln.slice(0, 3).join(', ')})`); verify.push('dotnet build', 'dotnet test'); }
   if (exists(path.join(root, 'Makefile'))) lines.push('- Has a Makefile');
   if (exists(path.join(root, 'Dockerfile'))) lines.push('- Has a Dockerfile');
@@ -56,11 +57,53 @@ const SYMBOL_RES = {
 };
 const EXT = { '.js': 'js', '.jsx': 'js', '.ts': 'js', '.tsx': 'js', '.mjs': 'js', '.cjs': 'js', '.vue': 'js', '.svelte': 'js', '.py': 'py', '.go': 'go', '.rs': 'rs', '.cs': 'cs', '.java': 'java', '.kt': 'java' };
 
+// The map is rebuilt for every request (and on each model switch): keep the file list for a few
+// seconds, each file's symbols until it changes, and the import graph until any source file changes.
+const listCache = new Map(); // root -> { at, entries }
+const symCache = new Map(); // abs -> { stamp, syms }
+const graphCache = new Map(); // root -> { stamp, graph }
+function listEntries(root) {
+  const hit = listCache.get(root);
+  if (hit && Date.now() - hit.at < 5000) return hit.entries;
+  const entries = fg.sync('**/*', { cwd: root, ignore: [...IGNORE, '**/*.min.*', '**/*.lock', '**/package-lock.json', '**/*.map', '**/coverage/**'], onlyFiles: true, dot: false, stats: true, suppressErrors: true, deep: 10 });
+  listCache.set(root, { at: Date.now(), entries });
+  if (listCache.size > 20) listCache.delete(listCache.keys().next().value);
+  return entries;
+}
+function symbolsOf(abs, lang, stats) {
+  const stamp = `${stats?.mtimeMs}:${stats?.size}`;
+  const hit = symCache.get(abs);
+  if (hit && stats && hit.stamp === stamp) return hit.syms;
+  const syms = [];
+  if ((stats?.size ?? fs.statSync(abs).size) < 300_000) {
+    const text = fs.readFileSync(abs, 'utf8');
+    const seen = new Set();
+    for (const line of text.split('\n')) {
+      for (const re of SYMBOL_RES[lang]) {
+        const m = line.match(re);
+        if (m && !seen.has(m[1])) { seen.add(m[1]); syms.push(m[1]); break; }
+      }
+      if (syms.length >= 14) { syms.push('…'); break; }
+    }
+  }
+  if (symCache.size > 20000) symCache.clear();
+  symCache.set(abs, { stamp, syms });
+  return syms;
+}
+function cachedGraph(root, entries) {
+  const stamp = entries.length + ':' + entries.reduce((n, e) => n + (e.stats?.mtimeMs || 0) + (e.stats?.size || 0), 0);
+  const hit = graphCache.get(root);
+  if (hit && hit.stamp === stamp) return hit.graph;
+  const graph = require('./codegraph').buildGraph(root);
+  graph.text = null; // the map needs only the edges; don't keep every file's text in memory
+  graphCache.set(root, { stamp, graph });
+  if (graphCache.size > 5) graphCache.delete(graphCache.keys().next().value);
+  return graph;
+}
+
 function repoMap(root, budget = 14000, query = '') {
   let entries = [];
-  try {
-    entries = fg.sync('**/*', { cwd: root, ignore: [...IGNORE, '**/*.min.*', '**/*.lock', '**/package-lock.json', '**/*.map', '**/coverage/**'], onlyFiles: true, dot: false, stats: true, suppressErrors: true, deep: 10 });
-  } catch { return ''; }
+  try { entries = [...listEntries(root)]; } catch { return ''; }
   const total = entries.length;
   const kw = [...new Set(String(query || '').toLowerCase().match(/[a-z0-9_]{3,}/g) || [])];
   const scoreEntry = (e) => {
@@ -76,7 +119,7 @@ function repoMap(root, budget = 14000, query = '') {
   const related = new Map();
   if (kw.length && total < 4000) {
     try {
-      const g = require('./codegraph').buildGraph(root);
+      const g = cachedGraph(root, entries);
       for (const e of entries) {
         const p = e.path.replace(/\\/g, '/');
         if (!kw.some((w) => p.toLowerCase().includes(w))) continue;
@@ -95,20 +138,7 @@ function repoMap(root, budget = 14000, query = '') {
     const lang = EXT[path.extname(f).toLowerCase()];
     let syms = [];
     if (lang) {
-      const abs = path.join(root, f);
-      try {
-        if ((e.stats?.size ?? fs.statSync(abs).size) < 300_000) {
-          const text = fs.readFileSync(abs, 'utf8');
-          const seen = new Set();
-          for (const line of text.split('\n')) {
-            for (const re of SYMBOL_RES[lang]) {
-              const m = line.match(re);
-              if (m && !seen.has(m[1])) { seen.add(m[1]); syms.push(m[1]); break; }
-            }
-            if (syms.length >= 14) { syms.push('…'); break; }
-          }
-        }
-      } catch { /* unreadable */ }
+      try { syms = symbolsOf(path.join(root, f), lang, e.stats); } catch { /* unreadable */ }
     }
     const line = syms.length ? `${f}: ${syms.join(', ')}` : f;
     out.push(line);

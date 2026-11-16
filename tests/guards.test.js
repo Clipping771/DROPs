@@ -411,3 +411,28 @@ test('agent: completion audit sends the agent back when a reviewer finds the tas
   assert.match(prompts[0], /Contacts page[\s\S]*Pipeline page/, 'reviewer saw the spec the task named');
   assert.match(prompts[0], /a\.js \(\d+ lines\)/, 'reviewer saw the file map');
 });
+
+test('project frames: a project opened through a link or short path still matches the real path in a stack', () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { projectFrames } = require('../src/main/guards');
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-frames-'));
+  const link = real + '-link';
+  fs.symlinkSync(real, link, 'junction');
+  try {
+    const stack = `TypeError: x\n    at f (${path.join(fs.realpathSync.native(real), 'lib.js')}:3:9)\n    at node:internal/main:1:1`;
+    assert.deepEqual(projectFrames(stack, link), ['lib.js:3']);
+    assert.deepEqual(projectFrames(stack, real), ['lib.js:3']);
+  } finally { fs.rmSync(link, { force: true, recursive: false }); }
+});
+
+test('project profile: an unreadable folder in the project does not crash the request', { skip: process.platform === 'win32' && 'needs POSIX permissions' }, () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-noread-'));
+  fs.mkdirSync(path.join(dir, 'locked'));
+  fs.writeFileSync(path.join(dir, 'app.csproj'), '<Project />');
+  fs.chmodSync(path.join(dir, 'locked'), 0o000);
+  try {
+    const p = require('../src/main/context').projectProfile(dir);
+    assert.ok(typeof p.text === 'string');
+  } finally { fs.chmodSync(path.join(dir, 'locked'), 0o755); }
+});

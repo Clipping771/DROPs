@@ -528,7 +528,14 @@ function onEvent(ev) {
     case 'text-delta': {
       const r = v.blocks.get(ev.index); if (!r) break;
       r.text += ev.text;
-      if (!r.pending) { r.pending = true; requestAnimationFrame(() => { r.pending = false; if (r.el.classList.contains('cursor')) renderMd(r.el, r.text, false); autoScroll(v); }); }
+      // Each render parses the whole answer again, so a long answer re-renders less often
+      // (every frame up to ~4k characters, then up to every 400 ms): the cost no longer grows with its square.
+      if (!r.pending) {
+        r.pending = true;
+        const wait = Math.min(400, Math.max(0, (r.text.length - 4000) / 50)) - (performance.now() - (r.renderedAt || 0));
+        const draw = () => requestAnimationFrame(() => { r.pending = false; r.renderedAt = performance.now(); if (r.el.classList.contains('cursor')) renderMd(r.el, r.text, false); autoScroll(v); });
+        if (wait > 0) setTimeout(draw, wait); else draw();
+      }
       break;
     }
     case 'thinking-delta': {
@@ -627,7 +634,7 @@ function onEvent(ev) {
       // Stop came before the agent read these: put them back in the box instead of losing them.
       $$('.msg-user .tag.steer:not(.done)', v.el).forEach((t) => { t.innerHTML = icon('undo', 'xs') + 'Not delivered — back in the message box'; t.classList.add('done'); });
       if (cur) { const t = $('#input'); t.value = (t.value.trim() ? t.value.trim() + '\n\n' : '') + ev.text; autosize(); updateComposer(); t.focus(); }
-      toast('Stopped before the agent read your message: it is back in the box');
+      toast(ev.error ? 'Your message could not be sent: it is back in the box' : 'Stopped before the agent read your message: it is back in the box');
       break;
     }
     case 'queue-updated': {
@@ -1347,7 +1354,7 @@ function confirmBox(title, text, okLabel = 'Continue') {
 let toastTimer;
 function toast(msg) {
   let t = $('#toast');
-  if (!t) { t = h('div', 'toast'); t.id = 'toast'; document.body.appendChild(t); }
+  if (!t) { t = h('div', 'toast'); t.id = 'toast'; t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite'); document.body.appendChild(t); }
   t.textContent = msg; t.hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 2600);
 }

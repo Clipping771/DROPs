@@ -1,0 +1,33 @@
+# Checks every push and pull request: syntax and type checks, then the offline test suite.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: git config --global user.email ci@example.com && git config --global user.name CI
+      - run: npm run check
+      - run: npm run lint
+      # Some tests start an Electron app; Linux runners have no screen, so they get a virtual one.
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+      - if: runner.os != 'Linux'
+        run: npm test

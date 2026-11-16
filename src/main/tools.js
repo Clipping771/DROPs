@@ -496,7 +496,7 @@ async function diagnose(abs, content, root) {
   const base = path.basename(abs).toLowerCase();
   try {
     if (ext === '.json' && !/^(ts|js)config|\.code-workspace$|devcontainer/.test(base) && !abs.includes('.vscode')) {
-      try { JSON.parse(content.replace(/^﻿/, '')); return '\nDiagnostics: valid JSON.'; } catch (e) { return `\nDiagnostics: INVALID JSON — ${e.message}. Fix this.`; }
+      try { JSON.parse(content.replace(/^\uFEFF/, '')); return '\nDiagnostics: valid JSON.'; } catch (e) { return `\nDiagnostics: INVALID JSON — ${e.message}. Fix this.`; }
     }
     if (['.js', '.cjs', '.mjs'].includes(ext)) {
       const r = await runCheck(process.execPath, ['--check', abs], { ELECTRON_RUN_AS_NODE: '1' });
@@ -666,17 +666,24 @@ async function prepare(ctx, name, input) {
           const mode = input.output_mode || 'content';
           const ctxN = Math.min(input.context || 0, 10);
           const out = []; let matches = 0; const hitFiles = [];
-          for (const f of files) {
-            if (ctx.signal?.aborted) break;
-            let text;
+          // Files are read 32 at a time (one by one was slow on large repos); results keep file order.
+          const readText = async (f) => {
             try {
               const s = await fsp.stat(f);
-              if (s.size > 2 * 1024 * 1024) continue;
+              if (s.size > 2 * 1024 * 1024) return null;
               const buf = await fsp.readFile(f);
-              if (buf.subarray(0, 8000).includes(0)) continue;
-              text = buf.toString('utf8');
-            } catch { continue; }
-            if (!re.test(text)) continue;
+              if (buf.subarray(0, 8000).includes(0)) return null;
+              return buf.toString('utf8');
+            } catch { return null; }
+          };
+          const BATCH = 32;
+          let batch = [], batchAt = -1;
+          for (let fi = 0; fi < files.length; fi++) {
+            const f = files[fi];
+            if (ctx.signal?.aborted) break;
+            if (fi >= batchAt + batch.length) { batchAt = fi; batch = await Promise.all(files.slice(fi, fi + BATCH).map(readText)); }
+            const text = batch[fi - batchAt];
+            if (text == null || !re.test(text)) continue;
             hitFiles.push(relOf(root, f));
             if (mode === 'files') { if (hitFiles.length >= 500) break; continue; }
             const lines = text.replace(/\r\n/g, '\n').split('\n');

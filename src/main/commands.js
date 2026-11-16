@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 function parseCommandFile(fileName, text) {
-  let body = String(text || '').replace(/^﻿/, '');
+  let body = String(text || '').replace(/^\uFEFF/, '');
   let description = '';
   const fm = body.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (fm) {
