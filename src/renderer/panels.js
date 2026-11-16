@@ -248,6 +248,7 @@ const Panels = (() => {
     $('#body').classList.remove('no-insp');
     $$('#inspTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
     $$('.tab-body').forEach((b) => (b.hidden = b.dataset.body !== name));
+    if (name === 'browser') { const bd = $('#browserBadge'); if (bd) bd.hidden = true; if (typeof renderBrowserPane === 'function') renderBrowserPane(currentView(), false); }
     if (name === 'tasks') renderTasks();
   }
   /** The right panel's overview: where this session runs, how full its context is, what it produced. */
@@ -1118,6 +1119,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       ['Generate commit message', '/commit', () => generateCommitMessage(), 'sparkles'],
       ['Switch to Plan mode', '', () => { setMode('plan'); persistOpts(); }, 'list'],
       ['Switch to Full auto mode', '', () => { setMode('yolo'); persistOpts(); }, 'zap'],
+      ['Split view: show another session beside this one', 'Ctrl+\\', () => (S.split ? setSplit(null) : openSplitPicker()), 'panelRight'],
       ['Toggle sidebar', 'Ctrl+B', () => $('#body').classList.toggle('no-side'), 'panelLeft'],
       ['Toggle right panel', 'Ctrl+J', () => toggleInspector(), 'panelRight'],
       ['Show source control', '', () => showSide('scm'), 'branch'],

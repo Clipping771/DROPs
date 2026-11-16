@@ -16,7 +16,8 @@ before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-ui-'));
   const home = path.join(tmp, 'home'), appdata = path.join(tmp, 'appdata');
   fs.mkdirSync(home); fs.mkdirSync(appdata);
-  const env = { ...process.env, APPDATA: appdata, LOCALAPPDATA: path.join(tmp, 'local'), USERPROFILE: home, HOME: home };
+  // DROPs data and home go to throwaway folders; LOCALAPPDATA stays real, because the installed Chrome/Edge needs it to start.
+  const env = { ...process.env, APPDATA: appdata, USERPROFILE: home, HOME: home };
   for (const k of Object.keys(env)) if (/^(DROPS|H2O)_|_API_KEY$/.test(k)) delete env[k]; // no keys: nothing can call a model
   app = await _electron.launch({ executablePath: require('electron'), args: [root], cwd: root, env, timeout: 60000 });
   win = await app.firstWindow();
@@ -291,6 +292,72 @@ test('typing / lists the GitHub commands /pr and /ci', async () => {
   assert.match(text, /\/ci.*failing CI checks/s);
   await win.keyboard.press('Escape');
   await win.fill('#input', '');
+});
+
+test('chapters with a table of contents, the live browser pane, and split view', async () => {
+  const http = require('node:http');
+  const site = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<title>Shop</title><h1>Coupon page</h1>'); });
+  await new Promise((r) => site.listen(0, '127.0.0.1', r));
+  let n = 0;
+  const step = (k) => [
+    { message: { role: 'assistant', tool_calls: [{ function: { name: 'mark_chapter', arguments: { title: 'Investigate' } } }] } },
+    { message: { role: 'assistant', tool_calls: [{ function: { name: 'browser', arguments: { action: 'open', url: `http://127.0.0.1:${site.address().port}/` } } }] } },
+    { message: { role: 'assistant', tool_calls: [{ function: { name: 'mark_chapter', arguments: { title: 'Verify' } } }] } },
+    { message: { role: 'assistant', content: 'Checked the coupon page.' } },
+  ][k - 1] || { message: { role: 'assistant', content: 'done' } };
+  const srv = http.createServer((req, res) => {
+    req.on('data', () => {}); req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'fake:latest', details: { parameter_size: '4B' } }] }));
+      if (req.url === '/api/show') return res.end(JSON.stringify({ capabilities: ['tools'] }));
+      if (req.url !== '/api/chat') return res.end('{}');
+      res.end(JSON.stringify({ ...step(++n), done: true, prompt_eval_count: 5, eval_count: 5 }) + '\n');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const proj = path.join(tmp, 'proj-chapters');
+  fs.mkdirSync(proj, { recursive: true });
+  try {
+    await win.evaluate(async ({ url, projDir }) => {
+      await window.drops.setSettings({ ollamaUrl: url, ollamaEnabled: true, defaultModel: 'ollama:fake:latest', recentProjects: [projDir], autoVerify: false, completionAudit: false, uiCheck: false });
+      await setProject(projDir); await reloadModels(); await newSession();
+      document.querySelector('#modelSel').value = 'ollama:fake:latest'; syncPills(); setMode('yolo');
+    }, { url: `http://127.0.0.1:${srv.address().port}`, projDir: proj });
+    await win.fill('#input', 'check the coupon page');
+    await win.keyboard.press('Enter');
+    await win.waitForFunction(() => /Checked the coupon page/.test(document.querySelector('#threads').textContent) && !document.querySelector('#composer').classList.contains('is-busy'), null, { timeout: 30000 });
+
+    // Chapters: two dividers, no tool cards for them, and a table of contents that jumps.
+    const current = win.locator('#threads > :not([hidden])').first();
+    assert.deepEqual(await current.locator('.chapter-div .ch-title').allTextContents(), ['Investigate', 'Verify']);
+    assert.equal(await win.locator('.tool[data-name="mark_chapter"]').count(), 0);
+    await win.waitForSelector('#toc:not([hidden]) .toc-btn');
+    assert.match(await win.textContent('#toc .toc-btn'), /2 chapters/);
+    await win.click('#toc .toc-btn');
+    assert.deepEqual(await win.locator('#toc .toc-item .toc-t').allTextContents(), ['Investigate', 'Verify']);
+    await win.click('#toc .toc-item >> nth=1');
+
+    // Live browser pane: the page the agent saw, with its address and step.
+    await win.click('#inspTabs button[data-tab="browser"]');
+    await win.waitForSelector('#browserBody img.bp-shot', { timeout: 10000 });
+    assert.match(await win.textContent('#browserBody .bp-url'), /127\.0\.0\.1:\d+\//);
+    assert.ok((await win.getAttribute('#browserBody img.bp-shot', 'src')).startsWith('data:image/jpeg;base64,'));
+
+    // Split view: Ctrl+\ shows another session beside this one; clicking it switches; Ctrl+\ closes.
+    const firstId = await win.evaluate(() => S.current);
+    await win.evaluate(async () => { await newSession(); });
+    await win.keyboard.press('Control+\\');
+    await win.waitForSelector('.split-item');
+    await win.click('.split-item >> nth=0');
+    await win.waitForSelector('#threads.split > .split-side');
+    assert.equal(await win.locator('#threads.split > :not([hidden])').count(), 2, 'two sessions side by side');
+    await win.click('#threads.split > .split-side');
+    assert.equal(await win.evaluate(() => S.current), firstId, 'clicking the side session makes it the one you work in');
+    assert.ok(await win.evaluate(() => !!S.split && S.split !== S.current), 'the other session moves to the side');
+    await win.keyboard.press('Control+\\');
+    await win.waitForFunction(() => !document.querySelector('#threads.split'));
+    await win.click('#inspTabs button[data-tab="plan"]');
+  } finally { srv.close(); site.close(); }
 });
 
 test('Ctrl+Shift+L switches between light and dark themes', async () => {

@@ -153,6 +153,13 @@ const FIND_BREAK_DEF = {
 };
 tools.registerDef(FIND_BREAK_DEF);
 
+const CHAPTER_DEF = {
+  name: 'mark_chapter',
+  description: 'Start a new chapter in the conversation when the work moves to a clearly different phase (for example from investigating to building, or from building to verifying). The user sees a divider and a table of contents to jump between chapters. Use it sparingly: two to six times in a long task, never for every step, and not in short answers. title: a short noun phrase.',
+  input_schema: { type: 'object', properties: { title: { type: 'string', description: 'Under 40 characters, e.g. "Checkout fix"' }, summary: { type: 'string', description: 'Optional one line' } }, required: ['title'] },
+};
+tools.registerDef(CHAPTER_DEF);
+
 const WRAP_UP_DEF = {
   name: 'wrap_up',
   description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
@@ -424,9 +431,10 @@ class AgentSession {
 6. Batch independent read-only calls in parallel in a single turn — it is much faster.
 7. If a tool call is denied or fails twice the same way, change approach instead of retrying. If truly blocked on a decision that is the user's, ask with \`ask_user\` (offer concrete options) instead of guessing.
 8. Record durable project knowledge (build/test commands, conventions, gotchas) with \`remember\` when you discover it, and design decisions with \`remember\` kind "decision" plus why. Memory and lessons are hints from the past: check them against the current code before relying on them. When you make a mistake and find the fix (a wrong assumption, a command that does not exist, a framework pitfall, stopping too early), record one short, general rule with \`learn_lesson\` so you never repeat it in any project.
-9. Before finishing work that adds logins, forms, APIs or database code, run \`audit\` and fix every high finding (confirm each in the code first).
-10. Never run destructive or irreversible operations (deleting data, force-push, publishing, dropping databases) unless the user explicitly asked.
-11. Finish with a short report (see "How to talk to the user"). Never claim tests pass unless you ran them.`,
+9. In a long task, call \`mark_chapter\` when the work moves to a clearly different phase (two to six times, never for every step).
+10. Before finishing work that adds logins, forms, APIs or database code, run \`audit\` and fix every high finding (confirm each in the code first).
+11. Never run destructive or irreversible operations (deleting data, force-push, publishing, dropping databases) unless the user explicitly asked.
+12. Finish with a short report (see "How to talk to the user"). Never claim tests pass unless you ran them.`,
       `# How to talk to the user
 The user sees each tool call as a compact step, so do not narrate tool output back to them.
 - Before a batch of tool calls, write one short sentence (under 20 words) saying what you are about to do, e.g. "Reading the router and its tests to find where the redirect happens." Skip it for trivial follow-up calls.
@@ -451,7 +459,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -979,6 +987,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
     if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
+    if (u.name === 'mark_chapter') {
+      const title = String(u.input.title || '').trim().slice(0, 60) || 'Chapter';
+      meta.summary = title; meta.status = 'done'; meta.output = 'Chapter marked.';
+      this.emit('chapter', { id: u.id, title, summary: String(u.input.summary || '').slice(0, 160) });
+      return { type: 'tool_result', tool_use_id: u.id, content: 'Chapter marked. Continue the work.' };
+    }
     if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
     if (u.name === 'audit') {
       const area = ['security', 'performance'].includes(u.input.area) ? u.input.area : 'all';
@@ -1076,6 +1090,8 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       if (u.name === 'browser' && !isError && !/Could not open/.test(text)) run.uiDirty = false;
       // What the browser showed is evidence: the latest problem stays open until a later step (or a
       // fix and a fresh look) shows the page working.
+      // The live browser pane: a picture of the page after each browser step (UI only, not for the model).
+      if (u.name === 'browser' && u.input.action !== 'close') await this.emitFrame(this.data.projectDir, u.input.action);
       if (u.name === 'browser') {
         const issue = typeof res === 'object' ? res.uiIssue : null;
         if (issue) run.uiIssue = issue;
@@ -1187,6 +1203,14 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const files = changed.map(([abs]) => rel(abs));
     if (culprits.length) return done(`Found it: ${cmd} passes again when ${culprits.length === 1 ? 'this change is' : 'any one of these changes is'} undone: ${culprits.join(', ')}. (Changed in this request: ${files.join(', ')}.) Every file is back exactly as it was before this check. Fix the culprit, or revert only that file.`);
     return done(`No single file explains it: ${cmd} still fails with any one of ${files.join(', ')} undone, but passes with all of them undone. The changes break it together; look at how they interact. Every file is back exactly as it was before this check.`);
+  }
+
+  /** Sends the browser session's current picture to the live pane. */
+  async emitFrame(key, step) {
+    try {
+      const f = await require('./browser').frame(key);
+      if (f) this.emit('browser-frame', { ...f, step: String(step || '').slice(0, 80), at: Date.now() });
+    } catch { /* the pane is optional */ }
   }
 
   // ---------- the next-step box ----------
@@ -1401,6 +1425,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         try {
           for (const st of steps) {
             last = await browser.act(key, st, { mapUrl: (x) => (sb ? sb.mapUrl(x) : x), signal: ctx.signal });
+            await this.emitFrame(key, `${reqId} check: ${st.action}`);
             // A refusal (401, an error message) is the expected result of an attack, not a broken app.
             if (last.issue && !c.negative) { issue = last.issue; break; }
           }

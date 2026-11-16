@@ -155,6 +155,7 @@ async function init() {
     else if (e.ctrlKey && !e.shiftKey && k === 'n') { e.preventDefault(); newSession(); }
     else if (e.ctrlKey && k === ',') { e.preventDefault(); Panels.openSettings(); }
     else if (e.ctrlKey && !e.shiftKey && k === 'o') { e.preventDefault(); pickProject(); }
+    else if (e.ctrlKey && !e.shiftKey && k === '\\') { e.preventDefault(); if (S.split) setSplit(null); else openSplitPicker(); }
     else if (e.ctrlKey && !e.shiftKey && k === 'b') { e.preventDefault(); $('#body').classList.toggle('no-side'); }
     else if (e.ctrlKey && !e.shiftKey && k === 'j') { e.preventDefault(); toggleInspector(); }
     else if (e.ctrlKey && e.shiftKey && k === 'l') { e.preventDefault(); toggleTheme(); }

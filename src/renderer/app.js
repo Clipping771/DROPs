@@ -166,6 +166,7 @@ function renderHistory(v) {
         } else if (b.type === 'thinking' && b.thinking) stepsHost(group).appendChild(thinkingEl(b.thinking, false));
         else if (b.type === 'tool_use') {
           if (b.name === 'todo_write') continue;
+          if (b.name === 'mark_chapter') { place(v, chapterEl(b.id, String(b.input?.title || 'Chapter'), String(b.input?.summary || ''))); group = null; continue; }
           if (b.name === 'wrap_up') { v.histWrapUp = { recap: String(b.input?.recap || ''), ask: String(b.input?.ask || ''), options: b.input?.ask ? (b.input?.options || []).slice(0, 3) : [] }; continue; }
           const meta = d.toolMeta[b.id] || { status: 'done', input: b.input };
           const c = toolCard(v, b.id, b.name, group);
@@ -509,7 +510,7 @@ function onEvent(ev) {
       if (ev.blockType === 'text') { rec.el = h('div', 'md cursor'); g.appendChild(rec.el); setWorking(v, true, 'Writing'); }
       else if (ev.blockType === 'thinking') { rec.el = thinkingEl('', true); rec.started = Date.now(); stepsHost(g).appendChild(rec.el); setWorking(v, true, 'Thinking'); }
       else if (ev.blockType === 'tool_use') {
-        if (ev.name !== 'todo_write' && ev.name !== 'wrap_up') {
+        if (ev.name !== 'todo_write' && ev.name !== 'wrap_up' && ev.name !== 'mark_chapter') {
           rec.card = toolCard(v, ev.id, ev.name, g);
           rec.card.setStatus('composing'); rec.card.setSummary('');
         }
@@ -554,7 +555,7 @@ function onEvent(ev) {
       break;
     }
     case 'tool-start': {
-      if (ev.name === 'todo_write' || ev.name === 'wrap_up') break;
+      if (ev.name === 'todo_write' || ev.name === 'wrap_up' || ev.name === 'mark_chapter') break;
       let c = v.tools.get(ev.id);
       if (!c) c = toolCard(v, ev.id, ev.name, v.group);
       c.clearLive();
@@ -591,6 +592,19 @@ function onEvent(ev) {
     case 'permission': showPermission(v, ev); break;
     case 'question': showQuestion(v, ev); break;
     case 'todos': v.data.todos = ev.todos; renderTaskCard(v); if (cur) Panels.renderPlan(); break;
+    case 'chapter': {
+      place(v, chapterEl(ev.id, ev.title, ev.summary));
+      v.group = null;
+      if (cur) renderToc(v);
+      break;
+    }
+    case 'browser-frame': {
+      v.browserFrame = ev;
+      (v.browserSteps ||= []).push({ step: ev.step, url: ev.url, at: ev.at });
+      if (v.browserSteps.length > 30) v.browserSteps.shift();
+      if (cur) renderBrowserPane(v, true);
+      break;
+    }
     case 'wrap-up': {
       v.el.querySelectorAll('.wrapup button').forEach((b) => { b.disabled = true; });
       v.pendingWrapUp = { recap: ev.recap, ask: ev.ask, options: ev.options };
@@ -749,6 +763,84 @@ function renderTaskCard(v) {
   place(v, v.taskCard); // moves it to the bottom of the thread, above the working indicator
 }
 
+// ---------- chapters ----------
+function chapterEl(id, title, summary) {
+  const d = h('div', 'chapter-div');
+  d.dataset.chapter = id || String(Date.now());
+  d.innerHTML = '<span class="ch-line"></span><span class="ch-title"></span><span class="ch-line"></span>';
+  d.querySelector('.ch-title').textContent = title;
+  if (summary) d.title = summary;
+  return d;
+}
+/** A floating table of contents for the current session's chapters; click to jump. */
+function renderToc(v) {
+  const toc = $('#toc');
+  if (!toc) return;
+  const chapters = v ? [...v.el.querySelectorAll('.chapter-div')] : [];
+  toc.hidden = chapters.length < 2;
+  if (toc.hidden) return;
+  toc.innerHTML = '';
+  const btn = h('button', 'toc-btn'); btn.innerHTML = icon('list', 'xs') + `<span>${chapters.length} chapters</span>`;
+  const list = h('div', 'toc-list'); list.hidden = true;
+  btn.onclick = () => { list.hidden = !list.hidden; };
+  chapters.forEach((c, i) => {
+    const it = h('button', 'toc-item');
+    it.innerHTML = `<span class="toc-n">${i + 1}</span><span class="toc-t"></span>`;
+    it.querySelector('.toc-t').textContent = c.querySelector('.ch-title').textContent;
+    it.onclick = () => { c.scrollIntoView({ behavior: 'smooth', block: 'start' }); list.hidden = true; };
+    list.appendChild(it);
+  });
+  toc.append(btn, list);
+}
+
+// ---------- live browser pane ----------
+function renderBrowserPane(v, fresh) {
+  const box = $('#browserBody');
+  if (!box) return;
+  const f = v?.browserFrame;
+  const badge = $('#browserBadge');
+  if (badge) badge.hidden = !(fresh && !$('#browserBody').offsetParent);
+  if (!f) { box.innerHTML = '<div class="empty">When DROPs uses the browser, the page it sees shows here, live.</div>'; return; }
+  box.innerHTML = '';
+  const head = h('div', 'bp-head');
+  head.innerHTML = `${icon('globe', 'xs')}<span class="bp-url mono"></span><span class="bp-step"></span>`;
+  head.querySelector('.bp-url').textContent = f.url;
+  head.querySelector('.bp-step').textContent = f.step || '';
+  const img = h('img', 'bp-shot'); img.src = `data:image/jpeg;base64,${f.data}`; img.alt = f.title || 'Browser page';
+  img.onclick = () => img.classList.toggle('zoom');
+  const steps = h('div', 'bp-steps');
+  for (const s of (v.browserSteps || []).slice(-8).reverse()) {
+    const r = h('div', 'bp-row');
+    r.innerHTML = `<span class="bp-t"></span><span class="bp-u mono"></span>`;
+    r.querySelector('.bp-t').textContent = s.step;
+    try { r.querySelector('.bp-u').textContent = new URL(s.url).pathname; } catch { r.querySelector('.bp-u').textContent = s.url; }
+    steps.appendChild(r);
+  }
+  box.append(head, img, steps);
+}
+
+// ---------- split view: a second session beside the current one ----------
+function setSplit(id) {
+  S.split = id && id !== S.current ? id : null;
+  showCurrent();
+  toast(S.split ? 'Split view: click the right side to work there' : 'Split view closed');
+}
+async function openSplitPicker() {
+  const others = S.sessions.filter((s) => s.id !== S.current).slice(0, 12);
+  if (!others.length) { toast('Open another session first'); return; }
+  const m = h('div', 'modal'); m.style.width = 'min(440px, 92vw)';
+  m.innerHTML = '<div class="modal-head">Show beside this session</div>';
+  const list = h('div', 'split-list');
+  for (const s of others) {
+    const b = h('button', 'btn ghost split-item'); b.textContent = s.title;
+    b.onclick = async () => { o.remove(); if (!S.views.get(s.id)) { const data = await api.loadSession(s.id); if (data) makeView(data); } setSplit(s.id); };
+    list.appendChild(b);
+  }
+  m.appendChild(list);
+  const o = h('div', 'overlay'); o.appendChild(m); o.onclick = (e) => { if (e.target === o) o.remove(); };
+  document.body.appendChild(o);
+}
+
 function maybePlanCta(v) {
   v.el.querySelector('.plan-cta')?.remove();
   const last = v.data.messages[v.data.messages.length - 1];
@@ -852,10 +944,23 @@ async function newSession() {
 }
 function showCurrent() {
   const v = currentView();
-  for (const x of S.views.values()) x.el.hidden = x !== v;
+  const side = S.split && S.split !== S.current ? S.views.get(S.split) : null;
+  if (!side) S.split = null;
+  $('#threads').classList.toggle('split', !!side);
+  for (const x of S.views.values()) {
+    x.el.hidden = x !== v && x !== side;
+    x.el.classList.toggle('split-side', x === side);
+    x.el.classList.toggle('split-main', !!side && x === v);
+    // Clicking the side session makes it the one you work in (the other moves to the side).
+    x.el.onclick = x === side ? () => { const was = S.current; S.current = side.id; S.split = was; showCurrent(); } : null;
+  }
+  renderToc(v);
+  renderBrowserPane(v, false);
   const empty = !v || (!v.data.messages.length && !v.data.archive?.length && !v.busy);
-  $('#hero').hidden = !empty;
-  if (empty) Panels.renderHero();
+  // In split view the home screen would cover both sessions: an empty session shows a short hint instead.
+  $('#hero').hidden = !empty || !!side;
+  if (empty && !side) Panels.renderHero();
+  if (v) v.el.classList.toggle('split-empty', !!side && empty);
   $('#sessionTitle').textContent = v ? v.data.title : '';
   const d = v?.data || { model: S.settings.defaultModel, effort: S.settings.effort, mode: S.settings.mode };
   $('#modelSel').value = v ? d.model : usableModel(d.model);

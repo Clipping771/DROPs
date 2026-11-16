@@ -252,4 +252,14 @@ async function fingerprint(page) {
 
 async function closeAll() { await Promise.all([...sessions.values()].map((s) => s.close())); }
 
-module.exports = { available, act, closeAll, locate };
+/** A small picture of what a browser session shows now, for the live pane (never sent to the model). */
+async function frame(key) {
+  const s = sessions.get(key);
+  if (!s?.page || s.page.isClosed()) return null;
+  try {
+    const png = await s.page.screenshot({ type: 'jpeg', quality: 55, timeout: 5000 });
+    return { url: s.page.url(), title: await s.page.title().catch(() => ''), data: png.toString('base64') };
+  } catch { return null; }
+}
+
+module.exports = { available, act, closeAll, locate, frame };
