@@ -2,6 +2,7 @@
 // take screenshots. Uses playwright-core with a browser already on the machine (Playwright's Chromium if
 // installed, else Edge or Chrome); nothing is downloaded. Headless. One page per project, reused across
 // calls so a login or a filled form carries over between steps, closed after 10 idle minutes.
+const fs = require('fs');
 let pw = null;
 try { pw = require('playwright-core'); } catch { /* optional dependency */ }
 
@@ -29,9 +30,51 @@ class BrowserSession {
       if (viewport) await this.page.setViewportSize(viewport);
       return this.page;
     }
+    if (this.app) {
+      // An Electron app: its first window is the page (a closed window means the app has quit).
+      const w = this.app.windows().find((p) => !p.isClosed());
+      if (!w) throw new Error('The app has no open window (it may have quit). Launch it again.');
+      this.page = w;
+      if (viewport) await this.page.setViewportSize(viewport).catch(() => {});
+      return this.page;
+    }
     if (!this.browser || !this.browser.isConnected()) this.browser = await launch();
     const context = await this.browser.newContext({ viewport: viewport || { width: 1280, height: 800 } });
     this.page = await context.newPage();
+    this.attach(this.page);
+    return this.page;
+  }
+
+  /**
+   * Starts an Electron app from its folder, with its own throwaway data folder (APPDATA, where Electron
+   * keeps an app's settings) so it never reads or changes the user's real ones. The home folder and
+   * LOCALAPPDATA stay real: Electron does not start with a replaced home folder.
+   */
+  async launchApp(dir, { timeout = 60_000 } = {}) {
+    if (!pw?._electron) throw new Error('Desktop app testing is not available (playwright-core with Electron support is missing).');
+    const path = require('path'), os = require('os');
+    let exe;
+    try { exe = require(require.resolve('electron', { paths: [dir] })); } catch { throw new Error(`No Electron in ${dir}: run npm install there first (the app needs the "electron" package).`); }
+    if (typeof exe !== 'string' || !fs.existsSync(exe)) throw new Error('The electron package is installed but its program is missing: run npm install again.');
+    await this.close();
+    sessions.set(this.key, this);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-app-'));
+    fs.mkdirSync(path.join(tmp, 'appdata'));
+    const env = { ...process.env, APPDATA: path.join(tmp, 'appdata') };
+    for (const k of Object.keys(env)) if (/_API_KEY$|^(DROPS|H2O)_/.test(k)) delete env[k]; // the app under test gets no keys
+    this.appTmp = tmp;
+    this.app = await pw._electron.launch({ executablePath: exe, args: [dir], cwd: dir, env, timeout });
+    this.app.process()?.stdout?.on('data', (d) => { const t = String(d).trim(); if (/error|exception/i.test(t)) this.events.push(`app output: ${t.slice(0, 300)}`); });
+    this.page = await this.app.firstWindow({ timeout });
+    this.attach(this.page);
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    this.touch();
+    return this.page;
+  }
+
+  /** Listens to a page's console, errors, requests and dialogs (browser pages and app windows alike). */
+  attach(page) {
+    this.page = page;
     this.page.setDefaultTimeout(ACTION_TIMEOUT);
     this.page.on('console', (m) => { if (m.type() === 'error') this.events.push(`console error: ${m.text().slice(0, 300)}`); });
     this.page.on('pageerror', (e) => this.events.push(`page error: ${String(e.message || e).slice(0, 300)}`));
@@ -68,10 +111,17 @@ class BrowserSession {
 
   async close() {
     clearTimeout(this.timer);
-    const b = this.browser;
-    this.browser = null; this.page = null;
+    const b = this.browser, app = this.app, tmp = this.appTmp;
+    this.browser = null; this.page = null; this.app = null; this.appTmp = null;
     sessions.delete(this.key);
     await b?.close().catch(() => {});
+    if (app) {
+      // Never leave a window behind: close it, and end the process if it does not quit.
+      const proc = app.process();
+      await Promise.race([app.close().catch(() => {}), new Promise((r) => setTimeout(r, 5000))]);
+      try { if (proc && proc.exitCode === null) { if (process.platform === 'win32') require('child_process').execSync(`taskkill /PID ${proc.pid} /T /F`, { stdio: 'ignore' }); else proc.kill('SIGKILL'); } } catch { /* already gone */ }
+      if (tmp) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* files still locked: left in temp */ } }
+    }
   }
 
   takeEvents() { const e = this.events; this.events = []; return e; }
@@ -162,7 +212,8 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
   if (!pw) throw new Error('The browser is not available (playwright-core is not installed).');
   const s = sessionFor(key);
   const action = input.action;
-  if (action === 'close') { await s.close(); return { text: 'Browser closed.' }; }
+  if (action === 'close') { const wasApp = !!s.app; await s.close(); return { text: wasApp ? 'App closed.' : 'Browser closed.' }; }
+  if (action === 'launch') { await s.launchApp(input.path); }
   const viewport = input.width ? { width: Math.max(320, Math.min(input.width, 2560)), height: Math.max(480, Math.min(input.height || 900, 2000)) } : null;
   const page = await s.ensure(viewport);
   const settle = async () => { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {}); };
@@ -220,6 +271,7 @@ async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
     // Reload: does what was saved survive a fresh load (it is in the database, not only on screen)?
     case 'reload': { const r = await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null); s.lastStatus = r ? r.status() : null; await settle(); break; }
     case 'read': break;
+    case 'launch': await settle(); break; // the app was started above
     case 'screenshot': {
       const png = await page.screenshot({ fullPage: !!input.full, type: 'png' });
       const text = await snapshot(page, s);
@@ -251,6 +303,9 @@ async function fingerprint(page) {
 }
 
 async function closeAll() { await Promise.all([...sessions.values()].map((s) => s.close())); }
+/** Closes one session (an app or a browser) if it is open. */
+async function closeKey(key) { await sessions.get(key)?.close(); }
+const isOpen = (key) => !!sessions.get(key)?.page;
 
 /** A small picture of what a browser session shows now, for the live pane (never sent to the model). */
 async function frame(key) {
@@ -262,4 +317,4 @@ async function frame(key) {
   } catch { return null; }
 }
 
-module.exports = { available, act, closeAll, locate, frame };
+module.exports = { available, act, closeAll, closeKey, isOpen, locate, frame };

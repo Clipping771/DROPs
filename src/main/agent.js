@@ -38,6 +38,14 @@ function progressSection(root, currentId) {
   return `# Unfinished work from earlier sessions in this project\nThis was open when those sessions ended. It may be out of date: check it against the current code before relying on it, and continue it only if the user's request is about it.\n${body}`.slice(0, 2500);
 }
 
+/** Whether a model can read images (screenshots). Text-only models get a description instead. */
+function modelSeesImages(model) {
+  const m = String(model || '').toLowerCase();
+  if (m.startsWith('ollama:') || m.startsWith('lmstudio:')) return /vision|llava|-vl\b|vl:|minicpm-v|moondream|gemma3|gemma4|llama3\.2-vision|granite.*vision|qwen2\.5vl|qwen3-vl/.test(m);
+  if (/deepseek|nemotron|kimi|minimax|glm-(?!.*v)|qwen3(?!.*vl)|qwq|llama-3\.[13]|mistral-(small|nemo)|gpt-oss/.test(m)) return false;
+  return true;
+}
+
 // ---- evidence helpers ----
 /** A cheap fingerprint of the project's source files (path, size, modified time). Any change, by an
  *  edit tool or by a command, gives a different value. Installed packages and build output are ignored. */
@@ -159,6 +167,22 @@ const CHAPTER_DEF = {
   input_schema: { type: 'object', properties: { title: { type: 'string', description: 'Under 40 characters, e.g. "Checkout fix"' }, summary: { type: 'string', description: 'Optional one line' } }, required: ['title'] },
 };
 tools.registerDef(CHAPTER_DEF);
+
+const APP_DEF = {
+  name: 'app',
+  description: 'Test a desktop app you are building (Electron) the way a user would: launch it, click, type, read what its window shows, take a screenshot, close it. It runs with its own empty data folder, so it never touches the user\'s real settings, and it is closed at the end of every request. Each step reports the window\'s text, interactive elements, messages, console errors and clicks that changed nothing, like the browser tool. Actions: launch {path?: the app folder, default the project}; click {target}; fill {target, value}; select {target, value}; check {target}; press {key, target?}; wait {target? | seconds}; read; screenshot; close. target = visible text or label, "testid=<id>", or a CSS selector.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['launch', 'click', 'fill', 'select', 'check', 'press', 'wait', 'read', 'screenshot', 'close'] },
+      path: { type: 'string', description: 'For launch: the app folder relative to the project (default ".")' },
+      target: { type: 'string' }, value: { type: 'string' }, key: { type: 'string' }, seconds: { type: 'number' }, full: { type: 'boolean' },
+      width: { type: 'integer' }, height: { type: 'integer' },
+    },
+    required: ['action'],
+  },
+};
+tools.registerDef(APP_DEF);
 
 const WRAP_UP_DEF = {
   name: 'wrap_up',
@@ -459,7 +483,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -790,8 +814,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         const results = await this.runTools(uses, ctx, opts, run);
         const steer = this.takeSteering();
         // Images a tool produced (read_file on a picture) follow the tool results in the same message.
-        const toolImages = results.flatMap((r) => r?._images || []);
+        let toolImages = results.flatMap((r) => r?._images || []);
         for (const r of results) if (r) delete r._images;
+        // A model that cannot see images gets a description of them instead.
+        if (toolImages.length && !modelSeesImages(opts.model)) {
+          const desc = await this.describeImages(toolImages, signal);
+          toolImages = [{ type: 'text', text: desc }];
+        }
         if (toolImages.length) dropOldToolImages(this.data.messages, 3 - toolImages.length);
         // A message the user typed meanwhile rides in the same user turn as the tool results (tool
         // results first): two user turns in a row are refused by some model APIs.
@@ -815,6 +844,8 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   finish(opts) {
+    // An app the agent launched never outlives the request (no windows left behind).
+    require('./browser').closeKey(this.appKey()).catch(() => {});
     if (this.data.projectDir) writeProgress(this.data.projectDir, this.data);
     // A task on a requirements document always ends with the plain count, whatever the agent said.
     const reqs = this.data.requirements || [];
@@ -994,6 +1025,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       return { type: 'tool_result', tool_use_id: u.id, content: 'Chapter marked. Continue the work.' };
     }
     if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
+    if (u.name === 'app') return this.runApp(u, meta, ctx, run);
     if (u.name === 'audit') {
       const area = ['security', 'performance'].includes(u.input.area) ? u.input.area : 'all';
       meta.summary = area; this.emit('tool-start', { id: u.id, name: 'audit', input: u.input, summary: area });
@@ -1157,6 +1189,56 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       meta.status = 'error'; meta.output = e.message;
       this.emit('tool-end', { id: u.id, ok: false, output: e.message });
       return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: `Web search failed: ${e.message}` };
+    }
+  }
+
+  // ---------- desktop (Electron) app testing ----------
+  appKey() { return `app::${this.data.projectDir}`; }
+  async runApp(u, meta, ctx, run) {
+    const action = String(u.input.action || '');
+    meta.summary = action === 'launch' ? `launch ${u.input.path || '.'}` : `${action} ${u.input.target || ''}`.trim();
+    this.emit('tool-start', { id: u.id, name: 'app', input: u.input, summary: meta.summary });
+    const done = (text, ok, images) => { meta.status = ok ? 'done' : 'error'; meta.output = text; this.emit('tool-end', { id: u.id, ok, output: text, ...(images ? { images: images.map((b) => ({ source: b.source })) } : {}) }); return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }), ...(images ? { _images: images } : {}) }; };
+    const browser = require('./browser');
+    if (!browser.available()) return done('Desktop app testing is not available: playwright-core is not installed.', false);
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return done('This read-only mode cannot run an app.', false);
+    let input = u.input;
+    if (action === 'launch') {
+      let dir;
+      try { dir = tools.resolveInRoot(this.data.projectDir, u.input.path || '.'); } catch (e) { return done(`Only an app inside the project can be launched: ${e.message}`, false); }
+      // Starting a program asks first, like a command, outside full auto.
+      if (this.data.mode !== 'yolo') {
+        const r = await this.askPermission(u, { kind: 'shell', summary: `Launch the Electron app in ${path.relative(this.data.projectDir, dir) || '.'} (with throwaway data folders) to test it` }, false, 'Runs the app you are building');
+        if (r.decision === 'deny') return done(`The user denied this.${r.feedback ? ` Their instructions: ${r.feedback}` : ''}`, false);
+      }
+      input = { ...u.input, path: dir };
+    } else if (action !== 'close' && !browser.isOpen(this.appKey())) {
+      return done('No app is running: call app with action "launch" first.', false);
+    }
+    try {
+      const res = await browser.act(this.appKey(), input, { signal: ctx.signal });
+      if (action !== 'close') await this.emitFrame(this.appKey(), `app: ${action}`);
+      if (res.issue) run.uiIssue = res.issue;
+      else if (['click', 'press'].includes(action)) run.uiIssue = null;
+      if (action !== 'close') run.uiDirty = false;
+      return done(res.text, true, res.images || null);
+    } catch (e) {
+      return done(`App ${action} failed: ${String(e.message || e).split('\n')[0]}`, false);
+    }
+  }
+
+  // ---------- screenshots for models that cannot see images ----------
+  async describeImages(images, signal) {
+    if (!this.deps.getGeminiKey?.()) return '(The model in use cannot see images, and no Gemini key is set to describe them. Rely on the text the tool returned.)';
+    try {
+      const res = await providers.callModel({
+        model: 'gemini-3.6-flash', system: 'You describe screenshots for a developer who cannot see them. Be concrete and short.',
+        messages: [{ role: 'user', content: [...images, { type: 'text', text: 'Describe each screenshot: the layout from top to bottom, all visible text, and anything that looks broken: overlapping or cut-off text, elements outside the window, empty areas where content should be, unreadable contrast, things that do not line up.' }] }],
+        tools: [], effort: 'low', signal: signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {},
+      });
+      return `[Screenshot described by a vision model, because the model in use cannot see images]\n${res.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim()}`;
+    } catch (e) {
+      return `(The screenshot could not be described: ${String(e.message || e).slice(0, 120)})`;
     }
   }
 
@@ -1796,4 +1878,4 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   dispose() { this.stop(); this.procs.stopAll(); }
 }
 
-module.exports = { readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
+module.exports = { modelSeesImages, readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };

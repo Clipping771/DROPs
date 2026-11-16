@@ -330,12 +330,16 @@ Free-tier runs mix models as quotas run out, so they are not single-model measur
 | **Runtime checks** | Every browser step lists the API calls the page made with their status ("POST /api/items → 201"). A `reload` action shows whether saved data survives; QA checks for requirements that save something end with a reload. |
 | **Audit** (`audit` tool) | Fixed-rule security and performance audit with file:line: secrets, SQL built from strings, eval, raw HTML, shell commands from request data, open CORS, cookie flags, plain passwords, TLS off, open redirects; database calls in loops (N+1), blocking file calls, unpaginated queries, very large files. Secret values are never printed. |
 | **Benchmarks B–E** (factory) | `factory scenario --type debug | change | adversarial | long`: seeded logic bugs with user-style reports; a change request scored on regressions; seeded security holes with no reports; one app built over three sessions. |
+| **Desktop app testing** (`app` tool) | Launches an Electron app from the project and uses it like a user: click, type, select, press keys, read the window, take screenshots. Each step reports the window's text, console errors and clicks that changed nothing, like the browser tool. The app runs with its own empty data folder and gets no API keys. It can only start an app inside the project, asks first outside full auto, and is always closed at the end of the request (the process is ended if it does not quit). |
+| **Screenshots for text-only models** | When the model in use cannot read images (DeepSeek, local Qwen and similar), a Gemini vision model describes each screenshot (layout, visible text, anything broken) and the description goes to the model instead. |
+| **Chat interface** | Sidebar status per session, a live line while the agent works, Enter steers and Ctrl+Enter queues during a task, Send now, Claude-style task list, background tasks, chapters with a table of contents in the title bar, a live browser pane, split view (Ctrl+\\), icon tabs in the right panel. |
 
 ## 15. Known limits (short)
 
 - **Quality depends on the model.** Small free models vary a lot from run to run.
 - **Still missing:**
-  - in the app: session status and pins in the sidebar, chapters for long sessions, split view, a live browser pane;
+  - in the app: pinned sessions;
+  - control of the whole desktop (other programs, the user's screen): left out on purpose for safety; DROPs tests only web pages and Electron apps it starts from the project;
   - in the agent: scheduled tasks, skills, full hooks;
   - for releasing DROPs: auto-update, crash reports, a signed installer;
   - tested Mac and Linux builds.
