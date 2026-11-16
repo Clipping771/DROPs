@@ -72,3 +72,59 @@ test('unfinished work: what one session leaves open is in the next session\'s pr
     assert.doesNotMatch(third.system(), /Unfinished work/);
   } finally { third.agent.dispose(); providers.callModel = realCallModel; }
 });
+
+test('searchSessions: finds matches inside saved conversation messages as well as titles', () => {
+  const store = require('../src/main/store');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-search-'));
+  const s1 = store.newSession(dir);
+  s1.title = 'Unrelated title';
+  s1.messages = [{ role: 'user', content: [{ type: 'text', text: 'Please configure PostgreSQL connection pooling' }] }];
+  store.saveSession(s1);
+
+  const s2 = store.newSession(dir);
+  s2.title = 'Redis cache setup';
+  s2.messages = [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }];
+  store.saveSession(s2);
+
+  const byMsg = store.searchSessions('postgresql');
+  assert.equal(byMsg.length, 1);
+  assert.equal(byMsg[0].id, s1.id);
+  assert.match(byMsg[0].snippet, /PostgreSQL/i);
+
+  const byTitle = store.searchSessions('redis');
+  assert.equal(byTitle.length, 1);
+  assert.equal(byTitle[0].id, s2.id);
+});
+
+test('save_plan: persists structured implementation plan in session and injects it into system prompt', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-plan-'));
+  const { agent, data, system } = run(dir, 's-plan', [
+    { tool: 'save_plan', input: { goal: 'Add rate limiting', files: ['src/auth.ts', 'tests/auth.test.ts'], steps: ['Add limiter', 'Wire middleware', 'Run tests'], verification: 'npm test' } },
+    { text: 'Plan saved and ready.' },
+  ], 'Rate limit');
+  try {
+    await agent.send('plan this', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.equal(data.plan.goal, 'Add rate limiting');
+    assert.deepEqual(data.plan.files, ['src/auth.ts', 'tests/auth.test.ts']);
+    await agent.send('execute', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.match(system(), /# Active Implementation Plan\nGoal: Add rate limiting\nFiles: src\/auth\.ts, tests\/auth\.test\.ts/);
+    assert.match(system(), /Verification: npm test/);
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});
+
+test('save_plan: a plan carried out (files changed, task finished) is not pinned into the next request', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-plan-done-'));
+  const { agent, data, system } = run(dir, 's-plan-done', [
+    { tool: 'save_plan', input: { goal: 'Add a greeting', files: ['hello.txt'], steps: ['Write hello.txt'], verification: 'type hello.txt' } },
+    { tool: 'write_file', input: { path: 'hello.txt', content: 'hello\n' } },
+    { text: 'Done: hello.txt now says hello.' },
+    { text: 'The answer is 4.' },
+  ], 'Greeting');
+  try {
+    await agent.send('add a greeting file', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.equal(fs.readFileSync(path.join(dir, 'hello.txt'), 'utf8'), 'hello\n');
+    assert.equal(data.plan, null, 'the finished plan is cleared');
+    await agent.send('what is 2 + 2?', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.doesNotMatch(system(), /Active Implementation Plan/);
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});

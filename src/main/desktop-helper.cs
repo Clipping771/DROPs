@@ -283,10 +283,12 @@ public static class DropsDesk {
   static string Invoke(AutomationElement e) {
     if (!e.Current.IsEnabled) throw new Exception("That element is disabled.");
     object p;
-    if (e.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return "invoke"; }
-    if (e.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return "toggle"; }
-    if (e.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return "select"; }
-    if (e.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p)) { var x = (ExpandCollapsePattern)p; if (x.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) x.Expand(); else x.Collapse(); return "expand"; }
+    try {
+      if (e.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return "invoke"; }
+      if (e.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return "toggle"; }
+      if (e.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return "select"; }
+      if (e.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p)) { var x = (ExpandCollapsePattern)p; if (x.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) x.Expand(); else x.Collapse(); return "expand"; }
+    } catch (InvalidOperationException) { /* fall back to mouse click in desktop.js */ }
     return "none";
   }
 

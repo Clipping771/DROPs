@@ -529,6 +529,7 @@ handle('commands:openFolder', async (where) => {
 
 // ---------- sessions ----------
 handle('session:list', () => store.listSessions());
+handle('session:search', (q) => store.searchSessions(q));
 handle('session:new', async (projectDir, opts = {}) => {
   try { projectDir = projectRoot(projectDir); } catch (e) { return { error: e.message }; }
   let dir = projectDir, worktree = null;

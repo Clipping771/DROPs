@@ -42,6 +42,7 @@ const DEFAULTS = {
   sandboxNetwork: true,
   // communication
   responseLanguage: 'auto',
+  uiLanguage: 'en',
   explainMode: false,
   // OpenAI-compatible providers
   providerKeysEnc: {},
@@ -380,4 +381,32 @@ function listSessions() {
   return out.sort((a, b) => b.updated - a.updated);
 }
 
-module.exports = { init, setSettingsAsync, gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions };
+/** Searches all saved sessions by title and conversation text (without unpacking checkpoint blobs). */
+function searchSessions(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  let files = [];
+  try { files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json') && f !== '_index.json'); } catch { return []; }
+  const hits = [];
+  const blockText = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (b?.type === 'text' && b.text ? b.text : '')).filter(Boolean).join(' ') : '');
+  for (const f of files) {
+    const d = readJson(path.join(sessionsDir(), f), null);
+    if (!d?.id) continue;
+    const titleHit = (d.title || '').toLowerCase().includes(q);
+    let snippet = '';
+    for (const m of [...(d.messages || []), ...(d.archive || [])]) {
+      const t = blockText(m?.content);
+      const idx = t.toLowerCase().indexOf(q);
+      if (idx >= 0) {
+        const start = Math.max(0, idx - 30);
+        const end = Math.min(t.length, idx + q.length + 50);
+        snippet = (start > 0 ? '…' : '') + t.slice(start, end).replace(/\s+/g, ' ').trim() + (end < t.length ? '…' : '');
+        break;
+      }
+    }
+    if (titleHit || snippet) hits.push({ id: d.id, updated: d.updated || 0, snippet });
+  }
+  return hits.sort((a, b) => b.updated - a.updated).slice(0, 50).map(({ id, snippet }) => ({ id, snippet }));
+}
+
+module.exports = { init, setSettingsAsync, gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions, searchSessions };

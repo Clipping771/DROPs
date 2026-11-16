@@ -94,8 +94,10 @@ function cachedGraph(root, entries) {
   const stamp = entries.length + ':' + entries.reduce((n, e) => n + (e.stats?.mtimeMs || 0) + (e.stats?.size || 0), 0);
   const hit = graphCache.get(root);
   if (hit && hit.stamp === stamp) return hit.graph;
-  const graph = require('./codegraph').buildGraph(root);
-  graph.text = null; // the map needs only the edges; don't keep every file's text in memory
+  // Keep only the edges the map needs. The graph itself is shared (codegraph caches it for impact and
+  // code_search, which need every file's text), so it must not be changed here.
+  const full = require('./codegraph').buildGraph(root, { cache: true });
+  const graph = { imports: full.imports, importedBy: full.importedBy };
   graphCache.set(root, { stamp, graph });
   if (graphCache.size > 5) graphCache.delete(graphCache.keys().next().value);
   return graph;

@@ -239,6 +239,7 @@ async function init() {
 
   if (S.settings.lastProject && S.settings.restoreLastProject !== false) await setProject(S.settings.lastProject);
   else { await Panels.loadTree(); await Panels.renderSessions(); showCurrent(); }
+  window.applyI18n?.(S.settings.uiLanguage || 'en');
   if (!S.settings.hasKey) setTimeout(() => Panels.openSettings(), 300);
   startupNotices();
   t.focus();

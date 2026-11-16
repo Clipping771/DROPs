@@ -9,8 +9,15 @@ const fg = require('fast-glob');
 const SRC_EXT = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.py'];
 const IGNORE = ['**/node_modules/**', '**/.next/**', '**/.git/**', '**/dist/**', '**/build/**', '**/coverage/**', '**/test-results/**', '**/.drops/**', '**/.h2o/**', '**/.venv/**', '**/venv/**', '**/__pycache__/**', '**/*.min.js'];
 const MAX_FILES = 5000;
+const CACHE_TTL_MS = 15_000;
+const graphCache = new Map(); // normalized root -> { at, graph }
 const norm = (p) => p.replace(/\\/g, '/');
 const read = (abs) => { try { return fs.readFileSync(abs, 'utf8'); } catch { return ''; } };
+
+function invalidateGraph(root) {
+  if (!root) { graphCache.clear(); return; }
+  graphCache.delete(norm(path.resolve(root)).toLowerCase());
+}
 
 /** Import specifiers in one file's source. */
 function importsOf(text, file) {
@@ -54,7 +61,10 @@ function resolveImport(spec, fromFile, files, root) {
 }
 
 /** Builds the graph: files, imports (file -> files) and importedBy (file -> files). */
-function buildGraph(root) {
+function buildGraph(root, { cache = false } = {}) {
+  const key = norm(path.resolve(root)).toLowerCase();
+  const hit = cache && graphCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.graph;
   const list = fg.sync(SRC_EXT.map((e) => `**/*${e}`), { cwd: root, ignore: IGNORE, onlyFiles: true, suppressErrors: true, deep: 14 }).map(norm).slice(0, MAX_FILES);
   const files = new Set(list);
   const imports = new Map(), importedBy = new Map(), text = new Map();
@@ -70,7 +80,9 @@ function buildGraph(root) {
     imports.set(f, deps);
     for (const d of deps) importedBy.get(d)?.add(f);
   }
-  return { root, files, imports, importedBy, text, truncated: list.length >= MAX_FILES };
+  const graph = { root, files, imports, importedBy, text, truncated: list.length >= MAX_FILES };
+  graphCache.set(key, { at: Date.now(), graph });
+  return graph;
 }
 
 /** Files that depend on `file`, level by level (1 = imports it directly). */
@@ -108,6 +120,53 @@ function cycles(g, limit = 10) {
 
 const isTest = (f) => /(^|\/)(tests?|__tests__|spec|e2e)\/|\.(test|spec)\.[a-z]+$|_test\.py$|(^|\/)test_[^/]*\.py$/i.test(f);
 
+/**
+ * True AST-level symbol references for TS/JS files using TypeScript's LanguageService when available.
+ * Returns null if TypeScript cannot be loaded or the symbol isn't found in TS/JS sources.
+ */
+function tsSymbolReferences(g, name) {
+  let ts;
+  try { ts = require('typescript'); } catch { return null; }
+  const tsFiles = [...g.files].filter((f) => /\.(tsx?|jsx?|mjs|cjs)$/.test(f)).slice(0, 400);
+  if (!tsFiles.length) return null;
+  const esc = name.replace(/[$]/g, '\\$');
+  const defRe = new RegExp(`(?:function\\*?\\s+|class\\s+|(?:const|let|var)\\s+|interface\\s+|type\\s+|enum\\s+)(${esc})\\b`);
+  let seedFile = null, seedPos = -1;
+  for (const f of tsFiles) {
+    const t = g.text.get(f) || '';
+    const m = defRe.exec(t);
+    if (m) { seedFile = f; seedPos = m.index + m[0].length - m[1].length; break; }
+  }
+  if (!seedFile || seedPos < 0) return null;
+  const host = {
+    getScriptFileNames: () => tsFiles.map((f) => path.join(g.root, f)),
+    getScriptVersion: () => '1',
+    getScriptSnapshot: (fn) => {
+      const rel = norm(path.relative(g.root, fn));
+      const t = g.text.get(rel);
+      return t !== undefined ? ts.ScriptSnapshot.fromString(t) : (fs.existsSync(fn) ? ts.ScriptSnapshot.fromString(read(fn)) : undefined);
+    },
+    getCurrentDirectory: () => g.root,
+    getCompilationSettings: () => ({ allowJs: true, checkJs: false, jsx: ts.JsxEmit.ReactJSX, moduleResolution: ts.ModuleResolutionKind.NodeNext, target: ts.ScriptTarget.ESNext }),
+    getDefaultLibFileName: () => '',
+    fileExists: (fn) => fs.existsSync(fn),
+    readFile: (fn) => read(fn),
+  };
+  try {
+    const ls = ts.createLanguageService(host, ts.createDocumentRegistry());
+    const refs = ls.findReferences(path.join(g.root, seedFile), seedPos);
+    if (!refs?.length) return null;
+    const defined = new Set(), used = new Set();
+    for (const grp of refs) {
+      for (const r of grp.references) {
+        const rel = norm(path.relative(g.root, r.fileName));
+        if (!g.files.has(rel)) continue;
+        if (r.isDefinition) defined.add(rel); else used.add(rel);
+      }
+    }
+    return { defined: [...defined], used: [...used].filter((f) => !defined.has(f)) };
+  } catch { return null; }
+}
 /** Where a symbol (function, class, component, variable) is defined and used. */
 function symbolUses(g, name) {
   const re = new RegExp(`(^|[^\\w$])${name.replace(/[$]/g, '\\$')}(?![\\w$])`);
@@ -148,7 +207,7 @@ function modelUses(g, root, model) {
  * a Prisma model name, or "cycles".
  */
 function impactReport(root, target) {
-  const g = buildGraph(root);
+  const g = buildGraph(root, { cache: true });
   const t = norm(String(target || '').trim()).replace(/^\.\//, '');
   if (!t) return 'Say what you plan to change: a file path, a function or component name, a database model, or "cycles".';
   const lines = [];
@@ -177,7 +236,7 @@ function impactReport(root, target) {
       list('Tests to run', model.files.filter(isTest));
     }
     if (/^[A-Za-z_$][\w$]*$/.test(t)) {
-      const s = symbolUses(g, t);
+      const s = tsSymbolReferences(g, t) || symbolUses(g, t);
       if ((s.defined.length || s.used.length) && !(model && !s.defined.length)) {
         lines.push(`${model ? '\n' : ''}The name ${t}: defined in ${s.defined.join(', ') || 'no file (or not found)'}; used in ${s.used.length} other file${s.used.length === 1 ? '' : 's'}.`);
         list('Used in', s.used);
@@ -191,4 +250,84 @@ function impactReport(root, target) {
   return lines.join('\n');
 }
 
-module.exports = { buildGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses };
+const STOP = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'are', 'was', 'not', 'all', 'use', 'get', 'set', 'new', 'var', 'let', 'const', 'function', 'return', 'import', 'export', 'class', 'def', 'async', 'await', 'true', 'false', 'null', 'undefined']);
+
+/** Splits camelCase, PascalCase, snake_case, kebab-case and paths into lowercase search tokens. */
+function tokenize(text) {
+  return String(text || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 2 && !STOP.has(w));
+}
+
+/** Extracts defined symbols (functions, classes, components, types) with their 1-based line numbers. */
+function extractSymbols(text) {
+  const out = [];
+  const lines = String(text || '').split('\n');
+  const re = /^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\*?|class|interface|type|enum|def|const|let)\s+([A-Za-z_$][\w$]*)/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = re.exec(lines[i]);
+    if (m) out.push({ name: m[1], line: i + 1, tokens: new Set(tokenize(m[1])) });
+  }
+  return out;
+}
+
+/**
+ * Ranked keyword search (not embeddings) across file paths, defined symbols, comments and code tokens.
+ * Uses BM25-style term weighting so multi-word natural queries rank the most relevant files first.
+ */
+function searchCode(root, query, limit = 12) {
+  const qTokens = [...new Set(tokenize(query))];
+  if (!qTokens.length) return 'Give 1 or more meaningful keywords to search for (e.g. "user authentication middleware").';
+  const g = buildGraph(root, { cache: true });
+  const docs = [];
+  const df = new Map();
+  for (const [file, text] of g.text) {
+    const pathTokens = new Set(tokenize(file));
+    const syms = extractSymbols(text);
+    const symTokens = new Set();
+    for (const s of syms) for (const t of s.tokens) symTokens.add(t);
+    const bodyCounts = new Map();
+    for (const t of tokenize(text)) bodyCounts.set(t, (bodyCounts.get(t) || 0) + 1);
+    const allTerms = new Set([...pathTokens, ...symTokens, ...bodyCounts.keys()]);
+    for (const t of allTerms) df.set(t, (df.get(t) || 0) + 1);
+    docs.push({ file, text, pathTokens, syms, bodyCounts });
+  }
+  const N = Math.max(1, docs.length);
+  const scored = [];
+  for (const d of docs) {
+    let score = 0;
+    let covered = 0;
+    const matchedSyms = [];
+    for (const qt of qTokens) {
+      const idf = Math.log(1 + (N - (df.get(qt) || 0) + 0.5) / ((df.get(qt) || 0) + 0.5));
+      const inPath = d.pathTokens.has(qt) ? 4.0 : 0;
+      let inSym = 0;
+      for (const s of d.syms) {
+        if (s.tokens.has(qt)) {
+          inSym += 3.0;
+          if (!matchedSyms.some((x) => x.name === s.name && x.line === s.line)) matchedSyms.push(s);
+        }
+      }
+      const tf = d.bodyCounts.get(qt) || 0;
+      const inBody = tf ? (1.5 * tf) / (tf + 1.2) : 0;
+      const termScore = (inPath + inSym + inBody) * idf;
+      if (termScore > 0) { score += termScore; covered++; }
+    }
+    if (score > 0) {
+      // Bonus for matching multiple query concepts in the same file.
+      score *= (1 + (covered - 1) * 0.45);
+      scored.push({ file: d.file, score, covered, matchedSyms });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || (a.file < b.file ? -1 : 1));
+  if (!scored.length) return `No matching files found for "${query}".`;
+  return scored.slice(0, limit).map((r) => {
+    const symList = r.matchedSyms.slice(0, 4).map((s) => `${s.name}:${s.line}`).join(', ');
+    return `- ${r.file} (${r.covered}/${qTokens.length} concepts${symList ? `; symbols: ${symList}` : ''})`;
+  }).join('\n');
+}
+
+module.exports = { buildGraph, invalidateGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses, tsSymbolReferences, searchCode };

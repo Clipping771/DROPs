@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('drops', {
   reveal: invoke('fs:reveal'),
   searchFiles: invoke('fs:search'),
   listSessions: invoke('session:list'),
+  searchSessions: invoke('session:search'),
   newSession: invoke('session:new'),
   loadSession: invoke('session:load'),
   deleteSession: invoke('session:delete'),

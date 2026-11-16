@@ -121,142 +121,7 @@ const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app clo
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
 
-const TASK_DEF = {
-  name: 'task',
-  description: 'Delegate a self-contained task to a sub-agent with its own fresh context; it returns a concise report and its file dumps never enter your context. mode "research" (default): read-only tools, for exploring large codebases, tracing how something works, or investigating several areas in parallel (call task several times in one turn). mode "edit": the sub-agent can also edit files and run commands, under the same permissions, checkpoints and checks as you; use it to split a large change into independent parts that run in parallel, and give each edit sub-agent its own files so they never edit the same file. Always give a complete brief: goal, files, constraints, how to verify, what to report. Check edit sub-agents\' work yourself before finishing.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      description: { type: 'string', description: '3-6 word label' },
-      prompt: { type: 'string', description: 'Full brief for the sub-agent' },
-      mode: { type: 'string', enum: ['research', 'edit'], description: 'research (default, read-only) or edit (can change files and run commands)' },
-    },
-    required: ['description', 'prompt'],
-  },
-};
-const WEB_SEARCH_DEF = {
-  name: 'web_search',
-  description: 'Search the web and get results with sources. Use for current library versions, API changes, error messages and docs. Follow up with fetch_url to read a result in full.',
-  input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-};
-const ASK_USER_DEF = {
-  name: 'ask_user',
-  description: 'Ask the user a question and wait for the answer. Use only when you are blocked on a decision that is genuinely theirs (choice between approaches, a missing requirement, an ambiguous goal) and it cannot be settled from the code or a sensible default. Offer 2-4 short concrete options when possible; the user can also type their own answer. Do not use it for permission to run tools: the app asks for that itself.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      question: { type: 'string', description: 'One clear question' },
-      options: { type: 'array', items: { type: 'string' }, description: '2-4 short choices (optional)' },
-    },
-    required: ['question'],
-  },
-};
-tools.registerDef(TASK_DEF);
-tools.registerDef(WEB_SEARCH_DEF);
-tools.registerDef(ASK_USER_DEF);
-
-const IMPACT_DEF = {
-  name: 'impact',
-  description: 'Before changing something shared, see what depends on it: target is a file path (relative to the project), a function/component/class name, a database model name (Prisma), or "cycles" for import cycles. Returns the files that import it (directly and through others), where a name is used, the API route callers, and the tests to run afterwards. A static map from imports and names, not proof: still run those tests.',
-  input_schema: { type: 'object', properties: { target: { type: 'string', description: 'File path, symbol name, model name, or "cycles"' } }, required: ['target'] },
-};
-tools.registerDef(IMPACT_DEF);
-
-const AUDIT_DEF = {
-  name: 'audit',
-  description: 'Static security and performance audit of the project, by fixed rules (not guesses): secrets in code, SQL built from strings, eval, raw HTML from data, shell commands from request data, open CORS, cookies without httpOnly, plain passwords, TLS turned off, open redirects; database calls inside loops (N+1), blocking file calls in request code, unpaginated queries, very large files. Each finding has file:line, severity and a fix hint. Run it before finishing work that adds logins, forms, APIs or database code; fix every high finding. area: "security", "performance" or "all".',
-  input_schema: { type: 'object', properties: { area: { type: 'string', enum: ['all', 'security', 'performance'] } } },
-};
-tools.registerDef(AUDIT_DEF);
-
-const FIND_BREAK_DEF = {
-  name: 'find_breaking_change',
-  description: 'When a check (tests, build, a script) fails after your changes in this request, find which changed file causes it: DROPs puts each changed file back to its state before this request, one at a time, runs the command, and then restores every file exactly as it is now. Use it before reverting anything, so you undo only the culprit. Give the failing command.',
-  input_schema: { type: 'object', properties: { command: { type: 'string', description: 'The failing check, e.g. npm test' } }, required: ['command'] },
-};
-tools.registerDef(FIND_BREAK_DEF);
-
-const CHAPTER_DEF = {
-  name: 'mark_chapter',
-  description: 'Start a new chapter in the conversation when the work moves to a clearly different phase (for example from investigating to building, or from building to verifying). The user sees a divider and a table of contents to jump between chapters. Use it sparingly: two to six times in a long task, never for every step, and not in short answers. title: a short noun phrase.',
-  input_schema: { type: 'object', properties: { title: { type: 'string', description: 'Under 40 characters, e.g. "Checkout fix"' }, summary: { type: 'string', description: 'Optional one line' } }, required: ['title'] },
-};
-tools.registerDef(CHAPTER_DEF);
-
-const APP_DEF = {
-  name: 'app',
-  description: 'Test a desktop app you are building (Electron) the way a user would: launch it, click, type, read what its window shows, take a screenshot, close it. It runs with its own empty data folder, so it never touches the user\'s real settings, and it is closed at the end of every request. Each step reports the window\'s text, interactive elements, messages, console errors and clicks that changed nothing, like the browser tool. Actions: launch {path?: the app folder, default the project}; click {target}; fill {target, value}; select {target, value}; check {target}; press {key, target?}; wait {target? | seconds}; read; screenshot; close. target = visible text or label, "testid=<id>", or a CSS selector.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      action: { type: 'string', enum: ['launch', 'click', 'fill', 'select', 'check', 'press', 'wait', 'read', 'screenshot', 'close'] },
-      path: { type: 'string', description: 'For launch: the app folder relative to the project (default ".")' },
-      target: { type: 'string' }, value: { type: 'string' }, key: { type: 'string' }, seconds: { type: 'number' }, full: { type: 'boolean' },
-      width: { type: 'integer' }, height: { type: 'integer' },
-    },
-    required: ['action'],
-  },
-};
-tools.registerDef(APP_DEF);
-
-const COMPUTER_DEF = {
-  name: 'computer',
-  description: 'Use the apps on the user\'s Windows computer (Notepad, Excel, Paint, any desktop program) with the mouse and keyboard, when the user asks for something done in an app. Not for web pages (use browser) or the app you are building (use app). The user approves each app first; system programs (Explorer, terminals, Settings, Task Manager, password managers) can never be used. DROPs never types passwords, card numbers or keys, asks the user before clicking anything like delete, send, pay or confirm, and stops if the user moves the mouse or presses Esc. Work like this: open or focus the app; read it (its controls with numbers and exact names: works with any model and does not move the mouse); click/type by element number or name; take a screenshot only when you need to see layout or the app has no readable controls, then use x,y in that screenshot\'s pixels. Check the result after each step. Actions: windows; open {app: name like "notepad" or a full path}; focus {app?, title?}; read; screenshot; click {element | target | x,y, button?, double?}; type {text, element? | target?, append?}; key {keys: e.g. "ctrl+s", "enter", "alt+f4"}; scroll {x, y, amount}; drag {x, y, x2, y2}; wait {seconds}.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      action: { type: 'string', enum: ['windows', 'open', 'focus', 'read', 'screenshot', 'click', 'type', 'key', 'scroll', 'drag', 'wait'] },
-      app: { type: 'string' }, title: { type: 'string' }, args: { type: 'string' },
-      element: { type: 'integer', description: 'An element number from the latest read' },
-      target: { type: 'string', description: 'An element\'s visible name, e.g. "Save"' },
-      x: { type: 'number' }, y: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' },
-      button: { type: 'string', enum: ['left', 'right', 'middle'] }, double: { type: 'boolean' },
-      text: { type: 'string' }, append: { type: 'boolean', description: 'Type at the cursor instead of replacing the field' },
-      keys: { type: 'string' }, amount: { type: 'number' }, seconds: { type: 'number' },
-    },
-    required: ['action'],
-  },
-};
-tools.registerDef(COMPUTER_DEF);
-
-const SKILL_DEF = {
-  name: 'skill',
-  description: 'Load a skill: written instructions for a kind of task (a house style, a release process, a checklist), listed under "Skills" in your instructions. Call it with the skill name before starting a task that matches its description, then follow it. A skill may point to its own files (templates, scripts): read them with {name, file}.',
-  input_schema: { type: 'object', properties: { name: { type: 'string' }, file: { type: 'string', description: 'A file inside the skill folder, e.g. "template.md"' } }, required: ['name'] },
-};
-tools.registerDef(SKILL_DEF);
-
-const SCHEDULE_DEF = {
-  name: 'schedule',
-  description: 'Scheduled tasks: a prompt DROPs runs by itself later, in a new session of this project ("every weekday at 9 run the tests and tell me what broke"). Use it only when the user asks for something to happen later or on a repeat. Creating or deleting asks the user. Actions: list; create {name, prompt, repeat: once|hourly|daily|weekdays|weekly, time: "HH:MM", weekday: 0-6 (weekly, 0 = Sunday), at: "YYYY-MM-DDTHH:MM" (once), mode: ask|auto-edit|yolo}; delete {id}. Write the prompt so it stands alone: the later session has none of this conversation.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      action: { type: 'string', enum: ['list', 'create', 'delete'] },
-      id: { type: 'string' }, name: { type: 'string' }, prompt: { type: 'string' },
-      repeat: { type: 'string', enum: ['once', 'hourly', 'daily', 'weekdays', 'weekly'] },
-      time: { type: 'string' }, weekday: { type: 'integer' }, at: { type: 'string' },
-      mode: { type: 'string', enum: ['ask', 'auto-edit', 'yolo'] },
-    },
-    required: ['action'],
-  },
-};
-tools.registerDef(SCHEDULE_DEF);
-
-const WRAP_UP_DEF = {
-  name: 'wrap_up',
-  description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      recap: { type: 'string', description: 'Two or three short sentences: what is now true, what is not done or not verified.' },
-      ask: { type: 'string', description: 'One short question, only when the user must decide something.' },
-      options: { type: 'array', items: { type: 'string' }, description: '1-3 short answers (1-4 words each), recommended first. A click sends it as the user\'s reply.' },
-    },
-    required: ['recap'],
-  },
-};
-tools.registerDef(WRAP_UP_DEF);
+const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF } = require('./agent-defs');
 
 // Every request resends the whole history, so only the newest few images a tool read stay in it;
 // older ones become a short note (the agent can read the file again if it needs to).
@@ -508,7 +373,7 @@ class AgentSession {
       `# Project profile (auto-detected)\n${profile.text}${profile.verify.length ? `\n- Likely verification commands: ${profile.verify.map((v) => '`' + v + '`').join(', ')}` : ''}`,
       `# Operating procedure
 1. Understand first. For anything non-trivial, find the relevant code with grep/glob/read_file before changing it. Before changing a shared file, function, API route or database model, run \`impact\` on it to see what depends on it, and run the tests it lists afterwards. For broad questions or large codebases, delegate parallel investigations with the \`task\` tool (several calls in one turn) so file dumps stay out of your context.
-2. Plan. For work with 3+ steps, write a todo list with todo_write and keep it updated (exactly one in_progress).
+2. Plan. For work with 3+ steps, write a todo list with todo_write and keep it updated (exactly one in_progress). For multi-file or architectural tasks, call \`save_plan\` first to pin your goal, target files, steps and verification command so they stay in context across compactions.
 3. Make minimal, surgical, idiomatic changes that match the surrounding style. Use edit_file / multi_edit for existing files (read them first); write_file only for new files or full rewrites. Never leave placeholders like "// rest of code here".
 4. Every edit reports instant diagnostics (syntax checks). If they show an error, fix it immediately.
 5. Verify for real: run the project's type-checker, tests, linter or build with \`shell\`, read the output, and fix failures. For servers/watchers use start_process + process_output (never block \`shell\` on a command that does not exit), and stop_process when done.
@@ -537,13 +402,14 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       s.customInstructions ? `# User's global instructions\n${s.customInstructions}` : '',
       proj ? `# Project instructions (DROPs.md etc.)\n${proj}` : '',
       progressSection(root, this.data.id),
+      this.data.plan ? `# Active Implementation Plan\nGoal: ${this.data.plan.goal}${this.data.plan.files?.length ? `\nFiles: ${this.data.plan.files.join(', ')}` : ''}\nSteps:\n${(this.data.plan.steps || []).map((st, idx) => `${idx + 1}. ${st}`).join('\n')}${this.data.plan.verification ? `\nVerification: ${this.data.plan.verification}` : ''}` : '',
       s.lessons !== false ? lessons.promptSection() : '',
       map ? `# Repository map (auto-generated at the start of this request; files with their top-level symbols)\n${map}` : '',
     ].filter(Boolean).join('\n\n');
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -904,6 +770,10 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
               continue;
             }
           }
+          // A turn that changed files and finished cleanly carried the plan out: it must not stay pinned into
+          // later, unrelated requests. A turn that only planned (plan mode, "plan this") keeps it for the next
+          // request, and so do a stop, an error, a budget limit, or an answer that says work is left.
+          if (this.data.plan && run.edited && !admitsUnfinished(finalText)) this.data.plan = null;
           break;
         }
 
@@ -1035,7 +905,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   async runTools(uses, ctx, opts, run) {
     const results = new Array(uses.length);
     const exec = async (u, i) => { results[i] = await this.runOne(u, ctx, opts, run); };
-    const DEDUP_READS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url']);
+    const DEDUP_READS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url', 'code_search', 'impact']);
     const seenReads = new Map();
     const taskLimit = providers.providerOf(opts.model) === 'ollama' ? 1 : 3;
     let activeTasks = 0;
@@ -1148,11 +1018,36 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       this.emit('tool-end', { id: u.id, ok: true, output: out });
       return { type: 'tool_result', tool_use_id: u.id, content: out };
     }
+    if (u.name === 'save_plan') {
+      const plan = {
+        goal: String(u.input.goal || '').trim(),
+        files: Array.isArray(u.input.files) ? u.input.files.map(String) : [],
+        steps: Array.isArray(u.input.steps) ? u.input.steps.map(String) : [],
+        verification: String(u.input.verification || '').trim(),
+        updated: Date.now(),
+      };
+      this.data.plan = plan;
+      this.save();
+      const out = `Plan saved (${plan.steps.length} steps${plan.files.length ? `, ${plan.files.length} files` : ''}). It will stay pinned in your context.`;
+      meta.summary = plan.goal.slice(0, 60); meta.status = 'done'; meta.output = out;
+      this.emit('tool-start', { id: u.id, name: 'save_plan', input: u.input, summary: meta.summary });
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
     if (u.name === 'impact') {
       const target = String(u.input.target || '').trim();
       meta.summary = target; this.emit('tool-start', { id: u.id, name: 'impact', input: u.input, summary: target });
       let out;
       try { out = require('./codegraph').impactReport(this.data.projectDir, target); } catch (e) { out = `Could not map the project: ${e.message}`; }
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
+    if (u.name === 'code_search') {
+      const q = String(u.input.query || '').trim();
+      meta.summary = q; this.emit('tool-start', { id: u.id, name: 'code_search', input: u.input, summary: q });
+      let out;
+      try { out = require('./codegraph').searchCode(this.data.projectDir, q, u.input.limit || 12); } catch (e) { out = `Could not search the codebase: ${e.message}`; }
       meta.status = 'done'; meta.output = out;
       this.emit('tool-end', { id: u.id, ok: true, output: out });
       return { type: 'tool_result', tool_use_id: u.id, content: out };

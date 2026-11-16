@@ -73,6 +73,21 @@ const TOOL_DEFS = [
     },
   },
   {
+    name: 'notebook_edit',
+    description: 'Edit a Jupyter notebook (.ipynb) cell cleanly without breaking JSON structure. Read the notebook first. action: "replace" (default), "insert" (inserts before cell_index, or appends if omitted), or "delete".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Notebook path relative to the project root, e.g. analysis.ipynb' },
+        cell_index: { type: 'integer', description: '0-based cell index' },
+        action: { type: 'string', enum: ['replace', 'insert', 'delete'] },
+        cell_type: { type: 'string', enum: ['code', 'markdown', 'raw'], description: 'Required for insert; optional for replace' },
+        source: { type: 'string', description: 'New cell source text (for replace/insert)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'list_dir',
     description: 'List files and folders in a directory (non-recursive). Common build/dependency folders are marked.',
     input_schema: { type: 'object', properties: { path: { type: 'string', description: 'Directory, default project root' } } },
@@ -189,9 +204,9 @@ const TOOL_DEFS = [
   },
 ];
 
-const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'audit', 'mark_chapter']);
-const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'remember']);
-const EXPLORE_TOOLS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url']);
+const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'save_plan', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'code_search', 'audit', 'mark_chapter']);
+const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'notebook_edit', 'remember']);
+const EXPLORE_TOOLS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url', 'code_search']);
 
 function definitions(filter) {
   return TOOL_DEFS.filter((t) => !filter || filter.has(t.name)).map((t) => ({ ...t }));
@@ -464,6 +479,7 @@ function checkFresh(ctx, abs, rel, mustHaveRead) {
 }
 async function markWritten(ctx, abs) {
   try { ctx.readFiles.set(abs, (await fsp.stat(abs)).mtimeMs); } catch { /* ignore */ }
+  try { require('./codegraph').invalidateGraph(ctx.root); } catch { /* ignore */ }
 }
 async function atomicWrite(abs, content) {
   const tmp = `${abs}.drops-${process.pid}-${Date.now().toString(36)}.tmp`;
@@ -593,6 +609,29 @@ class ProcessManager {
   stopAll() { for (const id of this.procs.keys()) this.stop(id); }
 }
 
+function formatNotebook(raw) {
+  let nb;
+  try { nb = JSON.parse(raw); } catch (e) { throw new Error(`Invalid .ipynb JSON: ${e.message}`); }
+  const cells = Array.isArray(nb?.cells) ? nb.cells : [];
+  if (!cells.length) return '[empty notebook: 0 cells]';
+  const toText = (v) => (Array.isArray(v) ? v.join('') : String(v || ''));
+  return cells.map((c, idx) => {
+    const kind = c?.cell_type || 'code';
+    const exec = kind === 'code' && c?.execution_count != null ? `, exec=${c.execution_count}` : '';
+    const head = `--- [cell ${idx}] (${kind}${exec}) ---`;
+    const body = toText(c?.source);
+    const outs = (Array.isArray(c?.outputs) ? c.outputs : []).slice(0, 5).map((o) => {
+      if (o.output_type === 'stream') return toText(o.text).trim();
+      if (o.output_type === 'error') return `Error: ${o.ename || ''}: ${o.evalue || ''}`;
+      if (o.data?.['text/plain']) return toText(o.data['text/plain']).trim();
+      if (o.data?.['image/png'] || o.data?.['image/jpeg']) return '[image output]';
+      return '';
+    }).filter(Boolean);
+    const outStr = outs.length ? `\n[outputs]\n${outs.join('\n').slice(0, 1200)}` : '';
+    return `${head}\n${body}${outStr}`;
+  }).join('\n\n');
+}
+
 // --- prepare: returns { kind, summary, preview, run } ---
 // kind: 'read' | 'edit' | 'shell' | 'fetch'. `run` performs the action.
 async function prepare(ctx, name, input) {
@@ -615,6 +654,10 @@ async function prepare(ctx, name, input) {
           if (media.isPdf(abs)) { ctx.readFiles.set(abs, st.mtimeMs); return trunc(await media.readPdf(abs, input.pages), 120000); }
           const buf = await fsp.readFile(abs);
           if (buf.subarray(0, 8000).includes(0)) return `[binary file, ${st.size} bytes]`;
+          if (abs.toLowerCase().endsWith('.ipynb') && !input.raw) {
+            ctx.readFiles.set(abs, st.mtimeMs);
+            return trunc(formatNotebook(buf.toString('utf8')), 120000);
+          }
           const lines = buf.toString('utf8').replace(/\r\n/g, '\n').split('\n');
           const start = Math.max(1, input.offset || 1);
           const lim = Math.min(input.limit || 2000, 5000);
@@ -752,6 +795,64 @@ async function prepare(ctx, name, input) {
           ctx.onChange(rel, preview);
           const diag = await diagnose(abs, content, ctx.root);
           return `Edited ${rel} (+${preview.added} -${preview.removed}).${notes.length ? ` Note: ${notes.join('; ')}.` : ''}${diag}`;
+        },
+      };
+    }
+    case 'notebook_edit': {
+      const abs = resolveInRoot(root, input.path);
+      const rel = relOf(root, abs);
+      if (!abs.toLowerCase().endsWith('.ipynb')) throw new Error('notebook_edit only works on .ipynb files.');
+      checkFresh(ctx, abs, rel, false);
+      const orig = await fsp.readFile(abs, 'utf8');
+      let nb;
+      try { nb = JSON.parse(orig); } catch (e) { throw new Error(`${rel} is not valid JSON: ${e.message}`); }
+      if (!Array.isArray(nb.cells)) nb.cells = [];
+      const action = input.action || 'replace';
+      const toLines = (s) => {
+        const text = String(s ?? '').replace(/\r\n/g, '\n');
+        if (!text) return [];
+        const parts = text.split('\n');
+        return parts.map((l, i) => (i < parts.length - 1 ? l + '\n' : l)).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
+      };
+      const idx = input.cell_index;
+      if (action === 'delete') {
+        if (!Number.isInteger(idx) || idx < 0 || idx >= nb.cells.length) throw new Error(`Invalid cell_index ${idx} (0..${nb.cells.length - 1}).`);
+        nb.cells.splice(idx, 1);
+      } else if (action === 'insert') {
+        if (typeof input.source !== 'string') throw new Error('source is required for insert.');
+        const pos = Number.isInteger(idx) ? Math.max(0, Math.min(nb.cells.length, idx)) : nb.cells.length;
+        const ctype = input.cell_type || 'code';
+        const cell = { cell_type: ctype, metadata: {}, source: toLines(input.source) };
+        // nbformat 4.5+ requires a unique id on every cell (Jupyter warns or rewrites the file without it).
+        if (nb.nbformat > 4 || (nb.nbformat === 4 && nb.nbformat_minor >= 5) || nb.cells.some((c) => c?.id)) {
+          const used = new Set(nb.cells.map((c) => c?.id));
+          let id;
+          do { id = require('crypto').randomBytes(4).toString('hex'); } while (used.has(id));
+          cell.id = id;
+        }
+        if (ctype === 'code') { cell.execution_count = null; cell.outputs = []; }
+        nb.cells.splice(pos, 0, cell);
+      } else {
+        if (!Number.isInteger(idx) || idx < 0 || idx >= nb.cells.length) throw new Error(`Invalid cell_index ${idx} (0..${nb.cells.length - 1}).`);
+        if (typeof input.source !== 'string') throw new Error('source is required for replace.');
+        const prev = nb.cells[idx];
+        const ctype = input.cell_type || prev.cell_type || 'code';
+        const updated = { ...prev, cell_type: ctype, source: toLines(input.source) };
+        if (ctype === 'code') { updated.execution_count = null; updated.outputs = []; } else { delete updated.execution_count; delete updated.outputs; }
+        nb.cells[idx] = updated;
+      }
+      const content = JSON.stringify(nb, null, 1) + '\n';
+      const preview = makeDiff(rel, orig, content);
+      return {
+        kind: 'edit', summary: `${rel} (${action})`, preview, abs,
+        run: async () => {
+          const now = await fsp.readFile(abs, 'utf8');
+          if (now !== orig) throw new Error(`${rel} changed on disk while waiting for approval. Re-read it and try again.`);
+          await ctx.snapshot(abs);
+          await atomicWrite(abs, content);
+          await markWritten(ctx, abs);
+          ctx.onChange(rel, preview);
+          return `Notebook ${rel} updated (${action}, ${nb.cells.length} cells, +${preview.added} -${preview.removed}).`;
         },
       };
     }

@@ -275,3 +275,42 @@ test('providers: multi-provider costOf calculates USD cost for Gemini, OpenAI, D
   assert.strictEqual(providers.costOf('ollama:qwen3:4b', u), 0);
   assert.strictEqual(providers.costOf('lmstudio:local', u), 0);
 });
+
+test('notebooks: read_file formats .ipynb cells cleanly and notebook_edit replaces, inserts and deletes cells', async () => {
+  const tools = require('../src/main/tools');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-nb-'));
+  const nbPath = path.join(dir, 'demo.ipynb');
+  fs.writeFileSync(nbPath, JSON.stringify({
+    nbformat: 4, nbformat_minor: 5, metadata: {},
+    cells: [
+      { cell_type: 'markdown', metadata: {}, source: ['# Title\n'] },
+      { cell_type: 'code', metadata: {}, execution_count: 1, outputs: [{ output_type: 'stream', text: ['hello\n'] }, { output_type: 'display_data', data: { 'image/png': 'AAAA'.repeat(200) } }], source: ['print("hello")\n'] },
+    ],
+  }));
+  const ctx = { root: dir, readFiles: new Map(), snapshot: async () => {}, onChange: () => {} };
+  const r1 = await (await tools.prepare(ctx, 'read_file', { path: 'demo.ipynb' })).run();
+  assert.match(r1, /\[cell 0\] \(markdown\)/);
+  assert.match(r1, /\[cell 1\] \(code, exec=1\)/);
+  assert.match(r1, /\[image output\]/);
+  assert.ok(!r1.includes('AAAAAAAA'), 'base64 image blobs are stripped');
+
+  await (await tools.prepare(ctx, 'notebook_edit', { path: 'demo.ipynb', action: 'replace', cell_index: 1, source: 'print("updated")' })).run();
+  await (await tools.prepare(ctx, 'notebook_edit', { path: 'demo.ipynb', action: 'insert', cell_index: 1, cell_type: 'markdown', source: '## Step 2' })).run();
+  await (await tools.prepare(ctx, 'notebook_edit', { path: 'demo.ipynb', action: 'delete', cell_index: 0 })).run();
+
+  const saved = JSON.parse(fs.readFileSync(nbPath, 'utf8'));
+  assert.equal(saved.cells.length, 2);
+  assert.equal(saved.cells[0].cell_type, 'markdown');
+  assert.deepEqual(saved.cells[0].source, ['## Step 2']);
+  assert.deepEqual(saved.cells[1].source, ['print("updated")']);
+  assert.match(saved.cells[0].id || '', /^[0-9a-f]{8}$/, 'nbformat 4.5 needs an id on the inserted cell');
+
+  // An older notebook (no cell ids in its format) gets none.
+  const oldPath = path.join(dir, 'old.ipynb');
+  fs.writeFileSync(oldPath, JSON.stringify({ nbformat: 4, nbformat_minor: 2, metadata: {}, cells: [{ cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: ['x = 1'] }] }));
+  await (await tools.prepare(ctx, 'read_file', { path: 'old.ipynb' })).run();
+  await (await tools.prepare(ctx, 'notebook_edit', { path: 'old.ipynb', action: 'insert', source: 'y = 2' })).run();
+  const old = JSON.parse(fs.readFileSync(oldPath, 'utf8'));
+  assert.equal(old.cells.length, 2);
+  assert.equal(old.cells[1].id, undefined);
+});

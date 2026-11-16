@@ -68,3 +68,42 @@ test('context: the repository map ranks files connected to the task, not only fi
   assert.equal(pos('app/login/page.tsx'), 0, 'the named file first');
   assert.ok(pos('lib/auth.ts') > 0 && pos('lib/auth.ts') < pos('src/a.js'), 'what the login page imports comes before unrelated files');
 });
+
+test('searchCode: ranks files by concept across paths and symbol names', () => {
+  const root = project();
+  const res = cg.searchCode(root, 'verify user login');
+  assert.match(res, /lib\/auth\.ts/);
+  assert.match(res, /verifyLogin/);
+});
+
+test('codegraph: buildGraph caches results and invalidateGraph clears the cache', () => {
+  const root = project();
+  const g1 = cg.buildGraph(root, { cache: true });
+  const g2 = cg.buildGraph(root, { cache: true });
+  assert.strictEqual(g1, g2);
+  cg.invalidateGraph(root);
+  const g3 = cg.buildGraph(root, { cache: true });
+  assert.notStrictEqual(g1, g3);
+});
+
+test('tsSymbolReferences: resolves AST-level definitions and usages when TypeScript is available', () => {
+  const root = project();
+  const g = cg.buildGraph(root);
+  const refs = cg.tsSymbolReferences(g, 'verifyLogin');
+  if (refs) {
+    assert.ok(refs.defined.includes('lib/auth.ts'));
+    assert.ok(refs.used.includes('app/login/page.tsx'));
+  }
+});
+
+test('code_search and impact by name still work right after the repository map (they share the cached graph)', () => {
+  const ctxEngine = require('../src/main/context');
+  const cg = require('../src/main/codegraph');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-shared-graph-'));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'auth.js'), 'function verifyLogin() { return true; }\nmodule.exports = { verifyLogin };\n');
+  fs.writeFileSync(path.join(dir, 'src', 'app.js'), "const { verifyLogin } = require('./auth');\nverifyLogin();\n");
+  ctxEngine.repoMap(dir, 14000, 'fix the login check'); // runs at the start of every request
+  assert.match(cg.searchCode(dir, 'verify login'), /src\/auth\.js/);
+  assert.match(cg.impactReport(dir, 'verifyLogin'), /defined in src\/auth\.js/);
+});

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Search inside every session:** the sidebar filter also finds words in past conversations, with a snippet.
+- **Jupyter notebooks:** read_file shows .ipynb files cell by cell (images left out); the new notebook_edit tool replaces, inserts or deletes a cell (with a cell id where the format needs one).
+- **code_search:** a ranked keyword search across file paths, names, comments and code (camelCase and snake_case are split). It matches words, not meaning. impact finds TypeScript/JavaScript references through the TypeScript compiler.
+- **save_plan:** the agent can pin a plan (goal, files, steps, check) that survives context compaction; it is cleared once a turn that changed files finishes.
+- **Interface language:** English or বাংলা for the main labels (Settings → General). Most of the interface is still English.
+- Fixed: computer use no longer stops when a control refuses to be clicked; it clicks with the mouse instead.
+- Tool definitions moved to agent-defs.js.
+
 ## 2.3.0 (2026-11-16)
 
 Everything since 2.2.0.

@@ -13,18 +13,31 @@ const Panels = (() => {
     if (view === 'scm') refreshGit();
   }
 
+  let searchTimer = null, searchSeq = 0, searchHits = new Map();
   async function renderSessions(refetch = true) {
     if (refetch) S.sessions = await api.listSessions();
     const search = $('#sessionSearch');
     if (search && !search.dataset.bound) {
       search.dataset.bound = '1';
-      search.oninput = () => renderSessions(false);
+      search.oninput = () => {
+        const val = search.value.trim();
+        renderSessions(false);
+        clearTimeout(searchTimer);
+        if (!val) { searchHits.clear(); return; }
+        const seq = ++searchSeq;
+        searchTimer = setTimeout(async () => {
+          const hits = await api.searchSessions?.(val).catch(() => []);
+          if (seq !== searchSeq) return;
+          searchHits = new Map((hits || []).map((x) => [x.id, x.snippet || '']));
+          renderSessions(false);
+        }, 160);
+      };
     }
     const q = (search?.value || '').trim().toLowerCase();
     const list = $('#sessionList');
     list.innerHTML = '';
     // Every project with its sessions, the open project first (like a workspace sidebar).
-    const all = q ? S.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : S.sessions;
+    const all = q ? S.sessions.filter((s) => (s.title || '').toLowerCase().includes(q) || searchHits.has(s.id)) : S.sessions;
     const byProject = new Map();
     // Pinned sessions first, then the most recent.
     for (const s of [...all].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated)) {
@@ -55,9 +68,11 @@ const Panels = (() => {
         const it = h('div', 'row session' + (s.id === S.current ? ' on' : '') + (s.pinned ? ' pinned' : ''));
         it.dataset.id = s.id;
         it.dataset.failed = s.failed ? '1' : '';
-        it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${timeAgo(s.updated)}${s.cost ? ' · ' + fmtCost(s.cost) : ''}</span></span><span class="acts"><button class="pin-btn" title="${s.pinned ? 'Unpin' : 'Pin to the top'}">${icon('pin', 'xs')}</button><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
+        const snippet = q ? searchHits.get(s.id) : '';
+        it.innerHTML = `<span class="dot"></span><span class="t"><span class="tt"></span><span class="t2">${snippet ? '' : timeAgo(s.updated) + (s.cost ? ' · ' + fmtCost(s.cost) : '')}</span></span><span class="acts"><button class="pin-btn" title="${s.pinned ? 'Unpin' : 'Pin to the top'}">${icon('pin', 'xs')}</button><button title="Rename">${icon('pencil', 'xs')}</button><button title="Delete">${icon('trash', 'xs')}</button></span>`;
         $('.tt', it).textContent = s.title;
-        it.title = s.title;
+        if (snippet) $('.t2', it).textContent = snippet;
+        it.title = snippet ? `${s.title}\n${snippet}` : s.title;
         applyStatus(it, S.views.get(s.id), s);
         it.onclick = () => openSession(s.id);
         const [pin, ren, del] = $$('.acts button', it);
@@ -875,6 +890,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
             ${setItem('After-edit command', 'Runs after every file the agent changes, e.g. a formatter or linter. <code>{file}</code> is the changed file. Its output goes back to the agent. Leave empty to turn off.', '<input class="input" id="setAfterEdit" placeholder="npx prettier --write {file}" spellcheck="false">')}
           </div>
           <div class="set-card"><div class="set-sub">Language & learning</div>
+            ${setItem('Interface language', 'Language of DROPs menus, tabs and buttons.', selectOf('setUiLang', [['en', 'English'], ['bn', 'বাংলা (Bengali)']]))}
             ${setItem('Explanations language', 'The agent explains its work in this language; code stays as it is.', selectOf('setLang', LANGS))}
             ${setItem('Teaching mode', 'Explains every change and the idea behind it. Useful when learning.', tgl('setExplain'))}
           </div>
@@ -980,7 +996,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     sel.value = usableModel(s.defaultModel);
     const val = (id, v) => { $(id, m).value = v ?? ''; };
     val('#setEffort', s.effort); val('#setMode', s.mode); val('#setCompact', s.compactAt); val('#setSteps', s.maxSteps); val('#setInstr', s.customInstructions);
-    val('#setLang', s.responseLanguage || 'auto'); val('#setAutoProv', s.autoProvider || 'auto'); val('#setMaxCost', s.maxCostPerTask || 0); val('#setMaxTok', s.maxTokensPerTask || 0);
+    val('#setUiLang', s.uiLanguage || 'en'); val('#setLang', s.responseLanguage || 'auto'); val('#setAutoProv', s.autoProvider || 'auto'); val('#setMaxCost', s.maxCostPerTask || 0); val('#setMaxTok', s.maxTokensPerTask || 0);
     val('#setOllamaUrl', s.ollamaUrl || 'http://localhost:11434'); val('#setOllamaCtx', s.ollamaCtx || 16384); val('#setSandboxImg', s.sandboxImage || 'node:22-bookworm');
     val('#setAllowCmds', (s.allowCommands || '')); val('#setDenyCmds', (s.denyCommands || '')); val('#setAfterEdit', s.afterEditCommand || ''); val('#setHooks', typeof s.hooks === 'string' ? s.hooks : s.hooks ? JSON.stringify(s.hooks, null, 2) : '');
     $('#openUserCmds', m).onclick = () => api.openCommandsFolder('user');
@@ -1136,7 +1152,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const patch = {
         defaultModel: sel.value, effort: $('#setEffort', m).value, mode: $('#setMode', m).value,
         compactAt: num('#setCompact', 180000, 20000), maxSteps: num('#setSteps', 250, 10), customInstructions: $('#setInstr', m).value,
-        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), computerUse: T.computer.classList.contains('on'), updateCheck: T.upd.classList.contains('on'), runInBackground: T.bg.classList.contains('on'), explainMode: T.explain.classList.contains('on'), responseLanguage: $('#setLang', m).value, languageMigrated: true,
+        autoVerify: T.verify.classList.contains('on'), qaAgent: T.qa.classList.contains('on'), computerUse: T.computer.classList.contains('on'), updateCheck: T.upd.classList.contains('on'), runInBackground: T.bg.classList.contains('on'), explainMode: T.explain.classList.contains('on'), uiLanguage: $('#setUiLang', m).value, responseLanguage: $('#setLang', m).value, languageMigrated: true,
         autoProvider: $('#setAutoProv', m).value, cheapSubagents: T.cheap.classList.contains('on'),
         maxCostPerTask: Math.max(0, Number($('#setMaxCost', m).value) || 0), maxTokensPerTask: Math.max(0, Number($('#setMaxTok', m).value) || 0),
         ollamaEnabled: T.ollama.classList.contains('on'), ollamaUrl: $('#setOllamaUrl', m).value.trim() || 'http://localhost:11434', ollamaCtx: num('#setOllamaCtx', 16384, 4096),
@@ -1155,7 +1171,7 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       const a = $('#setAnthropic', m).value.trim(); if (a) patch.apiKey = a;
       const g = $('#setGemini', m).value.trim(); if (g) patch.geminiKey = g;
       S.settings = await api.setSettings(patch);
-      applyAppearance(S.settings); applySendKey(); loadCustomCommands();
+      applyAppearance(S.settings); applySendKey(); loadCustomCommands(); window.applyI18n?.(S.settings.uiLanguage || 'en');
       await reloadModels();
       if (!currentView()) { $('#modelSel').value = usableModel(S.settings.defaultModel); syncPills(); }
       if (!$('#hero').hidden) renderHero();
