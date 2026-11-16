@@ -184,6 +184,26 @@ const APP_DEF = {
 };
 tools.registerDef(APP_DEF);
 
+const COMPUTER_DEF = {
+  name: 'computer',
+  description: 'Use the apps on the user\'s Windows computer (Notepad, Excel, Paint, any desktop program) with the mouse and keyboard, when the user asks for something done in an app. Not for web pages (use browser) or the app you are building (use app). The user approves each app first; system programs (Explorer, terminals, Settings, Task Manager, password managers) can never be used. DROPs never types passwords, card numbers or keys, asks the user before clicking anything like delete, send, pay or confirm, and stops if the user moves the mouse or presses Esc. Work like this: open or focus the app; read it (its controls with numbers and exact names: works with any model and does not move the mouse); click/type by element number or name; take a screenshot only when you need to see layout or the app has no readable controls, then use x,y in that screenshot\'s pixels. Check the result after each step. Actions: windows; open {app: name like "notepad" or a full path}; focus {app?, title?}; read; screenshot; click {element | target | x,y, button?, double?}; type {text, element? | target?, append?}; key {keys: e.g. "ctrl+s", "enter", "alt+f4"}; scroll {x, y, amount}; drag {x, y, x2, y2}; wait {seconds}.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['windows', 'open', 'focus', 'read', 'screenshot', 'click', 'type', 'key', 'scroll', 'drag', 'wait'] },
+      app: { type: 'string' }, title: { type: 'string' }, args: { type: 'string' },
+      element: { type: 'integer', description: 'An element number from the latest read' },
+      target: { type: 'string', description: 'An element\'s visible name, e.g. "Save"' },
+      x: { type: 'number' }, y: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' },
+      button: { type: 'string', enum: ['left', 'right', 'middle'] }, double: { type: 'boolean' },
+      text: { type: 'string' }, append: { type: 'boolean', description: 'Type at the cursor instead of replacing the field' },
+      keys: { type: 'string' }, amount: { type: 'number' }, seconds: { type: 'number' },
+    },
+    required: ['action'],
+  },
+};
+tools.registerDef(COMPUTER_DEF);
+
 const WRAP_UP_DEF = {
   name: 'wrap_up',
   description: 'Fill the "next step" box the user sees at the end of your turn. Call it once, as your last tool call, in every turn where you changed files or ran commands; skip it for a short answer or a question. recap: two or three short sentences in the user\'s language saying what is now true and what is not done or not verified. ask + options: only when the next move is the user\'s decision (a choice, a go-ahead): one short question and 1-3 button labels of 1-4 words, your recommendation first. After calling it, write your final message as usual.',
@@ -483,7 +503,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, IMPACT_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -1026,6 +1046,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     }
     if (u.name === 'find_breaking_change') return this.runFindBreak(u, meta, ctx);
     if (u.name === 'app') return this.runApp(u, meta, ctx, run);
+    if (u.name === 'computer') return this.runComputer(u, meta, ctx, run);
     if (u.name === 'audit') {
       const area = ['security', 'performance'].includes(u.input.area) ? u.input.area : 'all';
       meta.summary = area; this.emit('tool-start', { id: u.id, name: 'audit', input: u.input, summary: area });
@@ -1224,6 +1245,45 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       return done(res.text, true, res.images || null);
     } catch (e) {
       return done(`App ${action} failed: ${String(e.message || e).split('\n')[0]}`, false);
+    }
+  }
+
+  // ---------- computer use: the user's own desktop apps ----------
+  async runComputer(u, meta, ctx, run) {
+    const action = String(u.input.action || '');
+    meta.summary = [action, u.input.app || u.input.target || (u.input.element !== undefined ? `#${u.input.element}` : '') || (u.input.keys || '') || (u.input.x !== undefined ? `${u.input.x},${u.input.y}` : '')].filter(Boolean).join(' ');
+    this.emit('tool-start', { id: u.id, name: 'computer', input: u.input, summary: meta.summary });
+    const done = (text, ok, images) => { meta.status = ok ? 'done' : 'error'; meta.output = text; this.emit('tool-end', { id: u.id, ok, output: text, ...(images ? { images: images.map((b) => ({ source: b.source })) } : {}) }); return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }), ...(images ? { _images: images } : {}) }; };
+    if (process.platform !== 'win32') return done('Computer use works on Windows only for now.', false);
+    if (this.settings()?.computerUse === false) return done('Computer use is turned off in Settings. Tell the user they can turn it on there.', false);
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return done('This read-only mode cannot use apps.', false);
+    if (!this.desktop) {
+      const { Desktop } = require('./desktop');
+      // Every question goes to the user in every mode, full auto included.
+      const ask = async (summary, dangerous, reason) => {
+        meta.status = 'waiting';
+        const r = await this.askPermission(this.desktopUse, { kind: 'computer', summary }, dangerous, reason);
+        meta.status = 'running'; this.emit('tool-running', { id: this.desktopUse.id });
+        return r.decision !== 'deny';
+      };
+      this.desktop = new Desktop({
+        gate: {
+          approveApp: (p, note) => ask(`Let DROPs use ${p} with the mouse and keyboard${note ? `. ${note}` : ''}`, !!note, 'Computer use: asked once per app in each session'),
+          approveAction: (t) => ask(t, true, 'Computer use: this may not be undoable'),
+          resume: (why) => ask(`${why} DROPs stopped using the app. Let it go on?`, false, 'Computer use: you took over'),
+        },
+        onFrame: (f) => this.emit('browser-frame', { ...f, step: String(f.step || '').slice(0, 80), at: Date.now() }),
+      });
+    }
+    if (this.desktopTurn !== run) { this.desktopTurn = run; this.desktop.resetRequest(); }
+    this.desktopUse = u;
+    try {
+      const res = await this.desktop.act(u.input);
+      if (ctx.signal?.aborted) return done('Stopped.', false);
+      return done(res.text, true, res.images || null);
+    } catch (e) {
+      const { Stop } = require('./desktop');
+      return done(e instanceof Stop ? e.message : `Computer ${action} failed: ${String(e.message || e).split('\n')[0]}`, false);
     }
   }
 
@@ -1875,7 +1935,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return true;
   }
 
-  dispose() { this.stop(); this.procs.stopAll(); }
+  dispose() { this.stop(); this.procs.stopAll(); this.desktop?.close(); this.desktop = null; }
 }
 
 module.exports = { modelSeesImages, readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };

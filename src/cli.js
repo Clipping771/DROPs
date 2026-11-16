@@ -121,6 +121,8 @@ async function runHeadless(o, { print = () => {} } = {}) {
         case 'auto-model': result.models.add(p.model); print('notice', `${p.escalated ? 'Escalated' : 'Auto'}: ${p.model} (${p.reason})`); break;
         case 'error': result.errors.push(p.message); if (/^(Budget limit|Token budget|Stopped after)/.test(p.message)) result.stoppedByLimit = true; print('error', p.message); break;
         case 'permission': {
+          // Computer use needs a person watching: headless runs never get it.
+          if (p.kind === 'computer') { print('notice', 'Computer use refused: nobody is here to approve it (headless).'); setImmediate(() => agent.respond(p.reqId, 'deny', 'Computer use needs a person to approve it; it is not available in headless runs.')); break; }
           const allow = !p.dangerous || o.allowDangerous;
           if (!allow) print('error', `Refused destructive command: ${p.input?.command} (${p.reason || 'dangerous'}). Use --allow-dangerous to permit.`);
           setImmediate(() => agent.respond(p.reqId, allow ? 'allow' : 'deny', allow ? '' : 'Destructive commands are not allowed in headless mode. Find a safer way.'));

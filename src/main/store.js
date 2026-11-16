@@ -22,6 +22,7 @@ const DEFAULTS = {
   theme: 'dark',
   autoVerify: true,
   qaAgent: true,
+  computerUse: true,
   compactAt: 180000,
   maxSteps: 250,
   // models & routing
