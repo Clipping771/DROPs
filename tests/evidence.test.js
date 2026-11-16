@@ -200,3 +200,13 @@ test('an agent that never runs a check is nudged up to four times, each naming t
     assert.match(JSON.stringify(data.messages), /call check_requirement with \{\\"id\\": \\"FR-1\\", \\"use_qa\\": true\}/);
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
+
+test('a final answer that claims success with few requirements proven gets a plain "not proven" note', () => {
+  const { unprovenClaimNote } = require('../src/main/agent');
+  const say = (t) => [{ role: 'assistant', content: [{ type: 'text', text: t }] }];
+  const note = unprovenClaimNote(say('The application has been verified to be production-ready through successful builds.'), 0, 12, ['FR-1', 'FR-2']);
+  assert.match(note, /Not proven: only 0 of 12 requirements passed a check that DROPs ran itself \(not verified: FR-1, FR-2\)/);
+  assert.equal(unprovenClaimNote(say('All functional requirements have been addressed.'), 10, 12), null, 'most requirements proven');
+  assert.equal(unprovenClaimNote(say('Pages are built; FR-3 is not verified yet.'), 0, 12), null, 'the answer already says so');
+  assert.equal(unprovenClaimNote(say('I added the login page.'), 0, 12), null, 'no success claim');
+});

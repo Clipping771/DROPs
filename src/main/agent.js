@@ -46,6 +46,20 @@ function modelSeesImages(model) {
   return true;
 }
 
+/**
+ * When the last answer claims the work is done or verified but DROPs proved less than half of the
+ * requirements, the note to append to it (or null).
+ */
+function unprovenClaimNote(messages, ok, total, open = []) {
+  if (!total || ok * 2 >= total) return null;
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'assistant') return null;
+  const text = (Array.isArray(last.content) ? last.content : [{ text: String(last.content || '') }]).map((b) => b.text || '').join(' ');
+  if (!/\b(production[- ]ready|fully (implemented|working|functional)|all (the )?(requirements|features|functional requirements)\b.{0,40}\b(met|done|addressed|implemented|working)|everything works|verified|works end to end|complete and working)\b/i.test(text)) return null;
+  if (/\b(not verified|could not verify|unverified|0 of \d+)\b/i.test(text)) return null;
+  return `[DROPs] Not proven: only ${ok} of ${total} requirements passed a check that DROPs ran itself${open.length ? ` (not verified: ${open.slice(0, 12).join(', ')}${open.length > 12 ? ', …' : ''})` : ''}. Treat the claims above as unverified until those checks pass.`;
+}
+
 // ---- evidence helpers ----
 /** A cheap fingerprint of the project's source files (path, size, modified time). Any change, by an
  *  edit tool or by a command, gives a different value. Installed packages and build output are ignored. */
@@ -933,6 +947,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       this.data.evidenceSummary = { verified: ok, total: reqs.length, at: Date.now() };
       const open = reqs.filter((r) => r.status !== 'verified').map((r) => r.id);
       this.emit('notice', { message: `Evidence: ${ok} of ${reqs.length} requirements verified by a check DROPs ran${open.length ? ` (not verified: ${open.slice(0, 15).join(', ')}${open.length > 15 ? ', …' : ''})` : ''}.` });
+      const note = unprovenClaimNote(this.data.messages, ok, reqs.length, open);
+      if (note) {
+        const last = this.data.messages[this.data.messages.length - 1];
+        last.content = [...(Array.isArray(last.content) ? last.content : [{ type: 'text', text: String(last.content || '') }]), { type: 'text', text: note }];
+        this.emit('notice', { message: note });
+      }
     }
     const stoppedByUser = !!this.abort?.signal?.aborted;
     for (const [, r] of this.pending) r({ decision: 'deny', feedback: 'Stopped.' });
@@ -2110,4 +2130,4 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   dispose() { this.stop(); this.procs.stopAll(); this.desktop?.close(); this.desktop = null; }
 }
 
-module.exports = { modelSeesImages, readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
+module.exports = { unprovenClaimNote, modelSeesImages, readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
