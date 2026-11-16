@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixes and safety
+- A message typed just as a task ended is no longer lost: it runs next, ahead of queued messages.
+- Source control only works on the open project.
+- Shortened PowerShell flags (`-Recu`) and inline delete code (`node -e`, `python -c`) always ask first; `git diff --output` and `git branch -D` are no longer treated as read-only.
+- The secret shield also masks Hugging Face, Groq, npm and GitLab tokens, passwords in connection URLs, AWS secret keys and secret lines in .env files.
+- Settings warns when keys cannot be encrypted (no key store on the system).
+
+### Faster
+- File checkpoints are stored once in a shared folder instead of inside every session file, so long sessions save quickly.
+- The session list, settings and saved keys are cached.
+- The repository map reuses what has not changed (about 100x faster on a repeat request); grep reads files in parallel.
+- Long answers stream without slowing down; idle sessions are released from memory.
+
+### New
+- Rewind also undoes changes made by shell commands (formatters, generators), in git projects.
+- Only one DROPs runs at a time; the window remembers its size and place.
+- With scheduled tasks, closing the window keeps DROPs in the tray (Settings → General).
+- Install and restart: the installed Windows app downloads the new installer from GitHub, checks its size and checksum, and starts it.
+- Better screen-reader labels; CI runs lint and the tests on Windows, Linux and macOS (`npm run lint`).
+
 ## 2.2.0 (2026-11-16)
 
 Everything since the 2.1.0 installer of 2026-11-15.

@@ -1,9 +1,13 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, crashReporter } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, crashReporter, Tray, Menu, Notification, screen, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const brand = require('./brand');
 // Settings, saved keys and sessions: keep using the existing H2O folder after the rename to DROPs.
 app.setPath('userData', brand.appDataDir());
+// One DROPs at a time: two windows would overwrite each other's settings and sessions. A second start
+// brings the open window to the front instead. (Screenshot and demo runs for tests may run side by side.)
+if (!brand.env('SCREENSHOT') && !brand.env('MULTI_INSTANCE') && !app.requestSingleInstanceLock()) { app.exit(0); }
+app.on('second-instance', () => { if (app.isReady()) showWindow(); });
 // Crash reports stay on this computer (see crash.js).
 const crash = require('./crash');
 const previousCrash = crash.init({ dataDir: app.getPath('userData'), appVersion: app.getVersion(), app, crashReporter });
@@ -67,13 +71,19 @@ function migrateFromForge() {
 migrateFromForge();
 
 const deps = {
-  send: (sessionId, type, payload) => { if (win && !win.isDestroyed()) win.webContents.send('agent:event', { sessionId, type, ...payload }); },
+  send: (sessionId, type, payload) => {
+    if (win && !win.isDestroyed()) win.webContents.send('agent:event', { sessionId, type, ...payload });
+  },
   save: (data) => store.saveSession(data),
   getSettings: () => store.getSettings(),
   getApiKey: () => store.getApiKey(),
   getGeminiKey: () => store.getGeminiKey(),
   getProviderKey: (id) => store.getProviderKey(id),
   mcp,
+  // Steering that arrived too late for the turn that just ended: it runs next, ahead of the queue.
+  resend: (sessionId, text, opts, images) => taskManager.submitTask({
+    session_id: sessionId, workspace_id: getAgent(sessionId)?.data.projectDir, prompt: text, images: images || [], opts: opts || {},
+  }, { action: 'queue', front: true }),
   // The agent's `schedule` tool (it asks the user before saving or deleting).
   schedules: {
     list: () => scheduleList(),
@@ -115,13 +125,39 @@ async function runSchedule(s) {
 }
 const scheduler = new schedule.Scheduler({ list: () => store.getSettings().schedules || [], save: writeSchedules, run: runSchedule });
 
+// The window only needs to know which files a turn changed, not their saved contents.
+const forRenderer = (data, extra = {}) => ({ ...data, ...extra, turns: (data.turns || []).map(({ files, after, ...t }) => ({ ...t, files: Object.fromEntries(Object.keys(files || {}).map((k) => [k, true])) })) });
+
+// Sessions stay in memory while used; the least recently used idle ones are let go (saved first), so a
+// long day of sessions does not keep every transcript in RAM. Busy sessions and ones with running
+// processes, open questions or queued work are never let go.
+const MAX_LOADED = 12;
+// "Always allow" answers last until DROPs closes, also for a session that was let go meanwhile.
+const releasedAllows = new Map();
+function evictIdleAgents(keepId) {
+  if (agents.size <= MAX_LOADED) return;
+  for (const [id, a] of agents) {
+    if (agents.size <= MAX_LOADED) break;
+    if (id === keepId || a.busy || a.pending.size || a.steerQueue.length || a.procs.list().some((p) => p.running)) continue;
+    if (taskManager.isSessionRunning(id) || (taskManager.queues.get(id) || []).length) continue;
+    if (a.saveTimer) { clearTimeout(a.saveTimer); store.saveSession(a.data); }
+    if (a.alwaysAllow.size) releasedAllows.set(id, a.alwaysAllow);
+    a.dispose();
+    agents.delete(id);
+  }
+}
 function getAgent(id) {
-  if (!agents.has(id)) {
+  let a = agents.get(id);
+  if (!a) {
     const data = store.loadSession(id);
     if (!data) return null;
-    agents.set(id, new AgentSession(data, deps));
+    a = new AgentSession(data, deps);
+    if (releasedAllows.has(id)) { a.alwaysAllow = releasedAllows.get(id); releasedAllows.delete(id); }
   }
-  return agents.get(id);
+  // Map order is the use order: move this one to the end.
+  agents.delete(id); agents.set(id, a);
+  evictIdleAgents(id);
+  return a;
 }
 
 const taskManager = getTaskManager({
@@ -147,8 +183,9 @@ function createWindow() {
   const mode = brand.env('THEME') || store.getSettings().theme || 'dark';
   nativeTheme.themeSource = ['light', 'dark'].includes(mode) ? mode : 'system';
   const t = effectiveTheme();
+  const bounds = savedBounds();
   win = new BrowserWindow({
-    width: 1560, height: 960, minWidth: 1040, minHeight: 640,
+    width: 1560, height: 960, ...bounds.rect, minWidth: 1040, minHeight: 640,
     backgroundColor: OVERLAY[t].color,
     title: 'DROPs',
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
@@ -158,7 +195,20 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
   });
   win.removeMenu();
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => { if (bounds.maximized) win.maximize(); if (!win.hiddenToTray && !(startHidden && keepInBackground())) win.show(); });
+  trackBounds(win);
+  // With scheduled tasks, closing the window keeps DROPs running in the tray so they still run.
+  win.on('close', (e) => {
+    if (quitting || !keepInBackground()) return;
+    e.preventDefault();
+    win.hiddenToTray = true;
+    win.hide();
+    ensureTray();
+    if (!store.getSettings().trayNoticeShown) {
+      store.setSettings({ trayNoticeShown: true });
+      notify('DROPs is still running', 'Your scheduled tasks keep running. Open or quit DROPs from its icon in the tray.');
+    }
+  });
   if (brand.env('CONSOLE')) {
     win.webContents.on('console-message', (e) => fs.appendFileSync(brand.env('CONSOLE'), `[${e.level}] ${e.message} (${(e.sourceId || '').split('/').pop()}:${e.lineNumber})\n`));
   }
@@ -175,9 +225,63 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); } });
   win.webContents.on('before-input-event', (_e, input) => { if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools(); });
-  nativeTheme.on('updated', () => { const th = applyTheme(store.getSettings().theme || 'dark'); win?.webContents.send('theme:changed', th); });
+  if (!themeListener) themeListener = nativeTheme.on('updated', () => { const th = applyTheme(store.getSettings().theme || 'dark'); win?.webContents.send('theme:changed', th); });
 }
 
+// ---------- window position, tray and notifications ----------
+let quitting = false, tray = null, themeListener = null;
+const startHidden = process.argv.includes('--hidden');
+app.on('before-quit', () => { quitting = true; });
+/** The size and place of the window last time, if it still fits on a connected screen. */
+function savedBounds() {
+  const b = store.getSettings().windowBounds;
+  if (!b || !(b.width > 400 && b.height > 300)) return { rect: {}, maximized: false };
+  try {
+    const area = screen.getDisplayMatching(b).workArea;
+    const visible = b.x < area.x + area.width - 100 && b.x + b.width > area.x + 100 && b.y >= area.y - 20 && b.y < area.y + area.height - 100;
+    if (!visible) return { rect: { width: Math.min(b.width, area.width), height: Math.min(b.height, area.height) }, maximized: !!b.maximized };
+  } catch { return { rect: {}, maximized: false }; }
+  return { rect: { x: b.x, y: b.y, width: b.width, height: b.height }, maximized: !!b.maximized };
+}
+function trackBounds(w) {
+  let t = null;
+  const save = () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      if (w.isDestroyed() || w.isMinimized()) return;
+      const maximized = w.isMaximized();
+      const prev = store.getSettings().windowBounds || {};
+      store.setSettings({ windowBounds: maximized ? { ...prev, maximized } : { ...w.getBounds(), maximized } });
+    }, 600);
+  };
+  for (const ev of ['resize', 'move', 'maximize', 'unmaximize']) w.on(ev, save);
+}
+const keepInBackground = () => { const st = store.getSettings(); return st.runInBackground !== false && (st.schedules || []).some((x) => x.enabled !== false); };
+function showWindow() { if (!win || win.isDestroyed()) createWindow(); else { win.hiddenToTray = false; if (win.isMinimized()) win.restore(); win.show(); win.focus(); } }
+function ensureTray() {
+  if (tray) return tray;
+  try {
+    tray = new Tray(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png')).resize({ width: 16, height: 16 }));
+    tray.setToolTip('DROPs');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open DROPs', click: showWindow },
+      { type: 'separator' },
+      { label: 'Quit DROPs', click: () => { quitting = true; app.quit(); } },
+    ]));
+    tray.on('click', showWindow);
+  } catch (e) { console.error('Tray icon failed:', e); tray = null; }
+  return tray;
+}
+/** A desktop notification from the main process (the window sends its own for agent events), only when the window is not in front. */
+function notify(title, body) {
+  try {
+    if (store.getSettings().notifyApproval === false || !Notification.isSupported()) return;
+    if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return;
+    const n = new Notification({ title, body: String(body || '').slice(0, 200), silent: false });
+    n.on('click', showWindow);
+    n.show();
+  } catch { /* notifications are best-effort */ }
+}
 // ---------- models ----------
 let geminiModels = null;
 async function getGeminiModels(force) {
@@ -482,7 +586,7 @@ handle('session:fork', (id) => {
   agents.set(data.id, new AgentSession(data, deps));
   return { id: data.id };
 });
-handle('session:load', (id) => { const a = getAgent(id); return a ? { ...a.data, busy: a.busy, procs: a.procs.list() } : null; });
+handle('session:load', (id) => { const a = getAgent(id); return a ? forRenderer(a.data, { busy: a.busy, procs: a.procs.list() }) : null; });
 handle('session:delete', (id) => { agents.get(id)?.dispose(); agents.delete(id); store.deleteSession(id); return true; });
 handle('session:pin', (id, on) => { const a = getAgent(id); if (!a) return false; a.data.pinned = !!on; a.save(true); return true; });
 handle('session:rename', (id, title) => { const a = getAgent(id); if (!a) return false; a.data.title = title; a.save(true); return true; });
@@ -497,7 +601,7 @@ handle('session:baseline', (id, rel) => getAgent(id)?.baseline(rel) || { found: 
 handle('session:revert', async (id, rel) => { try { return { ok: await getAgent(id).revertFile(rel) }; } catch (e) { return { error: e.message }; } });
 handle('session:compact', async (id, opts) => {
   const a = getAgent(id);
-  try { const ok = await a.compactNow(opts); return ok ? { ok, session: { ...a.data } } : { error: 'Nothing to compact yet.' }; } catch (e) { return { error: e.message }; }
+  try { const ok = await a.compactNow(opts); return ok ? { ok, session: forRenderer(a.data) } : { error: 'Nothing to compact yet.' }; } catch (e) { return { error: e.message }; }
 });
 handle('session:export', async (id, format = 'md') => {
   const a = getAgent(id);
@@ -549,21 +653,22 @@ handle('task:runNow', (taskId) => taskManager.runQueuedNow(taskId));
 handle('agent:permission', (id, reqId, decision, feedback) => { getAgent(id)?.respond(reqId, decision, feedback); return true; });
 handle('agent:rewind', async (id, turnIndex) => {
   const a = getAgent(id);
-  try { const r = await a.rewind(turnIndex); return { ...r, session: { ...a.data, busy: false } }; } catch (e) { return { error: e.message }; }
+  try { const r = await a.rewind(turnIndex); return { ...r, session: forRenderer(a.data, { busy: false }) }; } catch (e) { return { error: e.message }; }
 });
 handle('proc:list', (id) => getAgent(id)?.procs.list() || []);
 handle('proc:stop', (id, pid) => getAgent(id)?.procs.stop(pid));
 handle('proc:output', (id, pid) => getAgent(id)?.procs.get(pid)?.output.slice(-200000) || '');
 
 // ---------- git ----------
-handle('git:status', (root) => git.status(root));
-handle('git:versions', (root, rel) => git.fileVersions(root, rel));
-handle('git:log', (root) => git.log(root));
-handle('git:init', (root) => git.init(root));
-handle('git:commit', async (root, message) => { try { return { ok: true, summary: await git.commit(root, message) }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
+// Like the file calls, git only works on the open project (the renderer's root is never trusted).
+handle('git:status', (root) => { try { return git.status(projectRoot(root)); } catch (e) { return { isRepo: false, error: e.message }; } });
+handle('git:versions', (root, rel) => { const r = projectRoot(root); resolveInRoot(r, rel); return git.fileVersions(r, rel); });
+handle('git:log', (root) => { try { return git.log(projectRoot(root)); } catch { return []; } });
+handle('git:init', (root) => git.init(projectRoot(root)));
+handle('git:commit', async (root, message) => { try { return { ok: true, summary: await git.commit(projectRoot(root), message) }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
 handle('git:message', async (root, model) => {
   try {
-    const diff = await git.diffText(root);
+    const diff = await git.diffText(projectRoot(root));
     if (!diff.trim()) return { error: 'No changes to describe.' };
     const text = await providers.complete({
       model, deps,
@@ -577,11 +682,14 @@ handle('git:message', async (root, model) => {
 app.whenReady().then(() => {
   app.setAppUserModelId('dev.drops.agent');
   createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showWindow(); });
+  if (startHidden && keepInBackground()) ensureTray();
 });
 app.on('window-all-closed', () => { for (const a of agents.values()) a.dispose(); mcp.closeAll().finally(() => app.quit()); });
 app.whenReady().then(() => syncMcp().catch(() => {}));
 app.whenReady().then(() => setTimeout(() => scheduler.start(), 5000));
+// Checkpoint contents no session refers to any more (deleted sessions, rewound turns).
+app.whenReady().then(() => setTimeout(() => { try { store.gcBlobs(); } catch (e) { console.error('Checkpoint cleanup failed:', e); } }, 60_000).unref?.());
 
 // ---------- crash reports ----------
 handle('crash:last', () => {
@@ -615,6 +723,26 @@ app.whenReady().then(() => {
 });
 handle('update:check', () => checkUpdate(true));
 handle('update:open', (url) => { const u = String(url || lastUpdate?.url || ''); if (/^https:\/\/github\.com\/Clipping771\/DROPs\//.test(u)) shell.openExternal(u); return true; });
+// Install: the Windows installer from the release is downloaded, checked (size, SHA-256 when GitHub
+// lists it) and started; DROPs then closes so the installer can replace it. Only when the user clicks.
+let installing = false;
+handle('update:install', async () => {
+  const inst = lastUpdate?.installer;
+  const manual = { error: null, url: lastUpdate?.url };
+  if (process.platform !== 'win32' || !app.isPackaged || process.env.PORTABLE_EXECUTABLE_DIR) return { ...manual, error: 'This copy of DROPs is updated by downloading the new version from the releases page.' };
+  if (!inst) return { ...manual, error: 'This release has no Windows installer to download.' };
+  if (installing) return { error: 'The update is already downloading.' };
+  installing = true;
+  try {
+    const dir = fs.mkdtempSync(path.join(app.getPath('temp'), 'drops-update-'));
+    const dest = path.join(dir, inst.name.replace(/[^\w .()-]/g, '_'));
+    const r = await update.downloadInstaller(inst, dest, { onProgress: (p) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', p); } });
+    require('child_process').spawn(r.path, [], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+    quitting = true;
+    setTimeout(() => app.quit(), 500);
+    return { ok: true, verified: r.verified };
+  } catch (e) { return { ...manual, error: e.message }; } finally { installing = false; }
+});
 handle('update:dismiss', (version) => { store.setSettings({ updateDismissed: String(version || '') }); return true; });
 handle('schedule:list', () => scheduleList());
 handle('schedule:save', (input) => { try { return saveSchedule(input || {}); } catch (e) { return { error: e.message }; } });

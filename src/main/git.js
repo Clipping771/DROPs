@@ -108,4 +108,57 @@ async function worktreeRemove(wt, deleteBranch = true) {
   return true;
 }
 
-module.exports = { status, fileVersions, diffText, commit, log, init, worktreeAdd, worktreeMerge, worktreeRemove, repoRoot };
+// ---------- working-folder snapshots (for rewinding what shell commands changed) ----------
+// A snapshot is a git tree of every non-ignored file in the folder as it is now. It is built with a
+// throwaway index (seeded from the real one, so unchanged files are not re-hashed): the user's staging
+// area, branches and history are never touched. Unreferenced objects are cleaned up by git's own gc.
+const os = require('os');
+function gitEnv(root, args, env, { encoding = 'utf8', maxBuffer = 50 * 1024 * 1024, timeout = 30_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['-C', root, '-c', 'core.quotepath=false', ...args], { windowsHide: true, maxBuffer, encoding, timeout, env: { ...process.env, ...env } }, (err, stdout, stderr) => {
+      if (err) { err.stderr = stderr; return reject(err); }
+      resolve(stdout);
+    });
+  });
+}
+/** Tree id of the folder's current files, or null when it is not in a git repository (or git fails). */
+async function snapshot(root) {
+  try {
+    const realIndex = path.resolve(root, (await git(root, ['rev-parse', '--git-path', 'index'])).trim());
+    const tmp = path.join(os.tmpdir(), `drops-snap-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    try {
+      if (fs.existsSync(realIndex)) fs.copyFileSync(realIndex, tmp);
+      const env = { GIT_INDEX_FILE: tmp };
+      await gitEnv(root, ['add', '-A', '--', '.'], env, { timeout: 60_000 });
+      return (await gitEnv(root, ['write-tree'], env)).trim() || null;
+    } finally { fs.rmSync(tmp, { force: true }); }
+  } catch { return null; }
+}
+/** Paths (relative to root) that differ between two snapshots of root. */
+async function snapshotDiff(root, a, b) {
+  const out = await git(root, ['diff-tree', '-r', '--no-renames', '--relative', '--name-only', '-z', a, b]);
+  return out.split('\0').filter(Boolean);
+}
+const treePath = (rel) => './' + rel.replace(/\\/g, '/');
+/** Blob id of rel in a snapshot, or null when the file is not in it. */
+async function snapshotBlob(root, tree, rel) {
+  try { return (await git(root, ['rev-parse', '--verify', '--quiet', `${tree}:${treePath(rel)}`])).trim() || null; } catch { return null; }
+}
+/** Blob id the file has now (as git would store it), or null when it does not exist. */
+async function currentBlob(root, rel) {
+  if (!fs.existsSync(path.join(root, rel))) return null;
+  try { return (await git(root, ['hash-object', '--', rel])).trim(); } catch { return null; }
+}
+/** Puts rel back as it was in the snapshot (deletes it when it was not there). */
+async function restoreFromSnapshot(root, tree, rel) {
+  const abs = path.join(root, rel);
+  const blob = await snapshotBlob(root, tree, rel);
+  if (!blob) { fs.rmSync(abs, { force: true }); return 'deleted'; }
+  // --filters applies the checkout conversions (line endings, filters), as `git checkout` would.
+  const buf = await gitEnv(root, ['cat-file', '--filters', `${tree}:${treePath(rel)}`], {}, { encoding: 'buffer' });
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, buf);
+  return 'restored';
+}
+
+module.exports = { snapshot, snapshotDiff, snapshotBlob, currentBlob, restoreFromSnapshot, status, fileVersions, diffText, commit, log, init, worktreeAdd, worktreeMerge, worktreeRemove, repoRoot };

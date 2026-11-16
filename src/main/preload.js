@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld('drops', {
   updateCheck: invoke('update:check'),
   updateOpen: invoke('update:open'),
   updateDismiss: invoke('update:dismiss'),
+  updateInstall: invoke('update:install'),
+  onUpdateProgress: on('update:progress'),
   onUpdate: on('update:available'),
   onMcp: on('mcp:status'),
   onEvent: on('agent:event'),

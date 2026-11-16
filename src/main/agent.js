@@ -16,6 +16,7 @@ const gemini = require('./gemini');
 const guards = require('./guards');
 const shell = require('./shell');
 const lessons = require('./lessons');
+const git = require('./git');
 
 const INTERRUPTED = '[Request interrupted by user]';
 // ---- unfinished work, kept per project in DROPs' own data folder (never in the user's repository) ----
@@ -672,6 +673,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     this.pushUser(userBlocks);
     const turn = { msgIndex: this.data.messages.length - 1, text, files: {}, at: Date.now() };
     this.data.turns.push(turn);
+    // A snapshot of the folder before the turn, so a rewind can also undo what shell commands changed
+    // (formatters, generators, installs, sed): file-tool edits have their own checkpoints.
+    if (s.shellCheckpoints !== false) turn.snap = await git.snapshot(this.data.projectDir);
     this.emit('turn-start', { turnIndex: this.data.turns.length - 1, title: this.data.title });
     this.emit('status', { busy: true });
     this.save(true);
@@ -940,6 +944,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     // An app the agent launched never outlives the request (no windows left behind).
     require('./browser').closeKey(this.appKey()).catch(() => {});
     if (this.data.projectDir) writeProgress(this.data.projectDir, this.data);
+    // The folder as this turn left it: a rewind leaves alone whatever changed after this (the user's edits).
+    const endTurn = this.data.turns[this.data.turns.length - 1];
+    if (endTurn?.snap) this.endSnap = git.snapshot(this.data.projectDir).then((t) => { if (t) { endTurn.endSnap = t; this.save(); } return t; });
     // A task on a requirements document always ends with the plain count, whatever the agent said.
     const reqs = this.data.requirements || [];
     if (reqs.length && this.settings().evidenceCheck !== false) {
@@ -972,7 +979,11 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       const text = items.map((i) => i.text).join('\n\n');
       const images = items.flatMap((i) => i.images || []);
       this.emit('steer-resend', { text });
-      setTimeout(() => this.send(text, opts, images).catch(() => {}), 50);
+      // In the app the task queue runs it next (a direct send() here would race the queue's next task,
+      // and the loser's "Agent is busy" used to drop the user's message without a word).
+      const fail = (e) => this.emit('steer-returned', { text, error: String(e?.message || e) });
+      if (this.deps.resend) Promise.resolve().then(() => this.deps.resend(this.data.id, text, opts, images)).catch(fail);
+      else setTimeout(() => this.send(text, opts, images).catch(fail), 50);
     }
   }
 
@@ -2084,6 +2095,24 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
           restored.add(abs);
         } catch { /* best effort */ }
       }
+    }
+    // Files changed by shell commands in these turns (no file-tool checkpoint): back to the snapshot taken
+    // before turn `turnIndex`, unless they changed again after the agent's last turn (then they are the user's).
+    if (t.snap) {
+      try {
+        await this.endSnap?.catch(() => null);
+        const last = turns[turns.length - 1];
+        const end = last.endSnap || await git.snapshot(this.data.projectDir);
+        const root = this.data.projectDir;
+        const covered = new Set(turns.slice(turnIndex).flatMap((x) => Object.keys(x.files || {})).map((a) => path.resolve(a).toLowerCase()));
+        for (const rel of end ? await git.snapshotDiff(root, t.snap, end) : []) {
+          const abs = path.join(root, rel);
+          if (covered.has(path.resolve(abs).toLowerCase())) continue;
+          if (last.endSnap && (await git.currentBlob(root, rel)) !== (await git.snapshotBlob(root, end, rel))) { kept.add(abs); continue; }
+          await git.restoreFromSnapshot(root, t.snap, rel);
+          restored.add(abs);
+        }
+      } catch (e) { this.emit('notice', { message: `Rewind could not undo every shell change: ${String(e.message || e).slice(0, 160)}` }); }
     }
     this.data.messages.length = t.msgIndex;
     turns.length = turnIndex;

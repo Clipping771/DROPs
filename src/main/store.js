@@ -61,8 +61,22 @@ function writeJson(file, data) {
   fs.renameSync(tmp, file);
 }
 
+// Settings are read many times per agent step: keep the parsed file and re-read it only when it
+// changed on disk (size or time), so edits by another process (the CLI, a test) are still seen.
+let settingsCache = null; // { file, stamp, saved }
+function readSettingsFile() {
+  const file = settingsFile();
+  let stamp = 'none';
+  try { const st = fs.statSync(file); stamp = `${st.mtimeMs}:${st.size}`; } catch { /* no file yet */ }
+  if (!settingsCache || settingsCache.file !== file || settingsCache.stamp !== stamp) {
+    settingsCache = { file, stamp, saved: stamp === 'none' ? {} : readJson(file, {}) };
+  }
+  return structuredClone(settingsCache.saved);
+}
+function writeSettingsFile(data) { writeJson(settingsFile(), data); settingsCache = null; }
+
 function getSettingsRaw() {
-  const saved = readJson(settingsFile(), {});
+  const saved = readSettingsFile();
   // "en" was the old default, not a choice: it becomes "auto" once (an explicit choice made later stays).
   if (saved.responseLanguage === 'en' && !saved.languageMigrated) { saved.responseLanguage = 'auto'; saved.languageMigrated = true; }
   return { ...DEFAULTS, ...saved };
@@ -82,8 +96,11 @@ function getSettings() {
     providers[id] = { enabled, hasKey: stored || env, fromEnv: !stored && env };
   }
   const anyOai = Object.entries(providers).some(([id, p]) => p.enabled && id !== 'lmstudio');
+  // Without an OS key store (e.g. Linux with no keyring) keys are only base64-encoded on disk: say so.
+  const stored = [apiKeyEnc, geminiKeyEnc, ...Object.values(providerKeysEnc || {})].filter(Boolean);
+  const keyStoreAvailable = safeStorage ? !!safeStorage.isEncryptionAvailable?.() : true;
   return {
-    ...pub, hasAnthropic, hasGemini, providers, hasKey: hasAnthropic || hasGemini || anyOai,
+    ...pub, keyStoreAvailable, plainKeysSaved: stored.some((k) => String(k).startsWith('raw:')), hasAnthropic, hasGemini, providers, hasKey: hasAnthropic || hasGemini || anyOai,
     keyFromEnv: !apiKeyEnc && !!process.env.ANTHROPIC_API_KEY,
     geminiFromEnv: !geminiKeyEnc && !!geminiEnv(),
   };
@@ -111,7 +128,15 @@ function getOsCryptKey() {
 }
 // A key that can no longer be decrypted (e.g. data copied from another Windows account)
 // is treated as missing, so the app keeps working and asks for it again.
+// Decrypting goes through the OS key store; the same stored value always gives the same key.
+const decrypted = new Map();
 const decrypt = (enc) => {
+  if (decrypted.has(enc)) return decrypted.get(enc);
+  const v = decryptRaw(enc);
+  if (v != null) decrypted.set(enc, v);
+  return v;
+};
+const decryptRaw = (enc) => {
   try {
     const buf = Buffer.from(enc.slice(4), 'base64');
     if (!enc.startsWith('enc:')) return buf.toString();
@@ -136,7 +161,7 @@ function setSettings(patch) {
   }
   if (apiKey !== undefined) s.apiKeyEnc = apiKey ? encrypt(apiKey) : null;
   if (geminiKey !== undefined) s.geminiKeyEnc = geminiKey ? encrypt(geminiKey) : null;
-  writeJson(settingsFile(), s);
+  writeSettingsFile(s);
   return getSettings();
 }
 function getApiKey() {
@@ -168,7 +193,7 @@ function addRecentProject(p) {
   const s = getSettingsRaw();
   s.recentProjects = [p, ...s.recentProjects.filter((x) => x !== p)].slice(0, 8);
   s.lastProject = p;
-  writeJson(settingsFile(), s);
+  writeSettingsFile(s);
 }
 
 function newSession(projectDir, opts = {}) {
@@ -193,20 +218,119 @@ function newSession(projectDir, opts = {}) {
   };
 }
 const sessionFile = (id) => path.join(sessionsDir(), `${id.replace(/[^a-z0-9-]/gi, '')}.json`);
-function saveSession(data) { writeJson(sessionFile(data.id), data); }
-function loadSession(id) { return readJson(sessionFile(id), null); }
-function deleteSession(id) { try { fs.rmSync(sessionFile(id)); } catch { /* gone */ } }
-function listSessions() {
-  let files = [];
-  try { files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json')); } catch { return []; }
-  return files.map((f) => {
-    const d = readJson(path.join(sessionsDir(), f), null);
-    if (!d) return null;
-    // The last turn stopped on an error (agent.js STOPPED_BY_ERROR), so the sidebar can say so.
-    const last = (d.messages || [])[d.messages?.length - 1];
-    const lastText = last && last.role === 'assistant' && Array.isArray(last.content) ? last.content.map((b) => b.text || '').join(' ') : '';
-    return { id: d.id, title: d.title, projectDir: d.projectDir, updated: d.updated, cost: d.usage?.cost || 0, turns: d.turns?.length || 0, pinned: !!d.pinned, failed: lastText.startsWith('[DROPs] Stopped by an error:') };
-  }).filter(Boolean).sort((a, b) => b.updated - a.updated);
+const indexFile = () => path.join(sessionsDir(), '_index.json');
+
+// The sidebar's list of sessions comes from a small index instead of parsing every (possibly large)
+// session file. Each entry remembers the file's size and time; a file changed by anything else is re-read.
+function sessionSummary(d) {
+  // The last turn stopped on an error (agent.js STOPPED_BY_ERROR), so the sidebar can say so.
+  const last = (d.messages || [])[d.messages?.length - 1];
+  const lastText = last && last.role === 'assistant' && Array.isArray(last.content) ? last.content.map((b) => b.text || '').join(' ') : '';
+  return { id: d.id, title: d.title, projectDir: d.projectDir, updated: d.updated, cost: d.usage?.cost || 0, turns: d.turns?.length || 0, pinned: !!d.pinned, failed: lastText.startsWith('[DROPs] Stopped by an error:') };
+}
+const fileStamp = (file) => { try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; } };
+let indexCache = null; // { file, entries: { [name]: { stamp, summary } } }
+function readIndex() {
+  const file = indexFile();
+  if (!indexCache || indexCache.file !== file) indexCache = { file, entries: readJson(file, {}).entries || {} };
+  return indexCache;
+}
+let indexTimer = null;
+function writeIndexSoon() {
+  clearTimeout(indexTimer);
+  indexTimer = setTimeout(() => { try { if (indexCache) writeJson(indexCache.file, { entries: indexCache.entries }); } catch { /* rebuilt next time */ } }, 300);
+  indexTimer.unref?.();
 }
 
-module.exports = { getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions };
+// File checkpoints (the content of each file before and after a turn changed it) are kept in a shared,
+// content-addressed folder: the session file holds only { $blob: hash }. A long session used to rewrite
+// every checkpointed file's full text on each step. In memory the contents stay plain strings.
+const blobsDir = () => path.join(sessionsDir(), 'blobs');
+const blobFile = (hash) => path.join(blobsDir(), `${hash.replace(/[^a-f0-9]/g, '')}.txt`);
+const BLOB_MIN = 256; // short contents stay inline
+const blobHashes = new Map(); // content -> hash, for contents already written (bounded)
+function putBlob(text) {
+  let hash = blobHashes.get(text);
+  if (hash) return hash;
+  hash = crypto.createHash('sha256').update(text).digest('hex');
+  const f = blobFile(hash);
+  if (!fs.existsSync(f)) { fs.mkdirSync(blobsDir(), { recursive: true }); const tmp = `${f}.${process.pid}.tmp`; fs.writeFileSync(tmp, text, 'utf8'); fs.renameSync(tmp, f); }
+  if (blobHashes.size > 2000) blobHashes.clear();
+  blobHashes.set(text, hash);
+  return hash;
+}
+function getBlob(hash) { try { return fs.readFileSync(blobFile(hash), 'utf8'); } catch { return null; } }
+const packFiles = (files) => {
+  if (!files) return files;
+  const out = {};
+  for (const [k, v] of Object.entries(files)) out[k] = typeof v === 'string' && v.length >= BLOB_MIN ? { $blob: putBlob(v) } : v;
+  return out;
+};
+const unpackFiles = (files) => {
+  if (!files) return files;
+  for (const [k, v] of Object.entries(files)) if (v && typeof v === 'object' && v.$blob) files[k] = getBlob(v.$blob);
+  return files;
+};
+const packSession = (data) => (data.turns?.length ? { ...data, turns: data.turns.map((t) => ({ ...t, files: packFiles(t.files), ...(t.after ? { after: packFiles(t.after) } : {}) })) } : data);
+function unpackSession(d) {
+  for (const t of d?.turns || []) { unpackFiles(t.files); unpackFiles(t.after); }
+  return d;
+}
+/** Deletes checkpoint blobs that no session refers to any more (run now and then, not on every delete). */
+function gcBlobs() {
+  let names = [];
+  try { names = fs.readdirSync(blobsDir()); } catch { return 0; }
+  const used = new Set();
+  let files = [];
+  try { files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json') && f !== '_index.json'); } catch { return 0; }
+  for (const f of files) {
+    let raw;
+    try { raw = fs.readFileSync(path.join(sessionsDir(), f), 'utf8'); } catch { return 0; } // unsure: delete nothing
+    for (const m of raw.matchAll(/"\$blob":"([a-f0-9]{64})"/g)) used.add(m[1]);
+  }
+  let removed = 0;
+  const cutoff = Date.now() - 3600_000; // a blob written in the last hour may belong to a session not saved yet
+  for (const n of names) {
+    const hash = n.replace(/\.txt$/, '');
+    if (used.has(hash) || !/^[a-f0-9]{64}\.txt$/.test(n)) continue;
+    try { if (fs.statSync(path.join(blobsDir(), n)).mtimeMs < cutoff) { fs.rmSync(path.join(blobsDir(), n)); removed++; } } catch { /* in use */ }
+  }
+  return removed;
+}
+
+function saveSession(data) {
+  const file = sessionFile(data.id);
+  writeJson(file, packSession(data));
+  const idx = readIndex();
+  idx.entries[path.basename(file)] = { stamp: fileStamp(file), summary: sessionSummary(data) };
+  writeIndexSoon();
+}
+function loadSession(id) { return unpackSession(readJson(sessionFile(id), null)); }
+function deleteSession(id) {
+  try { fs.rmSync(sessionFile(id)); } catch { /* gone */ }
+  const idx = readIndex();
+  if (idx.entries[path.basename(sessionFile(id))]) { delete idx.entries[path.basename(sessionFile(id))]; writeIndexSoon(); }
+}
+function listSessions() {
+  let files = [];
+  try { files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json') && f !== '_index.json'); } catch { return []; }
+  const idx = readIndex();
+  let changed = false;
+  const out = [];
+  for (const f of files) {
+    const stamp = fileStamp(path.join(sessionsDir(), f));
+    let e = idx.entries[f];
+    if (!e || e.stamp !== stamp) {
+      const d = readJson(path.join(sessionsDir(), f), null);
+      if (!d) continue;
+      e = idx.entries[f] = { stamp, summary: sessionSummary(d) };
+      changed = true;
+    }
+    out.push(e.summary);
+  }
+  for (const f of Object.keys(idx.entries)) if (!files.includes(f)) { delete idx.entries[f]; changed = true; }
+  if (changed) writeIndexSoon();
+  return out.sort((a, b) => b.updated - a.updated);
+}
+
+module.exports = { gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions };

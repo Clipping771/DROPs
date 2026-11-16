@@ -48,3 +48,37 @@ test('crash reports: an unclean exit is noticed at the next start, a clean quit 
   assert.ok(crash.list(0).length >= 1);
   crash.cleanExit();
 });
+
+test('update: picks the Windows installer from this project\'s release only, with its checksum', () => {
+  const { pickInstaller } = require('../src/main/update');
+  const base = 'https://github.com/Clipping771/DROPs/releases/download/v2.3.0/';
+  const assets = [
+    { name: 'DROPs-Portable-2.3.0.exe', browser_download_url: base + 'DROPs-Portable-2.3.0.exe', size: 9 },
+    { name: 'DROPs-2.3.0-win.zip', browser_download_url: base + 'DROPs-2.3.0-win.zip', size: 9 },
+    { name: 'DROPs Setup 2.3.0.exe', browser_download_url: base + 'DROPs.Setup.2.3.0.exe', size: 1234, digest: 'sha256:' + 'ab'.repeat(32) },
+  ];
+  assert.deepEqual(pickInstaller(assets, '2.3.0'), { name: 'DROPs Setup 2.3.0.exe', url: base + 'DROPs.Setup.2.3.0.exe', size: 1234, sha256: 'ab'.repeat(32) });
+  assert.equal(pickInstaller([{ name: 'DROPs Setup 2.3.0.exe', browser_download_url: 'https://evil.example/DROPs Setup 2.3.0.exe', size: 1 }], '2.3.0'), null);
+  assert.equal(pickInstaller(undefined, '2.3.0'), null);
+});
+
+test('update: the installer download is checked (size, checksum, origin) before it is kept', async () => {
+  const { downloadInstaller } = require('../src/main/update');
+  const { Readable } = require('node:stream');
+  const crypto = require('node:crypto');
+  const body = Buffer.from('MZ fake installer bytes');
+  const sha = crypto.createHash('sha256').update(body).digest('hex');
+  const get = async () => Object.assign(Readable.from([body]), { headers: {} });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-upd-'));
+  const url = 'https://github.com/Clipping771/DROPs/releases/download/v9/DROPs.Setup.9.0.0.exe';
+  const progress = [];
+  const ok = await downloadInstaller({ name: 'a.exe', url, size: body.length, sha256: sha }, path.join(dir, 'a.exe'), { get, onProgress: (p) => progress.push(p.percent) });
+  assert.equal(ok.verified, true);
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'a.exe')), body);
+  assert.equal(progress[progress.length - 1], 100);
+
+  await assert.rejects(downloadInstaller({ name: 'b.exe', url, size: body.length, sha256: 'f'.repeat(64) }, path.join(dir, 'b.exe'), { get }), /checksum/);
+  assert.ok(!fs.existsSync(path.join(dir, 'b.exe')) && !fs.existsSync(path.join(dir, 'b.exe.part')), 'a bad download is deleted');
+  await assert.rejects(downloadInstaller({ name: 'c.exe', url, size: body.length + 5 }, path.join(dir, 'c.exe'), { get }), /incomplete/);
+  await assert.rejects(downloadInstaller({ name: 'd.exe', url: 'https://evil.example/x.exe', size: 1 }, path.join(dir, 'd.exe'), { get }), /releases page/);
+});

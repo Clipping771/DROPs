@@ -8,12 +8,13 @@
     "dist": "electron-builder --win nsis portable zip",
     "check": "node scripts/check.js",
     "icon": "electron scripts/make-icon.js",
-    "test": "node --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js tests/recovery.test.js tests/memory.test.js tests/audit.test.js tests/app.test.js tests/desktop.test.js tests/hooks.test.js tests/schedule.test.js tests/release.test.js",
+    "test": "node --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js tests/recovery.test.js tests/memory.test.js tests/audit.test.js tests/app.test.js tests/desktop.test.js tests/hooks.test.js tests/schedule.test.js tests/release.test.js tests/perf.test.js",
     "bench": "node bench/run.js",
     "headless": "node src/cli.js",
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux",
-    "test:ui": "node --test tests/ui.test.js"
+    "test:ui": "node --test tests/ui.test.js",
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "",
@@ -34,8 +35,11 @@
     "playwright-core": "1.64.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "electron": "^45.3.2",
     "electron-builder": "^26.18.0",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
     "typescript": "^7.0.2"
   },
   "productName": "DROPs",

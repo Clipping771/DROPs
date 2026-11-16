@@ -84,3 +84,39 @@ test('agent: fetch_url asks permission (per host) and still blocks local address
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('shell: abbreviated PowerShell flags and inline delete code always ask', () => {
+  const { assessCommand } = require('../src/main/shell');
+  for (const c of ['Remove-Item -Recu build', 'Remove-Item -r build', 'ri -Rec x',
+    `node -e "require('fs').rmSync('src',{recursive:true})"`, `node --eval "fs.unlinkSync('a')"`,
+    `python -c "import shutil; shutil.rmtree('src')"`, `python3 -c "import os; os.remove('a')"`, `perl -e "unlink 'x'"`]) {
+    assert.ok(assessCommand(c, 'C:\proj').dangerous, c);
+  }
+  for (const c of ['Remove-Item build.log', `node -e "console.log(1)"`, `python -c "print(1)"`, 'node scripts/clean.js', 'npm run remove-unused']) {
+    assert.ok(!assessCommand(c, 'C:\proj').dangerous, c);
+  }
+});
+
+test('shell: read-only list excludes git commands that write files or change branches', () => {
+  const { isSafeCommand } = require('../src/main/shell');
+  for (const c of ['git diff', 'git branch', 'git branch -a', 'git branch --list', 'git log --oneline']) assert.ok(isSafeCommand(c), c);
+  for (const c of ['git diff --output=C:/x.patch', 'git log --output=out.txt', 'git branch -D main', 'git branch -m old new', 'git branch --delete x']) assert.ok(!isSafeCommand(c), c);
+});
+
+test('secret shield: more token kinds, connection-string passwords and .env secrets are masked; code is not', () => {
+  const { redact } = require('../src/main/shell');
+  const masked = [
+    ['hf_' + 'a'.repeat(34), 'hf_'], ['gsk_' + 'b'.repeat(52), 'gsk_'], ['npm_' + 'c'.repeat(36), 'npm_'], ['glpat-' + 'd'.repeat(20), 'glpat-'],
+    ['DATABASE_URL=postgres://admin:hunter2pass@db.example.com/app', 'hunter2pass'], ['mongodb+srv://u:S3cretPw@c0.mongodb.net', 'S3cretPw'],
+    ['aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'wJalrXUtnFEMI'], ['DB_PASSWORD=supersecret # local', 'supersecret'],
+    ['export GITHUB_TOKEN="zzzzzzzzzzzz"', 'zzzzzzzzzzzz'], ['$env:OPENAI_API_KEY = "abcdefghijkl"', 'abcdefghijkl'],
+  ];
+  for (const [text, secret] of masked) {
+    const r = redact(text);
+    assert.ok(!r.text.includes(secret) && r.count > 0, `${text} -> ${r.text}`);
+  }
+  for (const text of ['API_KEY = os.getenv("X")', 'SECRET_KEY = process.env.SECRET_KEY;', 'TOKEN = get_token()', 'MAX_TOKENS=100000',
+    'password: ${{ secrets.PW }}', 'http://localhost:3000/a@b', 'git@github.com:o/r.git', 'const passwordField = form.password;']) {
+    assert.equal(redact(text).text, text, text);
+  }
+});
