@@ -121,7 +121,7 @@ const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app clo
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
 
-const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF } = require('./agent-defs');
+const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF } = require('./agent-defs');
 
 // Every request resends the whole history, so only the newest few images a tool read stay in it;
 // older ones become a short note (the agent can read the file again if it needs to).
@@ -409,7 +409,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -905,7 +905,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   async runTools(uses, ctx, opts, run) {
     const results = new Array(uses.length);
     const exec = async (u, i) => { results[i] = await this.runOne(u, ctx, opts, run); };
-    const DEDUP_READS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url', 'code_search', 'impact']);
+    const DEDUP_READS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'git_status', 'git_diff', 'fetch_url', 'code_search', 'impact', 'find_references', 'type_check']);
     const seenReads = new Map();
     const taskLimit = providers.providerOf(opts.model) === 'ollama' ? 1 : 3;
     let activeTasks = 0;
@@ -1048,6 +1048,24 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       meta.summary = q; this.emit('tool-start', { id: u.id, name: 'code_search', input: u.input, summary: q });
       let out;
       try { out = require('./codegraph').searchCode(this.data.projectDir, q, u.input.limit || 12); } catch (e) { out = `Could not search the codebase: ${e.message}`; }
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
+    if (u.name === 'find_references') {
+      const sym = String(u.input.name || '').trim();
+      meta.summary = sym; this.emit('tool-start', { id: u.id, name: 'find_references', input: u.input, summary: sym });
+      let out;
+      try { out = require('./codegraph').findReferences(this.data.projectDir, sym, u.input.file || null); } catch (e) { out = `Could not find references: ${e.message}`; }
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
+    if (u.name === 'type_check') {
+      const files = Array.isArray(u.input.files) ? u.input.files : null;
+      meta.summary = files?.length ? files.join(', ') : 'project'; this.emit('tool-start', { id: u.id, name: 'type_check', input: u.input, summary: meta.summary });
+      let out;
+      try { out = require('./codegraph').typeCheck(this.data.projectDir, files); } catch (e) { out = `Type check failed: ${e.message}`; }
       meta.status = 'done'; meta.output = out;
       this.emit('tool-end', { id: u.id, ok: true, output: out });
       return { type: 'tool_result', tool_use_id: u.id, content: out };

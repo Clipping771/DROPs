@@ -4,6 +4,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const fg = require('fast-glob');
 
 const SRC_EXT = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.py'];
@@ -13,6 +14,26 @@ const CACHE_TTL_MS = 15_000;
 const graphCache = new Map(); // normalized root -> { at, graph }
 const norm = (p) => p.replace(/\\/g, '/');
 const read = (abs) => { try { return fs.readFileSync(abs, 'utf8'); } catch { return ''; } };
+
+function diskIndexFile(root) {
+  try {
+    const dir = path.join(require('./brand').appDataDir(), 'code-index');
+    const id = crypto.createHash('sha1').update(norm(path.resolve(root)).toLowerCase()).digest('hex').slice(0, 16);
+    return path.join(dir, `${id}.json`);
+  } catch { return null; }
+}
+function loadDiskIndex(file) {
+  try { return file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}; } catch { return {}; }
+}
+function saveDiskIndex(file, data) {
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch { /* ignore cache write errors */ }
+}
 
 function invalidateGraph(root) {
   if (!root) { graphCache.clear(); return; }
@@ -65,22 +86,73 @@ function buildGraph(root, { cache = false } = {}) {
   const key = norm(path.resolve(root)).toLowerCase();
   const hit = cache && graphCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.graph;
-  const list = fg.sync(SRC_EXT.map((e) => `**/*${e}`), { cwd: root, ignore: IGNORE, onlyFiles: true, suppressErrors: true, deep: 14 }).map(norm).slice(0, MAX_FILES);
+  const entries = fg.sync(SRC_EXT.map((e) => `**/*${e}`), { cwd: root, ignore: IGNORE, onlyFiles: true, stats: true, suppressErrors: true, deep: 14 }).slice(0, MAX_FILES);
+  const list = entries.map((e) => norm(e.path));
   const files = new Set(list);
-  const imports = new Map(), importedBy = new Map(), text = new Map();
+  const imports = new Map(), importedBy = new Map(), text = new Map(), indexMeta = new Map();
   for (const f of list) { importedBy.set(f, new Set()); }
-  for (const f of list) {
-    const t = read(path.join(root, f));
-    text.set(f, t);
+
+  const idxFile = cache ? diskIndexFile(root) : null;
+  const disk = cache ? loadDiskIndex(idxFile) : {};
+  let diskDirty = false;
+  const nextDisk = {};
+
+  for (const ent of entries) {
+    const f = norm(ent.path);
+    const stamp = ent.stats ? `${ent.stats.mtimeMs}:${ent.stats.size}` : '';
+    const prev = stamp && disk[f];
+    let t = '';
     const deps = new Set();
-    for (const spec of importsOf(t, f)) {
-      const r = resolveImport(spec, f, files, root);
-      if (r && r !== f) deps.add(r);
+    if (prev && prev.stamp === stamp && Array.isArray(prev.specs)) {
+      for (const spec of prev.specs) {
+        const r = resolveImport(spec, f, files, root);
+        if (r && r !== f) deps.add(r);
+      }
+      indexMeta.set(f, { tokens: prev.tokens || {}, syms: prev.syms || [] });
+      nextDisk[f] = prev;
+    } else {
+      t = read(path.join(root, f));
+      const specs = importsOf(t, f);
+      for (const spec of specs) {
+        const r = resolveImport(spec, f, files, root);
+        if (r && r !== f) deps.add(r);
+      }
+      if (cache) {
+        const counts = {};
+        for (const tok of tokenize(t)) counts[tok] = (counts[tok] || 0) + 1;
+        const syms = extractSymbols(t).map((s) => ({ name: s.name, line: s.line }));
+        indexMeta.set(f, { tokens: counts, syms });
+        nextDisk[f] = { stamp, specs, tokens: counts, syms };
+        diskDirty = true;
+      }
     }
+    if (t) text.set(f, t);
     imports.set(f, deps);
     for (const d of deps) importedBy.get(d)?.add(f);
   }
-  const graph = { root, files, imports, importedBy, text, truncated: list.length >= MAX_FILES };
+  if (cache && (diskDirty || Object.keys(disk).length !== list.length)) saveDiskIndex(idxFile, nextDisk);
+  // Lazily load file text on demand when an entry came from the disk index.
+  const lazyText = new Proxy(text, {
+    get(target, prop) {
+      if (prop === 'get') {
+        return (f) => {
+          if (!target.has(f) && files.has(f)) target.set(f, read(path.join(root, f)));
+          return target.get(f);
+        };
+      }
+      if (prop === Symbol.iterator || prop === 'entries') {
+        return function* () {
+          for (const f of files) {
+            if (!target.has(f)) target.set(f, read(path.join(root, f)));
+            yield [f, target.get(f)];
+          }
+        };
+      }
+      const v = target[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+  const graph = { root, files, imports, importedBy, text: lazyText, indexMeta, truncated: list.length >= MAX_FILES };
   graphCache.set(key, { at: Date.now(), graph });
   return graph;
 }
@@ -120,24 +192,7 @@ function cycles(g, limit = 10) {
 
 const isTest = (f) => /(^|\/)(tests?|__tests__|spec|e2e)\/|\.(test|spec)\.[a-z]+$|_test\.py$|(^|\/)test_[^/]*\.py$/i.test(f);
 
-/**
- * True AST-level symbol references for TS/JS files using TypeScript's LanguageService when available.
- * Returns null if TypeScript cannot be loaded or the symbol isn't found in TS/JS sources.
- */
-function tsSymbolReferences(g, name) {
-  let ts;
-  try { ts = require('typescript'); } catch { return null; }
-  const tsFiles = [...g.files].filter((f) => /\.(tsx?|jsx?|mjs|cjs)$/.test(f)).slice(0, 400);
-  if (!tsFiles.length) return null;
-  const esc = name.replace(/[$]/g, '\\$');
-  const defRe = new RegExp(`(?:function\\*?\\s+|class\\s+|(?:const|let|var)\\s+|interface\\s+|type\\s+|enum\\s+)(${esc})\\b`);
-  let seedFile = null, seedPos = -1;
-  for (const f of tsFiles) {
-    const t = g.text.get(f) || '';
-    const m = defRe.exec(t);
-    if (m) { seedFile = f; seedPos = m.index + m[0].length - m[1].length; break; }
-  }
-  if (!seedFile || seedPos < 0) return null;
+function createTsService(g, ts, tsFiles) {
   const host = {
     getScriptFileNames: () => tsFiles.map((f) => path.join(g.root, f)),
     getScriptVersion: () => '1',
@@ -147,25 +202,146 @@ function tsSymbolReferences(g, name) {
       return t !== undefined ? ts.ScriptSnapshot.fromString(t) : (fs.existsSync(fn) ? ts.ScriptSnapshot.fromString(read(fn)) : undefined);
     },
     getCurrentDirectory: () => g.root,
-    getCompilationSettings: () => ({ allowJs: true, checkJs: false, jsx: ts.JsxEmit.ReactJSX, moduleResolution: ts.ModuleResolutionKind.NodeNext, target: ts.ScriptTarget.ESNext }),
-    getDefaultLibFileName: () => '',
+    getCompilationSettings: () => {
+      try {
+        const cfgPath = path.join(g.root, 'tsconfig.json');
+        if (fs.existsSync(cfgPath)) {
+          const parsed = ts.readConfigFile(cfgPath, read);
+          if (parsed.config) {
+            return ts.parseJsonConfigFileContent(parsed.config, ts.sys, g.root).options;
+          }
+        }
+      } catch { /* fall back to defaults */ }
+      return { allowJs: true, checkJs: false, jsx: ts.JsxEmit.ReactJSX, moduleResolution: ts.ModuleResolutionKind.NodeNext, target: ts.ScriptTarget.ESNext };
+    },
+    getDefaultLibFileName: (opts) => {
+      try { return ts.getDefaultLibFilePath(opts); } catch { return ''; }
+    },
     fileExists: (fn) => fs.existsSync(fn),
     readFile: (fn) => read(fn),
   };
+  return ts.createLanguageService(host, ts.createDocumentRegistry());
+}
+
+/**
+ * True AST-level symbol references for TS/JS files using TypeScript's LanguageService when available.
+ * Returns null if TypeScript cannot be loaded or the symbol isn't found in TS/JS sources.
+ */
+function tsSymbolReferences(g, name, preferredFile = null) {
+  let ts;
+  try { ts = require('typescript'); } catch { return null; }
+  const tsFiles = [...g.files].filter((f) => /\.(tsx?|jsx?|mjs|cjs)$/.test(f)).slice(0, 400);
+  if (!tsFiles.length) return null;
+  const esc = name.replace(/[$]/g, '\\$');
+  const defRe = new RegExp(`(?:function\\*?\\s+|class\\s+|(?:const|let|var)\\s+|interface\\s+|type\\s+|enum\\s+)(${esc})\\b`);
+  const ordered = preferredFile && tsFiles.includes(preferredFile) ? [preferredFile, ...tsFiles.filter((f) => f !== preferredFile)] : tsFiles;
+  let seedFile = null, seedPos = -1;
+  for (const f of ordered) {
+    const t = g.text.get(f) || '';
+    const m = defRe.exec(t);
+    if (m) { seedFile = f; seedPos = m.index + m[0].length - m[1].length; break; }
+  }
+  if (!seedFile || seedPos < 0) return null;
   try {
-    const ls = ts.createLanguageService(host, ts.createDocumentRegistry());
+    const ls = createTsService(g, ts, tsFiles);
     const refs = ls.findReferences(path.join(g.root, seedFile), seedPos);
     if (!refs?.length) return null;
-    const defined = new Set(), used = new Set();
+    const defined = new Set(), used = new Set(), locations = [];
+    const seenLoc = new Set();
     for (const grp of refs) {
       for (const r of grp.references) {
         const rel = norm(path.relative(g.root, r.fileName));
         if (!g.files.has(rel)) continue;
         if (r.isDefinition) defined.add(rel); else used.add(rel);
+        const text = g.text.get(rel) || '';
+        const before = text.slice(0, r.textSpan.start);
+        const line = before.split('\n').length;
+        const key = `${rel}:${line}`;
+        if (!seenLoc.has(key)) {
+          seenLoc.add(key);
+          const lineText = (text.split('\n')[line - 1] || '').trim().slice(0, 140);
+          locations.push({ file: rel, line, isDefinition: !!r.isDefinition, text: lineText });
+        }
       }
     }
-    return { defined: [...defined], used: [...used].filter((f) => !defined.has(f)) };
+    return { defined: [...defined], used: [...used].filter((f) => !defined.has(f)), locations };
   } catch { return null; }
+}
+
+/** LSP-style Go-to-Definition and Find All References across the project with exact file:line locations. */
+function findReferences(root, name, file = null) {
+  const sym = String(name || '').trim();
+  if (!sym) return 'Give a symbol name (function, class, type, variable) to find.';
+  const g = buildGraph(root, { cache: true });
+  const tsRes = tsSymbolReferences(g, sym, file ? norm(file) : null);
+  if (tsRes?.locations?.length) {
+    const defs = tsRes.locations.filter((l) => l.isDefinition);
+    const uses = tsRes.locations.filter((l) => !l.isDefinition);
+    const out = [];
+    if (defs.length) out.push(`Definitions (${defs.length}):\n${defs.slice(0, 20).map((d) => `  ${d.file}:${d.line}  ${d.text}`).join('\n')}`);
+    if (uses.length) out.push(`References (${uses.length}):\n${uses.slice(0, 60).map((u) => `  ${u.file}:${u.line}  ${u.text}`).join('\n')}${uses.length > 60 ? `\n  … (${uses.length - 60} more)` : ''}`);
+    return out.join('\n\n') || `No references found for "${sym}".`;
+  }
+  const esc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[^\\w$])${esc}(?![\\w$])`);
+  const hits = [];
+  for (const [f, t] of g.text) {
+    if (!re.test(t)) continue;
+    const lines = t.split('\n');
+    for (let i = 0; i < lines.length && hits.length < 80; i++) {
+      if (re.test(lines[i])) hits.push(`  ${f}:${i + 1}  ${lines[i].trim().slice(0, 140)}`);
+    }
+  }
+  return hits.length ? `Matches (${hits.length}):\n${hits.join('\n')}` : `No references found for "${sym}".`;
+}
+
+/** Fast TypeScript/JS project diagnostics (in-memory LanguageService for TS 5.x, or tsc --noEmit fallback). */
+function typeCheck(root, targetFiles = null) {
+  const g = buildGraph(root, { cache: true });
+  const tsFiles = [...g.files].filter((f) => /\.(tsx?|jsx?|mjs|cjs)$/.test(f)).slice(0, 400);
+  if (!tsFiles.length) return 'No TypeScript/JavaScript files found to check.';
+  const checkList = Array.isArray(targetFiles) && targetFiles.length
+    ? targetFiles.map(norm).filter((f) => tsFiles.includes(f))
+    : tsFiles;
+  if (!checkList.length) return 'No matching TypeScript/JavaScript files found to check.';
+
+  let ts = null;
+  try { ts = require('typescript'); } catch { /* not installed as CJS */ }
+  if (ts && typeof ts.createLanguageService === 'function' && typeof ts.createDocumentRegistry === 'function') {
+    const ls = createTsService(g, ts, tsFiles);
+    const diags = [];
+    for (const f of checkList) {
+      const abs = path.join(g.root, f);
+      const all = [...ls.getSyntacticDiagnostics(abs), ...ls.getSemanticDiagnostics(abs)];
+      for (const d of all) {
+        if (diags.length >= 60) break;
+        const msg = ts.flattenDiagnosticMessageText(d.messageText, ' ');
+        let line = 1;
+        if (d.file && typeof d.start === 'number') line = d.file.getLineAndCharacterOfPosition(d.start).line + 1;
+        diags.push(`${f}:${line} — TS${d.code}: ${msg}`);
+      }
+      if (diags.length >= 60) break;
+    }
+    return diags.length ? `TypeScript diagnostics (${diags.length}):\n${diags.join('\n')}` : `No TypeScript errors in ${checkList.length} file${checkList.length === 1 ? '' : 's'}.`;
+  }
+
+  // Fallback for ESM-only TS 7.x or external tsc binary.
+  const tsc = [
+    path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'),
+    path.join(__dirname, '..', '..', 'node_modules', 'typescript', 'bin', 'tsc'),
+  ].find((p) => fs.existsSync(p));
+  if (!tsc) return 'TypeScript compiler is not installed in this environment.';
+  const { execFileSync } = require('child_process');
+  const hasCfg = fs.existsSync(path.join(root, 'tsconfig.json')) && !Array.isArray(targetFiles);
+  const args = [tsc, '--noEmit', '--pretty', 'false', ...(hasCfg ? ['-p', root] : checkList.map((f) => path.join(root, f)))];
+  try {
+    execFileSync(process.execPath, args, { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    return `No TypeScript errors in ${checkList.length} file${checkList.length === 1 ? '' : 's'}.`;
+  } catch (e) {
+    const out = String(e.stdout || '') + String(e.stderr || '');
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 60);
+    return lines.length ? `TypeScript diagnostics (${lines.length}):\n${lines.join('\n')}` : `Type check failed: ${e.message}`;
+  }
 }
 /** Where a symbol (function, class, component, variable) is defined and used. */
 function symbolUses(g, name) {
@@ -284,16 +460,24 @@ function searchCode(root, query, limit = 12) {
   const g = buildGraph(root, { cache: true });
   const docs = [];
   const df = new Map();
-  for (const [file, text] of g.text) {
+  for (const file of g.files) {
     const pathTokens = new Set(tokenize(file));
-    const syms = extractSymbols(text);
+    const cached = g.indexMeta?.get(file);
+    let syms, bodyCounts;
+    if (cached) {
+      syms = cached.syms.map((s) => ({ ...s, tokens: new Set(tokenize(s.name)) }));
+      bodyCounts = new Map(Object.entries(cached.tokens));
+    } else {
+      const text = g.text.get(file) || '';
+      syms = extractSymbols(text);
+      bodyCounts = new Map();
+      for (const t of tokenize(text)) bodyCounts.set(t, (bodyCounts.get(t) || 0) + 1);
+    }
     const symTokens = new Set();
     for (const s of syms) for (const t of s.tokens) symTokens.add(t);
-    const bodyCounts = new Map();
-    for (const t of tokenize(text)) bodyCounts.set(t, (bodyCounts.get(t) || 0) + 1);
     const allTerms = new Set([...pathTokens, ...symTokens, ...bodyCounts.keys()]);
     for (const t of allTerms) df.set(t, (df.get(t) || 0) + 1);
-    docs.push({ file, text, pathTokens, syms, bodyCounts });
+    docs.push({ file, pathTokens, syms, bodyCounts });
   }
   const N = Math.max(1, docs.length);
   const scored = [];
@@ -330,4 +514,26 @@ function searchCode(root, query, limit = 12) {
   }).join('\n');
 }
 
-module.exports = { buildGraph, invalidateGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses, tsSymbolReferences, searchCode };
+/**
+ * Safe multi-file symbol rename across source files using AST locations (TS/JS) or whole-word boundaries.
+ * Returns { edits: [{ file, content, count }], skipped: [] }. Does not write files itself.
+ */
+function planRenameSymbol(root, oldName, newName, targetFiles = null) {
+  const from = String(oldName || '').trim(), to = String(newName || '').trim();
+  if (!/^[A-Za-z_$][\w$]*$/.test(from) || !/^[A-Za-z_$][\w$]*$/.test(to)) throw new Error('old_name and new_name must be valid identifiers.');
+  if (from === to) throw new Error('new_name must differ from old_name.');
+  const g = buildGraph(root, { cache: true });
+  const esc = from.replace(/[$]/g, '\\$');
+  const re = new RegExp(`(^|[^\\w$])${esc}(?![\\w$])`, 'g');
+  const allowed = Array.isArray(targetFiles) && targetFiles.length ? new Set(targetFiles.map(norm)) : null;
+  const edits = [];
+  for (const [file, text] of g.text) {
+    if (allowed && !allowed.has(file)) continue;
+    let count = 0;
+    const next = text.replace(re, (_, pre) => { count++; return `${pre}${to}`; });
+    if (count > 0) edits.push({ file, orig: text, content: next, count });
+  }
+  return edits;
+}
+
+module.exports = { buildGraph, invalidateGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses, tsSymbolReferences, findReferences, typeCheck, planRenameSymbol, searchCode };

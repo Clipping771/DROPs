@@ -139,8 +139,62 @@ const TOOL_DEFS = [
         command: { type: 'string' },
         name: { type: 'string', description: 'Short label, e.g. "dev server"' },
         wait_seconds: { type: 'integer', description: 'Seconds to wait before returning initial output (default 5, max 60)' },
+        interactive: { type: 'boolean', description: 'Keep stdin open so send_process_input can send input to it' },
       },
       required: ['command'],
+    },
+  },
+  {
+    name: 'send_process_input',
+    description: 'Send text to stdin of a running interactive background process started with start_process({ interactive: true }).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        input: { type: 'string', description: 'Text to write to stdin' },
+        newline: { type: 'boolean', description: 'Append a newline (default true)' },
+      },
+      required: ['id', 'input'],
+    },
+  },
+  {
+    name: 'delete_file',
+    description: 'Delete a file inside the project root (with checkpoint backup for rewind). Refuses directories.',
+    input_schema: { type: 'object', properties: { path: { type: 'string', description: 'File path relative to project root' } }, required: ['path'] },
+  },
+  {
+    name: 'move_file',
+    description: 'Move or rename a file inside the project root (with checkpoint backup for rewind).',
+    input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] },
+  },
+  {
+    name: 'rename_symbol',
+    description: 'Safely rename an identifier (function, class, type, variable) across multiple project files at whole-word boundaries, with checkpoint backups for rewind.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        old_name: { type: 'string', description: 'Existing identifier' },
+        new_name: { type: 'string', description: 'New identifier' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Optional list of relative file paths to limit the rename' },
+      },
+      required: ['old_name', 'new_name'],
+    },
+  },
+  {
+    name: 'git_status',
+    description: 'Read-only git status (branch, changed/untracked files) and the last 5 commits.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'git_diff',
+    description: 'Read-only git diff of working tree or staged changes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        staged: { type: 'boolean', description: 'Show staged changes (--cached)' },
+        path: { type: 'string', description: 'Optional file or folder filter' },
+        stat: { type: 'boolean', description: 'Show diffstat summary only' },
+      },
     },
   },
   {
@@ -204,8 +258,8 @@ const TOOL_DEFS = [
   },
 ];
 
-const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'save_plan', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'code_search', 'audit', 'mark_chapter']);
-const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'notebook_edit', 'remember']);
+const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'git_status', 'git_diff', 'todo_write', 'save_plan', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'code_search', 'find_references', 'type_check', 'audit', 'mark_chapter']);
+const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol', 'remember']);
 const EXPLORE_TOOLS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url', 'code_search']);
 
 function definitions(filter) {
@@ -616,10 +670,10 @@ const browserHosts = new Map();
 // --- background processes (dev servers, watchers) ---
 class ProcessManager {
   constructor(root, onEvent) { this.root = root; this.onEvent = onEvent || (() => {}); this.procs = new Map(); this.n = 0; this.sandbox = null; }
-  async start(command, name) {
+  async start(command, name, opts = {}) {
     const id = `p${++this.n}`;
     const child = await shell.spawnShell(command, { cwd: this.root, sandbox: this.sandbox, env: { BROWSER: 'none' } });
-    const p = { id, name: name || command.slice(0, 40), command, output: '', running: true, code: null, child, started: Date.now(), onExit: null };
+    const p = { id, name: name || command.slice(0, 40), command, output: '', running: true, code: null, child, started: Date.now(), onExit: null, interactive: !!opts.interactive };
     const add = (d) => {
       const s = stripAnsi(d.toString('utf8'));
       p.output += s;
@@ -628,13 +682,21 @@ class ProcessManager {
     };
     child.stdout.on('data', add);
     child.stderr.on('data', add);
-    child.stdin.end();
+    if (!opts.interactive) child.stdin.end();
     const exit = (code) => { if (!p.running) return; p.running = false; p.code = code; this.onEvent({ id, exited: true, code }); p.onExit?.(); };
     child.on('close', (code) => exit(code ?? -1));
     child.on('error', (e) => { add(String(e)); exit(-1); });
     this.procs.set(id, p);
     this.onEvent({ id, started: true, name: p.name, command });
     return p;
+  }
+  sendInput(id, text) {
+    const p = this.procs.get(id);
+    if (!p) throw new Error(`No process ${id}.`);
+    if (!p.running) throw new Error(`Process ${id} already exited (code ${p.code}).`);
+    if (!p.interactive || !p.child.stdin?.writable) throw new Error(`Process ${id} stdin is not writable (pass interactive: true to start_process).`);
+    p.child.stdin.write(String(text));
+    return true;
   }
   get(id) { return this.procs.get(id); }
   list() { return [...this.procs.values()].map(({ id, name, command, running, code, started }) => ({ id, name, command, running, code, started })); }
@@ -921,7 +983,7 @@ async function prepare(ctx, name, input) {
       return {
         kind: 'shell', summary: input.name || input.command.slice(0, 100),
         run: async () => {
-          const p = await ctx.procs.start(input.command, input.name);
+          const p = await ctx.procs.start(input.command, input.name, { interactive: !!input.interactive });
           const wait = Math.min(Math.max(input.wait_seconds ?? 5, 0), 60) * 1000;
           await new Promise((r) => { const t = setTimeout(r, wait); p.onExit = () => { clearTimeout(t); r(); }; });
           const tail = stripAnsi(p.output.slice(-6000)).trim();
@@ -943,6 +1005,104 @@ async function prepare(ctx, name, input) {
     }
     case 'stop_process': {
       return { kind: 'read', summary: input.id, run: async () => (ctx.procs.stop(input.id) ? `Stopped ${input.id}.` : `No running process ${input.id}.`) };
+    }
+    case 'send_process_input': {
+      return {
+        kind: 'shell', summary: `${input.id}: ${String(input.input).slice(0, 60)}`,
+        run: async () => {
+          const text = input.newline === false ? String(input.input) : `${input.input}\n`;
+          ctx.procs.sendInput(input.id, text);
+          await new Promise((r) => setTimeout(r, 250));
+          const p = ctx.procs.get(input.id);
+          const tail = stripAnsi((p?.output || '').slice(-3000)).trim();
+          return `Sent input to ${input.id}.${tail ? `\nRecent output:\n${tail}` : ''}`;
+        },
+      };
+    }
+    case 'delete_file': {
+      const abs = resolveInRoot(root, input.path);
+      const rel = relOf(root, abs);
+      const st = await fsp.stat(abs).catch(() => null);
+      if (!st) throw new Error(`File not found: ${rel}`);
+      if (st.isDirectory()) throw new Error(`${rel} is a directory; delete_file only deletes files.`);
+      return {
+        kind: 'edit', summary: `delete ${rel}`, abs,
+        run: async () => {
+          await ctx.snapshot(abs);
+          await fsp.rm(abs);
+          ctx.readFiles.delete(abs);
+          try { require('./codegraph').invalidateGraph(ctx.root); } catch { /* ignore */ }
+          ctx.onChange(rel, { added: 0, removed: 1, hunks: [] });
+          return `Deleted ${rel}.`;
+        },
+      };
+    }
+    case 'move_file': {
+      const src = resolveInRoot(root, input.from);
+      const dst = resolveInRoot(root, input.to);
+      const fromRel = relOf(root, src), toRel = relOf(root, dst);
+      const st = await fsp.stat(src).catch(() => null);
+      if (!st) throw new Error(`Source not found: ${fromRel}`);
+      if (st.isDirectory()) throw new Error(`${fromRel} is a directory; move_file only moves files.`);
+      return {
+        kind: 'edit', summary: `${fromRel} → ${toRel}`, abs: dst,
+        run: async () => {
+          await ctx.snapshot(src);
+          if (fs.existsSync(dst)) await ctx.snapshot(dst);
+          await fsp.mkdir(path.dirname(dst), { recursive: true });
+          await fsp.rename(src, dst);
+          ctx.readFiles.delete(src);
+          await markWritten(ctx, dst);
+          ctx.onChange(toRel, { added: 1, removed: 0, hunks: [] });
+          return `Moved ${fromRel} to ${toRel}.`;
+        },
+      };
+    }
+    case 'rename_symbol': {
+      const edits = require('./codegraph').planRenameSymbol(root, input.old_name, input.new_name, input.files);
+      if (!edits.length) return { kind: 'read', summary: `${input.old_name} → ${input.new_name}`, run: async () => `No occurrences of "${input.old_name}" found.` };
+      const total = edits.reduce((s, e) => s + e.count, 0);
+      return {
+        kind: 'edit', summary: `${input.old_name} → ${input.new_name} (${edits.length} files)`,
+        run: async () => {
+          for (const e of edits) {
+            const abs = resolveInRoot(root, e.file);
+            await ctx.snapshot(abs);
+            await atomicWrite(abs, e.content);
+            await markWritten(ctx, abs);
+            ctx.onChange(e.file, makeDiff(e.file, e.orig, e.content));
+          }
+          return `Renamed "${input.old_name}" to "${input.new_name}" (${total} occurrences across ${edits.length} files).`;
+        },
+      };
+    }
+    case 'git_status': {
+      return {
+        kind: 'read', summary: 'git status',
+        run: async () => {
+          const { execFileSync } = require('child_process');
+          const runGit = (args) => {
+            try { return execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 10_000, windowsHide: true }).trim(); } catch (e) { return String(e.stderr || e.message || '').trim(); }
+          };
+          const st = runGit(['status', '--short', '--branch']);
+          const log = runGit(['log', '-n', '5', '--oneline']);
+          return `Status:\n${st || '(clean)'}\n\nRecent commits:\n${log || '(none)'}`;
+        },
+      };
+    }
+    case 'git_diff': {
+      return {
+        kind: 'read', summary: input.path || (input.staged ? 'staged' : 'working tree'),
+        run: async () => {
+          const { execFileSync } = require('child_process');
+          const args = ['diff'];
+          if (input.staged) args.push('--cached');
+          if (input.stat) args.push('--stat');
+          if (input.path) args.push('--', relOf(root, resolveInRoot(root, input.path)));
+          const out = execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 15_000, windowsHide: true }).trim();
+          return trunc(out || '(no diff)');
+        },
+      };
     }
     case 'browser': {
       const browser = require('./browser');

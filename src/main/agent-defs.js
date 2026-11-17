@@ -149,7 +149,31 @@ const SAVE_PLAN_DEF = {
   },
 };
 
-const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF];
+const FIND_REFS_DEF = {
+  name: 'find_references',
+  description: 'IDE-grade Go-to-Definition and Find All References across the project: returns exact file:line locations where a function, class, type or variable is defined and used (AST-powered for TypeScript/JS).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Exact symbol name' },
+      file: { type: 'string', description: 'Optional relative path where the symbol is defined' },
+    },
+    required: ['name'],
+  },
+};
+
+const TYPE_CHECK_DEF = {
+  name: 'type_check',
+  description: 'Fast in-memory TypeScript/JS project type & syntax check using the TypeScript LanguageService (no slow tsc spawn). Returns exact file:line diagnostics across the project or specific files.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      files: { type: 'array', items: { type: 'string' }, description: 'Optional list of relative file paths to check (default: whole project)' },
+    },
+  },
+};
+
+const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF];
 for (const d of ALL) tools.registerDef(d);
 
-module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF };
+module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF };

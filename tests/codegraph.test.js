@@ -96,6 +96,18 @@ test('tsSymbolReferences: resolves AST-level definitions and usages when TypeScr
   }
 });
 
+test('findReferences & typeCheck: returns exact file:line locations and catches TS diagnostics in-memory', () => {
+  const root = project();
+  const refs = cg.findReferences(root, 'verifyLogin');
+  assert.match(refs, /lib\/auth\.ts:\d+/);
+  assert.match(refs, /app\/login\/page\.tsx:\d+/);
+
+  fs.writeFileSync(path.join(root, 'lib', 'broken.ts'), 'export function add(a: number, b: number): number { return a + b; }\nconst x: number = add("bad", 2);\n');
+  cg.invalidateGraph(root);
+  const diag = cg.typeCheck(root, ['lib/broken.ts']);
+  assert.match(diag, /broken\.ts.*TS\d+:/);
+});
+
 test('code_search and impact by name still work right after the repository map (they share the cached graph)', () => {
   const ctxEngine = require('../src/main/context');
   const cg = require('../src/main/codegraph');

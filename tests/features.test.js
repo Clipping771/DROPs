@@ -314,3 +314,54 @@ test('notebooks: read_file formats .ipynb cells cleanly and notebook_edit replac
   assert.equal(old.cells.length, 2);
   assert.equal(old.cells[1].id, undefined);
 });
+
+test('file, git, rename_symbol and send_process_input tools work safely with snapshots', async () => {
+  const tools = require('../src/main/tools');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-tools-'));
+  execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(dir, 'a.js'), 'function oldFn() { return 1; }\nmodule.exports = { oldFn };\n');
+  fs.writeFileSync(path.join(dir, 'b.js'), 'const { oldFn } = require("./a");\nconsole.log(oldFn());\n');
+  execFileSync('git', ['add', '.'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'init'], { cwd: dir, stdio: 'ignore' });
+
+  const snapped = [];
+  const ctx = {
+    root: dir,
+    readFiles: new Map(),
+    snapshot: async (p) => snapped.push(path.basename(p)),
+    onChange: () => {},
+    procs: new tools.ProcessManager(dir),
+  };
+
+  // rename_symbol
+  const rSym = await (await tools.prepare(ctx, 'rename_symbol', { old_name: 'oldFn', new_name: 'newFn' })).run();
+  assert.match(rSym, /Renamed "oldFn" to "newFn" \(4 occurrences across 2 files\)/);
+  assert.match(fs.readFileSync(path.join(dir, 'b.js'), 'utf8'), /newFn\(\)/);
+
+  // git_status & git_diff
+  const gs = await (await tools.prepare(ctx, 'git_status', {})).run();
+  assert.match(gs, /M a\.js/);
+  const gd = await (await tools.prepare(ctx, 'git_diff', { path: 'a.js' })).run();
+  assert.match(gd, /\+function newFn/);
+
+  // move_file & delete_file
+  await (await tools.prepare(ctx, 'move_file', { from: 'b.js', to: 'sub/c.js' })).run();
+  assert.ok(!fs.existsSync(path.join(dir, 'b.js')) && fs.existsSync(path.join(dir, 'sub/c.js')));
+  await (await tools.prepare(ctx, 'delete_file', { path: 'sub/c.js' })).run();
+  assert.ok(!fs.existsSync(path.join(dir, 'sub/c.js')));
+  assert.ok(snapped.length >= 4);
+
+  // start_process(interactive) + send_process_input
+  try {
+    const startOut = await (await tools.prepare(ctx, 'start_process', {
+      command: `node -e "process.stdin.on('data', d => { console.log('ECHO:' + d.toString().trim()); process.exit(0); })"`,
+      interactive: true,
+      wait_seconds: 1,
+    })).run();
+    const id = startOut.match(/Started process (p\d+)/)[1];
+    const sent = await (await tools.prepare(ctx, 'send_process_input', { id, input: 'ping' })).run();
+    assert.match(sent, /ECHO:ping/);
+  } finally {
+    ctx.procs.stopAll();
+  }
+});

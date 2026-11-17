@@ -38,7 +38,7 @@ function isVerificationCommand(cmd, verifyList = [], editedFiles = []) {
 // What "the same thing" means for failure-pattern detection.
 function failureKey(name, input = {}) {
   switch (name) {
-    case 'edit_file': case 'multi_edit': case 'write_file': case 'notebook_edit': case 'read_file':
+    case 'edit_file': case 'multi_edit': case 'write_file': case 'notebook_edit': case 'delete_file': case 'move_file': case 'rename_symbol': case 'read_file':
       return `${name === 'read_file' ? 'read' : 'edit'}:${norm(input.path || '')}`;
     case 'shell': case 'powershell': case 'start_process': {
       // Command family: first two meaningful words, ignoring quotes, flags, numbers and paths.
@@ -53,7 +53,7 @@ function failureKey(name, input = {}) {
   }
 }
 
-const EDIT_CALLS = new Set(['edit_file', 'multi_edit', 'write_file', 'notebook_edit']);
+const EDIT_CALLS = new Set(['edit_file', 'multi_edit', 'write_file', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol']);
 
 class LoopGuard {
   constructor(limit = 3) {
