@@ -436,3 +436,46 @@ test('project profile: an unreadable folder in the project does not crash the re
     assert.ok(typeof p.text === 'string');
   } finally { fs.chmodSync(path.join(dir, 'locked'), 0o755); }
 });
+
+// ---- Cross-file regression guard ----
+test('newDiagnostics ignores pre-existing errors and line shifts, and reports new ones', () => {
+  const { diagnosticLines, newDiagnostics } = require('../src/main/guards');
+  const before = diagnosticLines('main.ts(3,7): error TS2322: Type \'number\' is not assignable to type \'string\'.\nsome noise');
+  const after = diagnosticLines([
+    'main.ts(5,7): error TS2322: Type \'number\' is not assignable to type \'string\'.', // moved, not new
+    'main.ts(2,1): error TS2554: Expected 3 arguments, but got 2.',
+    'src/x.ts:4 — TS2304: Cannot find name \'y\'.',
+  ].join('\n'));
+  assert.strictEqual(after.length, 3);
+  assert.deepStrictEqual(newDiagnostics(before, after), [after[1], after[2]]);
+});
+
+test('agent: cross-file guard catches a signature change that breaks an importer, ignoring old errors', { timeout: 120_000 }, async () => {
+  const t = scriptedAgent([
+    { tool: 'read_file', input: { path: 'lib.ts' } },
+    { tool: 'edit_file', input: { path: 'lib.ts', old_string: 'b: number)', new_string: 'b: number, c: number)' } },
+    { tool: 'powershell', input: { command: 'npm test' } },
+    { text: 'Done.' }, // main.ts now calls add() with too few arguments -> guard
+    { tool: 'read_file', input: { path: 'main.ts' } },
+    { tool: 'edit_file', input: { path: 'main.ts', old_string: 'add(1, 2)', new_string: 'add(1, 2, 3)' } },
+    { tool: 'powershell', input: { command: 'npm test' } },
+    { text: 'Fixed the caller.' },
+  ]);
+  fs.writeFileSync(path.join(t.dir, 'lib.ts'), 'export function add(a: number, b: number): number {\n  return a + b;\n}\n');
+  // A pre-existing, unrelated error must not be blamed on the agent.
+  fs.writeFileSync(path.join(t.dir, 'main.ts'), "import { add } from './lib';\nexport const total: number = add(1, 2);\nexport const label: string = 5;\n");
+  try {
+    await t.agent.send('add a third parameter to add', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    const all = JSON.stringify(t.data.messages);
+    const guardMsgs = t.data.messages.filter((m) => m.role === 'user' && JSON.stringify(m.content).includes('cross-file guard'));
+    assert.strictEqual(guardMsgs.length, 1, 'exactly one cross-file nudge');
+    const text = JSON.stringify(guardMsgs[0].content);
+    assert.match(text, /main\.ts/);
+    assert.match(text, /TS2554/);
+    assert.doesNotMatch(text, /TS2322/, 'the pre-existing error is not reported');
+    assert.ok(t.notices.some((n) => /Cross-file guard/.test(n)));
+    assert.match(all, /Fixed the caller/, 'the agent fixed the caller and finished');
+    const afterFix = t.data.messages.slice(t.data.messages.findIndex((m) => JSON.stringify(m.content).includes('add(1, 2, 3)')));
+    assert.ok(!afterFix.some((m) => m.role === 'user' && /DROPs (cross-file|verification) guard/.test(JSON.stringify(m.content))), 'no further nudges once the caller is fixed');
+  } finally { t.agent.dispose(); }
+});

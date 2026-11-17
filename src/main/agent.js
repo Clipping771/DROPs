@@ -318,6 +318,42 @@ class AgentSession {
     }
   }
 
+  /**
+   * Cross-file regression guard, step 1: before the first edit of a TypeScript file in this run, record
+   * the type errors that already exist in it and in the files that import it, so a later check can tell
+   * the errors the agent introduced from the ones that were already there.
+   */
+  captureTsBaseline(run, editPath) {
+    if (!run.cross || !editPath || !/\.[cm]?tsx?$/i.test(editPath) || this.settings().crossFileGuard === false) return;
+    try {
+      const cg = require('./codegraph');
+      const root = this.data.projectDir;
+      const rel = path.relative(root, path.resolve(root, String(editPath))).replace(/\\/g, '/');
+      if (!rel || rel.startsWith('..') || run.cross.baseline.has(rel)) return;
+      const g = cg.buildGraph(root, { cache: true });
+      if (!g.files.has(rel)) { run.cross.baseline.add(rel); return; } // a new file has no "before"
+      const targets = [rel, ...cg.dependents(g, rel, 2).map(([f]) => f)].filter((f) => !run.cross.baseline.has(f)).slice(0, 30);
+      run.cross.before.push(...guards.diagnosticLines(cg.typeCheck(root, targets)));
+      for (const f of targets) run.cross.baseline.add(f);
+    } catch { /* best-effort: never block an edit */ }
+  }
+
+  /** Cross-file regression guard, step 2: type errors in the edited files and their importers that are new since the baseline. */
+  crossFileRegressions(run) {
+    const c = run.cross;
+    if (!c || !c.baseline.size) return [];
+    if (c.checkedGen === c.gen) return c.last;
+    let fresh = [];
+    try {
+      const cg = require('./codegraph');
+      cg.invalidateGraph(this.data.projectDir);
+      const after = guards.diagnosticLines(cg.typeCheck(this.data.projectDir, [...c.baseline].slice(0, 60)));
+      fresh = guards.newDiagnostics(c.before, after);
+    } catch { fresh = []; }
+    c.checkedGen = c.gen; c.last = fresh;
+    return fresh;
+  }
+
   emit(type, payload = {}) { this.deps.send(this.data.id, type, payload); }
   /**
    * Independent completion review: one tool-less call to the same model with the task, the
@@ -670,7 +706,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const run = {
       model: opts.model,
       edited: false, verifiedAfterEdit: true, lastVerify: null, nudges: 0, steps: 0,
-      editedFiles: new Set(), diagErrors: new Map(), guard: new guards.LoopGuard(3), verify: ctxEngine.projectProfile(this.data.projectDir).verify,
+      editedFiles: new Set(), diagErrors: new Map(), cross: { baseline: new Set(), before: [], gen: 0, checkedGen: -1, last: [] }, guard: new guards.LoopGuard(3), verify: ctxEngine.projectProfile(this.data.projectDir).verify,
     };
     const maxSteps = s.maxSteps || 250;
     const compactAtFor = (m) => Math.min(s.compactAt || 180000, Math.floor(providers.contextWindow(m, s) * 0.75));
@@ -788,7 +824,11 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
             const replyText = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
             const how = run.verify.length ? run.verify.map((v) => '`' + v + '`').join(', ') : 'the tests, build or type-checker (at minimum, execute the changed code)';
             let msg = null;
-            if (run.diagErrors.size > 0) {
+            const cross = run.edited && s.crossFileGuard !== false ? this.crossFileRegressions(run) : [];
+            if (cross.length) {
+              msg = `[DROPs cross-file guard] Your edits introduced ${cross.length} new type error${cross.length > 1 ? 's' : ''} that did not exist before you started (code that uses what you changed is now broken):\n${cross.slice(0, 15).join('\n')}\nFix every caller (or keep the old signature compatible), then run verification again before finishing.`;
+              this.emit('notice', { message: `Cross-file guard: ${cross.length} new type error(s) in code affected by the edits; sending the agent back to fix them.` });
+            } else if (run.diagErrors.size > 0) {
               msg = `[DROPs verification guard] Your recent edits left syntax or type errors in ${[...run.diagErrors.keys()].join(', ')}. Fix the diagnostic errors and run verification before finishing.`;
               this.emit('notice', { message: 'Verification guard: diagnostic errors remain in edited files; sending the agent back to fix them.' });
             } else if (run.edited && !run.verifiedAfterEdit) {
@@ -1240,6 +1280,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     }
 
     try {
+      if (prep.kind === 'edit' && u.name !== 'remember') this.captureTsBaseline(run, u.input.path);
       const res = await prep.run((chunk) => this.emit('tool-output', { id: u.id, chunk: shell.redact(chunk).text }));
       const red = shell.redact(typeof res === 'string' ? res : res.text);
       let text = red.count ? `${red.text}\n[DROPs secret shield: ${red.count} secret${red.count > 1 ? 's' : ''} masked]` : red.text;
@@ -1257,6 +1298,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       if (prep.kind === 'edit') {
         const diagKey = editedPath || brand.memoryFile(this.data.projectDir);
         run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false; run.editedFiles.add(diagKey);
+        if (run.cross) run.cross.gen++;
         if (guards.isUiFile(diagKey)) run.uiDirty = true;
         if (/Diagnostics: (SYNTAX ERROR|TYPE ERRORS|INVALID JSON)/.test(text)) run.diagErrors.set(diagKey, text.slice(text.indexOf('Diagnostics:')));
         else run.diagErrors.delete(diagKey);
@@ -1896,7 +1938,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }];
     const run = {
       edited: false, verifiedAfterEdit: true, lastVerify: null, nudges: 0, steps: 0,
-      editedFiles: leadRun.editedFiles, diagErrors: leadRun.diagErrors, guard: new guards.LoopGuard(3), verify: leadRun.verify, escalate: null,
+      editedFiles: leadRun.editedFiles, diagErrors: leadRun.diagErrors, cross: leadRun.cross, guard: new guards.LoopGuard(3), verify: leadRun.verify, escalate: null,
     };
     const ctx = { ...leadCtx, readFiles: new Map(leadCtx.readFiles), onTodos: () => {} };
     const subState = { compat: this.state.compat };

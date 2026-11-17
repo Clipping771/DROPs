@@ -156,4 +156,35 @@ function projectFrames(output, root) {
 /** The engineer's debugging procedure, given when the same check keeps failing. */
 const DEBUG_PROTOCOL = "[DROPs debug] This has failed more than once. Stop changing code by guesswork and debug it like an engineer: 1) Reproduce it with the smallest command and read the whole error and stack trace. 2) Open the first frame in this project's code and trace the bad value back to where it is created. 3) Write two or three possible root causes. 4) Test each one with evidence (read the code, print the value, run a focused test) before editing. 5) Fix the root cause, not the line where it surfaced. 6) Add a regression test that fails without the fix. 7) Run the original failing check again.";
 
-module.exports = { isVerificationCommand, failureKey, LoopGuard, isUiFile, projectFrames, DEBUG_PROTOCOL };
+// ---- Cross-file regression guard ----
+// Diagnostics as printed by codegraph.typeCheck ("file:line — TS2345: msg") or by tsc ("file(l,c): error TS2345: msg").
+const DIAG_LS = /^(.+?):(\d+) — (TS\d+): (.*)$/;
+const DIAG_TSC = /^(.+?)\((\d+),\d+\): error (TS\d+): (.*)$/;
+
+/** The individual diagnostic lines in a type-check report. */
+function diagnosticLines(out) {
+  return String(out || '').split(/\r?\n/).map((l) => l.trim()).filter((l) => DIAG_LS.test(l) || DIAG_TSC.test(l));
+}
+
+/** A line-number-independent identity for a diagnostic, so code moving up or down is not a "new" error. */
+function diagnosticKey(line) {
+  const m = DIAG_LS.exec(line) || DIAG_TSC.exec(line);
+  if (!m) return line;
+  return `${m[1].replace(/\\/g, '/').toLowerCase()}|${m[3]}|${m[4].trim()}`;
+}
+
+/** Diagnostics in `after` that were not already present in `before` (counted, so a second copy of an old error is new). */
+function newDiagnostics(before, after) {
+  const counts = new Map();
+  for (const l of before || []) { const k = diagnosticKey(l); counts.set(k, (counts.get(k) || 0) + 1); }
+  const fresh = [];
+  for (const l of after || []) {
+    const k = diagnosticKey(l);
+    const n = counts.get(k) || 0;
+    if (n > 0) counts.set(k, n - 1);
+    else fresh.push(l);
+  }
+  return fresh;
+}
+
+module.exports = { isVerificationCommand, failureKey, LoopGuard, isUiFile, projectFrames, DEBUG_PROTOCOL, diagnosticLines, diagnosticKey, newDiagnostics };
