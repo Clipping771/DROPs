@@ -4,15 +4,33 @@
 // ---------- composer popup: slash commands + @ mentions ----------
 const Pop = { open: false, items: [], idx: 0, kind: null, start: 0, seq: 0 };
 function closePop() { Pop.open = false; $('#popup').hidden = true; }
+const SPECIAL_MENTIONS = [
+  { k: 'git', d: 'Current git status & recent commits', ic: 'branch' },
+  { k: 'diff', d: 'Uncommitted git diff changes', ic: 'diff' },
+  { k: 'errors', d: 'Project TypeScript/JS errors', ic: 'alert' },
+  { k: 'terminal', d: 'Background process output logs', ic: 'terminal' },
+  { k: 'codebase', d: 'Relevant files for your prompt', ic: 'search' },
+  { k: 'folder:', d: 'List files in a folder (e.g. @folder:src)', ic: 'folder', keepOpen: true },
+  { k: 'url:', d: 'Fetch a web page or docs URL', ic: 'globe', keepOpen: true },
+];
 function drawPop() {
   const p = $('#popup');
   p.hidden = !Pop.open; p.innerHTML = '';
   Pop.items.forEach((it, i) => {
     const d = h('div', 'opt' + (i === Pop.idx ? ' on' : ''));
-    if (Pop.kind === 'slash') d.innerHTML = `${icon('slash', 'xs')}<span class="k"></span><span class="d"></span>`;
-    else d.innerHTML = `${icon('file', 'xs')}<span class="k"></span><span class="d"></span>`;
-    $('.k', d).textContent = Pop.kind === 'slash' ? it.k : baseName(it);
-    $('.d', d).textContent = Pop.kind === 'slash' ? it.d : it;
+    if (Pop.kind === 'slash') {
+      d.innerHTML = `${icon('slash', 'xs')}<span class="k"></span><span class="d"></span>`;
+      $('.k', d).textContent = it.k;
+      $('.d', d).textContent = it.d;
+    } else if (typeof it === 'object' && it.k) {
+      d.innerHTML = `${icon(it.ic || 'sparkle', 'xs')}<span class="k"></span><span class="d"></span>`;
+      $('.k', d).textContent = '@' + it.k;
+      $('.d', d).textContent = it.d;
+    } else {
+      d.innerHTML = `${icon('file', 'xs')}<span class="k"></span><span class="d"></span>`;
+      $('.k', d).textContent = baseName(it);
+      $('.d', d).textContent = it;
+    }
     d.onmousedown = (e) => { e.preventDefault(); pickPop(i); };
     p.appendChild(d);
   });
@@ -26,10 +44,13 @@ function pickPop(i) {
     t.value = ''; closePop(); autosize(); updateComposer(); c.run('');
     return;
   }
-  const f = Pop.items[i];
-  t.value = t.value.slice(0, Pop.start) + '@' + f + ' ' + t.value.slice(t.selectionStart);
-  t.selectionStart = t.selectionEnd = Pop.start + f.length + 2;
+  const item = Pop.items[i];
+  const f = typeof item === 'object' && item.k ? item.k : item;
+  const suffix = typeof item === 'object' && item.keepOpen ? '' : ' ';
+  t.value = t.value.slice(0, Pop.start) + '@' + f + suffix + t.value.slice(t.selectionStart);
+  t.selectionStart = t.selectionEnd = Pop.start + f.length + 1 + suffix.length;
   closePop(); autosize(); updateComposer();
+  if (typeof item === 'object' && item.keepOpen) t.focus();
 }
 function checkPop() {
   const t = $('#input');
@@ -42,12 +63,14 @@ function checkPop() {
   const m = before.match(/(?:^|\s)@([^\s@]*)$/);
   if (!m || !S.project) return closePop();
   Pop.kind = 'file'; Pop.start = t.selectionStart - m[1].length - 1;
+  const q = m[1].toLowerCase();
+  const specials = SPECIAL_MENTIONS.filter((s) => s.k.startsWith(q));
   const my = ++Pop.seq;
   setTimeout(async () => {
     if (my !== Pop.seq) return;
     const res = await api.searchFiles(S.project, m[1]);
     if (my !== Pop.seq) return;
-    Pop.items = res.slice(0, 12); Pop.idx = 0; Pop.open = Pop.items.length > 0; drawPop();
+    Pop.items = [...specials, ...res].slice(0, 12); Pop.idx = 0; Pop.open = Pop.items.length > 0; drawPop();
   }, 80);
 }
 

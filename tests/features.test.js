@@ -250,7 +250,7 @@ test('agent: @file mentions auto-expand and sub-agents redact secrets', async ()
   };
   try {
     const agent = new AgentSession(data, { send: () => {}, save: () => {}, getSettings: () => ({}), getApiKey: () => 'x', getGeminiKey: () => null });
-    const expanded = agent.expandMentions('Please inspect @src/demo.js:2-4 and ignore user@example.com');
+    const expanded = await agent.expandMentions('Please inspect @src/demo.js:2-4 and ignore user@example.com');
     assert.match(expanded, /<mentioned_file path="src\/demo\.js" lines="2-4">/);
     assert.match(expanded, /2\tline2\n3\tline3\n4\tline4/);
     assert.ok(!expanded.includes('example.com'));
@@ -363,5 +363,31 @@ test('file, git, rename_symbol and send_process_input tools work safely with sna
     assert.match(sent, /ECHO:ping/);
   } finally {
     ctx.procs.stopAll();
+  }
+});
+
+test('mentions: @git, @diff, @errors, @terminal, @codebase and @folder expand cleanly', async () => {
+  const { AgentSession } = require('../src/main/agent');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-mentions-'));
+  execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+  fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'sub', 'auth.ts'), 'export function checkUser(x: number): number { return x; }\nconst bad: number = "oops";\n');
+  execFileSync('git', ['add', '.'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'init'], { cwd: dir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(dir, 'sub', 'auth.ts'), 'export function checkUser(x: number): number { return x + 1; }\nconst bad: number = "oops";\n');
+
+  const data = { id: 'm1', title: 't', projectDir: dir, messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {}, usage: {} };
+  const agent = new AgentSession(data, { send: () => {}, save: () => {}, getSettings: () => ({}), getApiKey: () => 'x', getGeminiKey: () => 'x' });
+  try {
+    const out = await agent.expandMentions('check @git @diff @errors @terminal @codebase @folder:sub @url:http://127.0.0.1:9999');
+    assert.match(out, /<mentioned_git>[\s\S]*M sub\/auth\.ts/);
+    assert.match(out, /<mentioned_diff>[\s\S]*return x \+ 1/);
+    assert.match(out, /<mentioned_errors>[\s\S]*auth\.ts/);
+    assert.match(out, /<mentioned_terminal>[\s\S]*no background processes/);
+    assert.match(out, /<mentioned_codebase>[\s\S]*sub\/auth\.ts/);
+    assert.match(out, /<mentioned_folder path="sub">[\s\S]*auth\.ts/);
+    assert.match(out, /<mentioned_url url="http:\/\/127\.0\.0\.1:9999">[\s\S]*Could not fetch:/);
+  } finally {
+    agent.dispose();
   }
 });

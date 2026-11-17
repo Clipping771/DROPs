@@ -459,18 +459,82 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return blocks;
   }
 
-  expandMentions(text) {
+  async expandMentions(text) {
     const out = [];
     const seen = new Set();
+    const root = this.data.projectDir;
+    const addBlock = (tag, body) => {
+      if (!body || out.length >= 8) return;
+      out.push(`<${tag}>\n${shell.redact(String(body)).text.slice(0, 8000)}\n</${tag}>`);
+    };
+
+    // Context mentions: @git, @diff, @errors/@problems, @terminal, @codebase, @folder:<dir>, @url:<http(s)://...>
+    if (/(?:^|\s)@git(?=\s|$|[.,!?])/i.test(text)) {
+      try {
+        const st = require('child_process').execFileSync('git', ['status', '--short', '--branch'], { cwd: root, encoding: 'utf8', timeout: 8000, windowsHide: true }).trim();
+        const lg = require('child_process').execFileSync('git', ['log', '-n', '5', '--oneline'], { cwd: root, encoding: 'utf8', timeout: 8000, windowsHide: true }).trim();
+        addBlock('mentioned_git', `Status:\n${st || '(clean)'}\n\nRecent commits:\n${lg || '(none)'}`);
+      } catch { /* not a git repo */ }
+    }
+    if (/(?:^|\s)@diff(?=\s|$|[.,!?])/i.test(text)) {
+      try {
+        const diff = require('child_process').execFileSync('git', ['diff'], { cwd: root, encoding: 'utf8', timeout: 10000, windowsHide: true }).trim();
+        addBlock('mentioned_diff', diff || '(no uncommitted diff)');
+      } catch { /* not a git repo */ }
+    }
+    if (/(?:^|\s)@(?:errors|problems)(?=\s|$|[.,!?])/i.test(text)) {
+      try {
+        addBlock('mentioned_errors', require('./codegraph').typeCheck(root));
+      } catch (e) { addBlock('mentioned_errors', `Type check error: ${e.message}`); }
+    }
+    if (/(?:^|\s)@terminal(?=\s|$|[.,!?])/i.test(text)) {
+      const list = this.procs?.list?.() || [];
+      const termOut = list.slice(0, 4).map((info) => {
+        const p = this.procs.get(info.id);
+        const tail = shell.stripAnsi((p?.output || '').slice(-3000)).trim();
+        return `[${info.id}] (${info.running ? 'running' : `exited ${info.code}`}) ${info.command}\n${tail || '(no output)'}`;
+      }).join('\n\n');
+      addBlock('mentioned_terminal', termOut || '(no background processes running)');
+    }
+    if (/(?:^|\s)@codebase(?=\s|$|[.,!?])/i.test(text)) {
+      try {
+        const query = text.replace(/@\S+/g, ' ').trim() || 'main entry points';
+        addBlock('mentioned_codebase', require('./codegraph').searchCode(root, query, 12));
+      } catch { /* ignore */ }
+    }
+    for (const fm of text.matchAll(/(?:^|\s)@folder:([^\s]+)/gi)) {
+      if (out.length >= 8) break;
+      const rel = fm[1].replace(/\/+$/, '') || '.';
+      if (seen.has('folder:' + rel)) continue;
+      seen.add('folder:' + rel);
+      try {
+        const abs = tools.resolveInRoot(root, rel);
+        if (fs.statSync(abs).isDirectory()) {
+          const ents = fs.readdirSync(abs, { withFileTypes: true }).slice(0, 150).map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
+          addBlock(`mentioned_folder path="${rel.replace(/\\/g, '/')}"`, ents.join('\n') || '(empty)');
+        }
+      } catch { /* invalid folder */ }
+    }
+    for (const um of text.matchAll(/(?:^|\s)@url:(https?:\/\/[^\s]+)/gi)) {
+      if (out.length >= 8) break;
+      const u = um[1];
+      if (seen.has('url:' + u)) continue;
+      seen.add('url:' + u);
+      try {
+        const r = await (await tools.prepare({ root, readFiles: this.readFiles, snapshot: async () => {}, onChange: () => {}, procs: this.procs }, 'fetch_url', { url: u, max_chars: 6000 })).run();
+        addBlock(`mentioned_url url="${u}"`, typeof r === 'string' ? r : r?.text || '');
+      } catch (e) { addBlock(`mentioned_url url="${u}"`, `Could not fetch: ${e.message}`); }
+    }
+
     const re = /(?:^|\s)@([\w./\\-]+\.[\w]+)(?::(\d+)(?:-(\d+))?)?/g;
     let m;
-    while ((m = re.exec(text)) && out.length < 5) {
+    while ((m = re.exec(text)) && out.length < 10) {
       const [, rel, startStr, endStr] = m;
       const key = `${rel}:${startStr || ''}:${endStr || ''}`;
       if (seen.has(key)) continue;
       seen.add(key);
       let abs;
-      try { abs = tools.resolveInRoot(this.data.projectDir, rel); } catch { continue; }
+      try { abs = tools.resolveInRoot(root, rel); } catch { continue; }
       let st, buf;
       try {
         st = fs.statSync(abs);
@@ -501,7 +565,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     Object.assign(this.data, { model: opts.model, effort: opts.effort, mode: opts.mode });
     if (!this.data.title || this.data.title === 'New session') this.data.title = text.replace(/\s+/g, ' ').trim().slice(0, 64) || 'New session';
 
-    const mentioned = this.expandMentions(text);
+    const mentioned = await this.expandMentions(text);
     const userBlocks = [...images, { type: 'text', text }];
     if (mentioned) userBlocks.push({ type: 'text', text: mentioned });
     // A task built on a requirements document gets a checklist of every requirement up front, so a
