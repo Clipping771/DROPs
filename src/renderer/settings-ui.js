@@ -381,8 +381,8 @@ Trust only projects you know. Any change to .mcp.json asks again.`, 'Trust and s
       applyAppearance(S.settings); applySendKey(); loadCustomCommands(); window.applyI18n?.(S.settings.uiLanguage || 'en');
       await reloadModels();
       if (!currentView()) { $('#modelSel').value = usableModel(S.settings.defaultModel); syncPills(); }
-      if (!$('#hero').hidden) renderHero();
-      updateCtx(); renderUsage(); renderStatus();
+      if (!$('#hero').hidden) Panels.renderHero();
+      updateCtx(); Panels.renderUsage(); Panels.renderStatus();
       close();
       toast('Settings saved');
     };

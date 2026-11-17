@@ -280,3 +280,47 @@ test('parallel edit subagents isolate readFiles so one worker cannot silently ov
     assert.equal(fs.readFileSync(file, 'utf8'), 'worker1\nline2\n', 'worker 1 edit was preserved');
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
+
+test('a single long task that outgrows the context is compacted inside the turn, keeping the task, plan, todos and tool pairing', { timeout: 60_000 }, async () => {
+  const { agent, data, events } = session({ compactAt: 2000 });
+  const realComplete = providers.complete;
+  let summaries = 0;
+  providers.complete = async () => `## Goal\nsummary ${++summaries}`;
+  const TASK = 'Refactor the whole billing module (TASK-MARKER-42) without changing behaviour.';
+  const STEPS = 45;
+  let step = 0;
+  let lastSystem = '';
+  providers.callModel = async ({ system }) => {
+    lastSystem = system;
+    step++;
+    const usage = { input_tokens: 5000, output_tokens: 50 }; // always over the 2000-token budget
+    if (step === 1) return { content: [{ type: 'tool_use', id: 's1', name: 'save_plan', input: { goal: 'Billing refactor', steps: ['map', 'move', 'verify'], files: ['a.txt'], verification: 'npm test' } }], model: 'fake', stop_reason: 'tool_use', usage };
+    if (step === 2) return { content: [{ type: 'tool_use', id: 'td', name: 'todo_write', input: { todos: [{ content: 'Map billing callers', status: 'in_progress' }, { content: 'Move invoice code', status: 'pending' }] } }], model: 'fake', stop_reason: 'tool_use', usage };
+    if (step < STEPS) return { content: [{ type: 'tool_use', id: `g${step}`, name: 'glob', input: { pattern: `**/*${step}*` } }], model: 'fake', stop_reason: 'tool_use', usage };
+    return { content: [{ type: 'text', text: 'Refactor finished.' }], model: 'fake', stop_reason: 'end_turn', usage };
+  };
+  try {
+    await agent.send(TASK, opts);
+    assert.equal(agent.busy, false, 'the long task ran to the end');
+    assert.equal(step, STEPS, 'every step ran');
+    const inTurn = data.compactions.filter((c) => c.reason === 'auto-in-turn');
+    assert.ok(inTurn.length >= 2, `compacted inside the turn more than once (got ${inTurn.length})`);
+    assert.ok(data.messages.length < 20, `context stays bounded (got ${data.messages.length} messages)`);
+    const first = textOf(data.messages[0]);
+    assert.ok(first.includes('TASK-MARKER-42'), 'the task text survives compaction word for word');
+    assert.match(first, /Map billing callers/, 'the todo list survives compaction');
+    assert.match(first, /saved implementation plan/i);
+    assert.match(lastSystem, /Active Implementation Plan[\s\S]*Billing refactor/, 'the saved plan stays pinned in the system prompt');
+    // Every tool result still follows the assistant message that made the call, and roles alternate.
+    for (let i = 1; i < data.messages.length; i++) {
+      assert.notEqual(data.messages[i].role, data.messages[i - 1].role, `roles alternate at ${i}`);
+      const results = Array.isArray(data.messages[i].content) ? data.messages[i].content.filter((b) => b.type === 'tool_result') : [];
+      if (!results.length) continue;
+      const ids = new Set(data.messages[i - 1].content.filter((b) => b.type === 'tool_use').map((b) => b.id));
+      for (const r of results) assert.ok(ids.has(r.tool_use_id), `tool result ${r.tool_use_id} keeps its call`);
+    }
+    assert.ok(!events.some((e) => e.type === 'error'), 'no errors');
+    assert.equal(data.turns[0].msgIndex, 0, 'the running turn stays rewindable');
+    assert.equal(data.messages[data.messages.length - 1].role, 'assistant');
+  } finally { agent.dispose(); providers.callModel = realCallModel; providers.complete = realComplete; }
+});

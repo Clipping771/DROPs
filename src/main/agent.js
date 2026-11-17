@@ -120,6 +120,9 @@ const fg = require('fast-glob');
 const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app closed or the request failed).';
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
+// In-turn compaction: messages kept verbatim, and how long a turn must be before it can be compacted.
+const IN_TURN_KEEP = 6;
+const IN_TURN_MIN_MESSAGES = 16;
 
 const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF } = require('./agent-defs');
 
@@ -758,9 +761,18 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         const over = budgetHit();
         if (over) { this.emit('error', { message: `${over} Send "continue" to keep going, or raise the limit in Settings.` }); this.sealTranscript(); break; }
 
-        if (this.data.usage.context > compactAt && turn.msgIndex > 2) {
-          await this.compact(opts, signal, 'auto');
-          system = this.systemPrompt(opts.model, text);
+        if (this.data.usage.context > compactAt) {
+          // Earlier turns go first; a single long task that alone outgrows the budget is compacted
+          // inside the turn (the task text and the latest steps are kept verbatim).
+          const inTurn = !(turn.msgIndex > 2) && this.data.messages.length - (turn.msgIndex ?? 0) > IN_TURN_MIN_MESSAGES;
+          if (turn.msgIndex > 2 || inTurn) {
+            try {
+              if (await this.compact(opts, signal, 'auto', { inTurn })) system = this.systemPrompt(opts.model, text);
+            } catch (e) {
+              if (signal.aborted) throw e;
+              this.emit('notice', { message: `Context compaction failed (${e.message}); continuing with the full context.` });
+            }
+          }
         }
 
         this.emit('iteration-start', {});
@@ -2123,10 +2135,21 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   stop() { this.abort?.abort(); }
 
   // ---------- compaction ----------
-  async compact(opts, signal = new AbortController().signal, reason = 'manual') {
+  /**
+   * Replaces older messages with a summary. `inTurn` compacts inside the running task: the latest
+   * IN_TURN_KEEP messages stay verbatim (starting at an assistant message so every tool result keeps
+   * its tool call), and the task text is carried over word for word.
+   */
+  async compact(opts, signal = new AbortController().signal, reason = 'manual', { inTurn = false } = {}) {
     const msgs = this.data.messages;
     const lastTurn = this.data.turns[this.data.turns.length - 1];
-    const cut = reason === 'manual' ? msgs.length : (lastTurn?.msgIndex ?? msgs.length);
+    let cut;
+    if (reason === 'manual') cut = msgs.length;
+    else if (inTurn) {
+      cut = Math.max(0, msgs.length - IN_TURN_KEEP);
+      while (cut < msgs.length && msgs[cut].role !== 'assistant') cut++;
+      if (cut >= msgs.length) return false;
+    } else cut = lastTurn?.msgIndex ?? msgs.length;
     if (cut <= 2) return false;
     const head = msgs.slice(0, cut);
     const tail = msgs.slice(cut);
@@ -2137,21 +2160,31 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     }
     const changed = Object.keys(this.data.changes || {});
     if (changed.length) stateLines.push('Files modified in this session: ' + changed.join(', '));
+    const openReqs = (this.data.requirements || []).filter((r) => r.status !== 'verified');
+    if (openReqs.length) stateLines.push(`Requirements not verified yet (${openReqs.length} of ${this.data.requirements.length}): ${openReqs.slice(0, 30).map((r) => r.id).join(', ')}`);
+    if (this.data.plan?.goal) stateLines.push(`A saved implementation plan is pinned in the system prompt (goal: ${this.data.plan.goal}).`);
     const stateNote = stateLines.length ? `\n\n<session_state>\n${stateLines.join('\n')}\n</session_state>` : '';
     const summary = await providers.complete({
       model: opts.model, system: ctxEngine.SUMMARY_SYSTEM, deps: this.deps, signal,
       prompt: `Compress this coding session transcript into the handoff document.${stateNote}\n\n<transcript>\n${ctxEngine.transcriptText(head)}\n</transcript>`,
     });
     if (!summary) throw new Error('Compaction produced an empty summary.');
+    // The task being worked on and the session state are copied exactly, not left to the summarizer.
+    const taskMsg = inTurn && lastTurn?.msgIndex != null && lastTurn.msgIndex < cut ? msgs[lastTurn.msgIndex] : null;
+    const taskText = taskMsg ? (typeof taskMsg.content === 'string' ? taskMsg.content : (taskMsg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')).trim() : '';
+    const pinned = `${taskText ? `\n\n## Current task (verbatim — still in progress)\n${taskText.slice(0, 8000)}` : ''}${stateNote}`;
     this.data.archive.push(...head.filter((m) => !m._summary && !m._summaryAck));
-    this.data.messages = [
-      { role: 'user', content: [{ type: 'text', text: `${SUMMARY_PREFIX}\n\n${summary}` }], _summary: true },
-      { role: 'assistant', content: [{ type: 'text', text: 'Understood. I have the context from the summary and will continue from there.' }], _summaryAck: true },
-      ...tail,
-    ];
-    for (const t of this.data.turns) t.msgIndex = t.msgIndex == null || t.msgIndex < cut ? null : t.msgIndex - cut + 2;
-    this.data.compactions.push({ at: Date.now(), summary, archived: head.length, reason });
-    this.data.usage.context = Math.round(summary.length / 4);
+    const summaryMsg = { role: 'user', content: [{ type: 'text', text: `${SUMMARY_PREFIX}\n\n${summary}${pinned}` }], _summary: true };
+    // In a turn the kept tail starts with an assistant message, so no acknowledgement goes in between.
+    this.data.messages = inTurn
+      ? [summaryMsg, ...tail]
+      : [summaryMsg, { role: 'assistant', content: [{ type: 'text', text: 'Understood. I have the context from the summary and will continue from there.' }], _summaryAck: true }, ...tail];
+    const offset = inTurn ? 1 : 2;
+    for (const t of this.data.turns) t.msgIndex = t.msgIndex == null || t.msgIndex < cut ? null : t.msgIndex - cut + offset;
+    // The running turn still owns its file snapshot: rewinding it now starts from the summary.
+    if (inTurn && lastTurn) lastTurn.msgIndex = 0;
+    this.data.compactions.push({ at: Date.now(), summary, archived: head.length, reason: inTurn ? 'auto-in-turn' : reason });
+    this.data.usage.context = Math.round((summaryMsg.content[0].text.length + ctxEngine.transcriptText(tail).length) / 4);
     this.save(true);
     this.emit('compacted', { summary, reason, archived: head.length, usage: this.data.usage });
     return true;
