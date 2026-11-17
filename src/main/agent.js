@@ -264,7 +264,58 @@ class AgentSession {
     this.state = { compat: false };
     this.steerQueue = [];
     this.saveTimer = null;
+    this.fileLocks = new Map();
     this.procs = new tools.ProcessManager(data.projectDir, (ev) => this.emit('proc', ev));
+  }
+
+  /** Normalized lock keys for file-mutating tools so parallel edit subagents never race on the same file. */
+  editLockKeys(name, input) {
+    if (!input || typeof input !== 'object') return [];
+    const norm = (p) => {
+      const abs = path.resolve(this.data.projectDir, String(p));
+      return process.platform === 'win32' ? abs.toLowerCase() : abs;
+    };
+    if (name === 'rename_symbol') return ['*'];
+    if (name === 'move_file') return [input.from, input.to].filter(Boolean).map(norm);
+    if (['edit_file', 'multi_edit', 'write_file', 'notebook_edit', 'delete_file'].includes(name) && input.path) {
+      return [norm(input.path)];
+    }
+    return [];
+  }
+
+  /** Serializes concurrent mutations targeting the same file(s); unrelated files proceed in parallel. */
+  async withFileLocks(keys, signal, fn) {
+    if (!keys.length) return fn();
+    const uniq = [...new Set(keys)].sort();
+    const wait = (p) => (!signal ? p : new Promise((resolve, reject) => {
+      if (signal.aborted) return reject(new Error('aborted'));
+      const onAbort = () => reject(new Error('aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      p.then(
+        (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+        (e) => { signal.removeEventListener('abort', onAbort); reject(e); }
+      );
+    }));
+    const releases = [];
+    const acquire = async (k) => {
+      while (this.fileLocks.has(k)) await wait(this.fileLocks.get(k));
+      let release;
+      const p = new Promise((r) => { release = r; });
+      this.fileLocks.set(k, p);
+      releases.push(() => { if (this.fileLocks.get(k) === p) this.fileLocks.delete(k); release(); });
+    };
+    try {
+      if (uniq.includes('*')) {
+        while (this.fileLocks.size > 0) await wait(Promise.all([...this.fileLocks.values()]));
+        await acquire('*');
+      } else {
+        while (this.fileLocks.has('*')) await wait(this.fileLocks.get('*'));
+        for (const k of uniq) await acquire(k);
+      }
+      return await fn();
+    } finally {
+      for (const rel of releases.reverse()) rel();
+    }
   }
 
   emit(type, payload = {}) { this.deps.send(this.data.id, type, payload); }
@@ -1137,8 +1188,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'check_requirement') return this.runCheckRequirement(u, meta, ctx, run);
     if (isMcp) return this.runMcp(u, meta, ctx, run, fail);
 
+    return this.withFileLocks(this.editLockKeys(u.name, u.input), ctx.signal, async () => {
     let prep;
-    try { prep = await tools.prepare(ctx, u.name, u.input); } catch (e) { this.emit('tool-start', { id: u.id, name: u.name, input: u.input, summary: u.input?.path || '' }); return fail(e.message); }
+    try { prep = await tools.prepare(ctx, u.name, u.input); } catch (e) { this.emit('tool-start', { id: u.id, name: u.name, input: u.input, summary: u.input?.path || u.input?.to || '' }); return fail(e.message); }
     meta.summary = prep.summary;
     if (prep.preview) meta.diff = prep.preview;
     this.emit('tool-start', { id: u.id, name: u.name, input: u.input, summary: prep.summary, diff: prep.preview });
@@ -1198,13 +1250,14 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       run.guard.record(u.name, u.input, !isError);
       this.autoLesson(lessons.fromToolResult(u.name, u.input, text, !!this.procs.sandbox), u.name);
       if (isError) { run.errStreak = (run.errStreak || 0) + 1; if (run.errStreak >= 3) { run.errStreak = 0; run.escalate?.('it hit repeated tool errors'); } } else run.errStreak = 0;
-      if (prep.kind === 'edit' && !isError && ctx.turn && u.input.path) {
-        try { const abs = tools.resolveInRoot(this.data.projectDir, u.input.path); (ctx.turn.after ||= {})[abs] = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null; } catch { /* outside the project */ }
+      const editedPath = u.input.path || u.input.to || u.input.file;
+      if (prep.kind === 'edit' && !isError && ctx.turn && editedPath) {
+        try { const abs = tools.resolveInRoot(this.data.projectDir, editedPath); (ctx.turn.after ||= {})[abs] = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null; } catch { /* outside the project */ }
       }
       if (prep.kind === 'edit') {
-        run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false; run.editedFiles.add(u.input.path || brand.memoryFile(this.data.projectDir));
-        if (guards.isUiFile(u.input.path || '')) run.uiDirty = true;
-        const diagKey = u.input.path || brand.memoryFile(this.data.projectDir);
+        const diagKey = editedPath || brand.memoryFile(this.data.projectDir);
+        run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false; run.editedFiles.add(diagKey);
+        if (guards.isUiFile(diagKey)) run.uiDirty = true;
         if (/Diagnostics: (SYNTAX ERROR|TYPE ERRORS|INVALID JSON)/.test(text)) run.diagErrors.set(diagKey, text.slice(text.indexOf('Diagnostics:')));
         else run.diagErrors.delete(diagKey);
       }
@@ -1242,6 +1295,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       this.emit('tool-end', { id: u.id, ok: !isError, output: meta.output, diff: prep.preview, ...(images ? { images: images.map((b) => ({ source: b.source })) } : {}) });
       return { type: 'tool_result', tool_use_id: u.id, content: text, ...(isError ? { is_error: true } : {}), ...(images ? { _images: images } : {}) };
     } catch (e) { return fail(e.message); }
+    });
   }
 
   // Web search: Google grounding when a Gemini key is set, otherwise a keyless DuckDuckGo search.
@@ -1844,7 +1898,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       edited: false, verifiedAfterEdit: true, lastVerify: null, nudges: 0, steps: 0,
       editedFiles: leadRun.editedFiles, diagErrors: leadRun.diagErrors, guard: new guards.LoopGuard(3), verify: leadRun.verify, escalate: null,
     };
-    const ctx = { ...leadCtx, onTodos: () => {} };
+    const ctx = { ...leadCtx, readFiles: new Map(leadCtx.readFiles), onTodos: () => {} };
     const subState = { compat: this.state.compat };
     try {
       for (let i = 0; i < 40; i++) {

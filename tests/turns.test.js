@@ -195,3 +195,88 @@ test('a scheduled run is not held forever by a question nobody answers', { timeo
     assert.equal(agent.busy, false, 'the run finished');
   } finally { agent.dispose(); providers.callModel = realCallModel; }
 });
+
+test('withFileLocks serializes same-file edits and allows different files in parallel', async () => {
+  const { agent } = session();
+  try {
+    const order = [];
+    let sameActive = 0;
+    let maxSameActive = 0;
+    const lockA1 = agent.withFileLocks(agent.editLockKeys('edit_file', { path: 'a.txt' }), null, async () => {
+      sameActive++; maxSameActive = Math.max(maxSameActive, sameActive);
+      order.push('a1-start');
+      await new Promise((r) => setTimeout(r, 35));
+      order.push('a1-end');
+      sameActive--;
+    });
+    const lockA2 = agent.withFileLocks(agent.editLockKeys('write_file', { path: './a.txt' }), null, async () => {
+      sameActive++; maxSameActive = Math.max(maxSameActive, sameActive);
+      order.push('a2-start');
+      await new Promise((r) => setTimeout(r, 10));
+      order.push('a2-end');
+      sameActive--;
+    });
+    let bRanWhileAHeld = false;
+    const lockB = agent.withFileLocks(agent.editLockKeys('edit_file', { path: 'b.txt' }), null, async () => {
+      if (sameActive > 0) bRanWhileAHeld = true;
+      order.push('b');
+    });
+    await Promise.all([lockA1, lockA2, lockB]);
+    assert.equal(maxSameActive, 1, 'same-file locks never overlap');
+    assert.equal(bRanWhileAHeld, true, 'unrelated file proceeds without waiting');
+    assert.ok(order.indexOf('a1-end') < order.indexOf('a2-start'), `serialized order: ${order.join(',')}`);
+  } finally { agent.dispose(); }
+});
+
+test('parallel edit subagents isolate readFiles so one worker cannot silently overwrite another', async () => {
+  const { agent, data } = session();
+  const file = path.join(data.projectDir, 'shared.txt');
+  fs.writeFileSync(file, 'line1\nline2\n');
+  let worker1Step = 0;
+  let worker2Step = 0;
+  let worker2EditError = '';
+  providers.callModel = async ({ system, messages }) => {
+    const last = messages[messages.length - 1];
+    const promptText = Array.isArray(last?.content) ? last.content.map((b) => b.text || b.content || '').join(' ') : String(last?.content || '');
+    if (!system.includes('You are an edit sub-agent')) {
+      if (messages.length === 1) {
+        return {
+          content: [
+            { type: 'tool_use', id: 'w1', name: 'task', input: { description: 'edit 1', mode: 'edit', prompt: 'WORKER_ONE' } },
+            { type: 'tool_use', id: 'w2', name: 'task', input: { description: 'edit 2', mode: 'edit', prompt: 'WORKER_TWO' } },
+          ],
+          model: 'fake', stop_reason: 'tool_use', usage: {},
+        };
+      }
+      return { content: [{ type: 'text', text: 'All done.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+    }
+    const firstUser = messages[0]?.content?.[0]?.text || '';
+    if (firstUser.includes('WORKER_ONE')) {
+      worker1Step++;
+      if (worker1Step === 1) return { content: [{ type: 'tool_use', id: 'r1', name: 'read_file', input: { path: 'shared.txt' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+      if (worker1Step === 2) {
+        await new Promise((r) => setTimeout(r, 25)); // let worker 2 read before worker 1 writes
+        return { content: [{ type: 'tool_use', id: 'e1', name: 'write_file', input: { path: 'shared.txt', content: 'worker1\nline2\n' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+      }
+      return { content: [{ type: 'text', text: 'worker1 done' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+    }
+    if (firstUser.includes('WORKER_TWO')) {
+      worker2Step++;
+      if (worker2Step === 1) return { content: [{ type: 'tool_use', id: 'r2', name: 'read_file', input: { path: 'shared.txt' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+      if (worker2Step === 2) {
+        await new Promise((r) => setTimeout(r, 60)); // attempt write after worker 1 wrote
+        return { content: [{ type: 'tool_use', id: 'e2', name: 'write_file', input: { path: 'shared.txt', content: 'worker2\nline2\n' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+      }
+      if (worker2Step === 3) {
+        worker2EditError = promptText;
+        return { content: [{ type: 'text', text: 'worker2 saw conflict' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+      }
+    }
+    return { content: [{ type: 'text', text: 'done' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('run two edit workers', opts);
+    assert.match(worker2EditError, /changed since you read it|Read.*before/i, `worker 2 should be blocked from stale overwrite, got: ${worker2EditError}`);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'worker1\nline2\n', 'worker 1 edit was preserved');
+  } finally { agent.dispose(); providers.callModel = realCallModel; }
+});
