@@ -29,6 +29,7 @@ const ASK_USER_DEF = {
     properties: {
       question: { type: 'string', description: 'One clear question' },
       options: { type: 'array', items: { type: 'string' }, description: '2-4 short choices (optional)' },
+      multi_select: { type: 'boolean', description: 'Allow selecting multiple options (default false)' },
     },
     required: ['question'],
   },
@@ -173,7 +174,69 @@ const TYPE_CHECK_DEF = {
   },
 };
 
-const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF];
+const SWARM_DEF = {
+  name: 'swarm',
+  description: 'Shared peer-to-peer message board for coordinating multiple parallel agents/workers. Post updates, read messages from other workers, or check active board status.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['post', 'read', 'status'], description: 'Board action' },
+      from: { type: 'string', description: 'Sender agent name (e.g. "lead" or "worker-1")' },
+      to: { type: 'string', description: 'Optional recipient ("all" or specific worker)' },
+      message: { type: 'string', description: 'Message content for action="post"' },
+    },
+    required: ['action'],
+  },
+};
+
+const WORKFLOW_DEF = {
+  name: 'run_workflow',
+  description: 'Execute a staged multi-agent workflow: stages run sequentially, while tasks inside each stage run in parallel (with per-file locking for edit tasks).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      stages: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            tasks: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  description: { type: 'string' },
+                  prompt: { type: 'string' },
+                  mode: { type: 'string', enum: ['research', 'edit'] },
+                },
+                required: ['description', 'prompt'],
+              },
+            },
+          },
+          required: ['tasks'],
+        },
+      },
+    },
+    required: ['stages'],
+  },
+};
+
+const IMAGE_GEN_DEF = {
+  name: 'generate_image',
+  description: 'Generate a PNG image from a text prompt using Gemini Imagen and save it inside the project folder.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: 'Detailed visual prompt' },
+      path: { type: 'string', description: 'Relative output path inside the project (e.g. "assets/hero.png")' },
+      aspect_ratio: { type: 'string', description: 'Optional aspect ratio (e.g. "16:9", "1:1", "4:3")' },
+    },
+    required: ['prompt', 'path'],
+  },
+};
+
+const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF];
 for (const d of ALL) tools.registerDef(d);
 
-module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF };
+module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF };

@@ -1003,10 +1003,25 @@ function showQuestion(v, ev) {
     p.remove(); v.waiting.delete(ev.toolId); Panels.markSession(v);
     c.setStatus('running'); setWorking(v, true, 'Working');
   };
-  for (const o of ev.options || []) { const b = h('button', 'q-opt'); b.textContent = o; b.onclick = () => answer(o); opts.appendChild(b); }
+  const selected = new Set();
+  for (const o of ev.options || []) {
+    const b = h('button', 'q-opt');
+    b.textContent = o;
+    b.onclick = () => {
+      if (ev.multiSelect) {
+        if (selected.has(o)) selected.delete(o); else selected.add(o);
+        b.classList.toggle('selected', selected.has(o));
+      } else answer(o);
+    };
+    opts.appendChild(b);
+  }
   const fb = h('input'); fb.placeholder = ev.options?.length ? 'Or type your own answer…' : 'Type your answer…';
-  fb.onkeydown = (e) => { if (e.key === 'Enter' && fb.value.trim()) answer(fb.value.trim()); };
-  const send = h('button', 'btn sm primary', 'Answer'); send.onclick = () => fb.value.trim() && answer(fb.value.trim());
+  const submit = () => {
+    const parts = [...selected, fb.value.trim()].filter(Boolean);
+    if (parts.length) answer(parts.join(', '));
+  };
+  fb.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+  const send = h('button', 'btn sm primary', 'Answer'); send.onclick = submit;
   const skip = h('button', 'btn sm ghost', 'Skip'); skip.title = 'Let the agent decide'; skip.onclick = () => answer('');
   btns.append(skip, send);
   if (opts.children.length) p.appendChild(opts);

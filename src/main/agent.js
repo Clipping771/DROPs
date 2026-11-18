@@ -124,7 +124,7 @@ const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older m
 const IN_TURN_KEEP = 6;
 const IN_TURN_MIN_MESSAGES = 16;
 
-const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF } = require('./agent-defs');
+const { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF } = require('./agent-defs');
 
 // Every request resends the whole history, so only the newest few images a tool read stay in it;
 // older ones become a short note (the agent can read the file again if it needs to).
@@ -268,6 +268,7 @@ class AgentSession {
     this.steerQueue = [];
     this.saveTimer = null;
     this.fileLocks = new Map();
+    this.swarmBoard = [];
     this.procs = new tools.ProcessManager(data.projectDir, (ev) => this.emit('proc', ev));
   }
 
@@ -499,7 +500,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   }
 
   toolDefs(model) {
-    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
+    const defs = [...tools.definitions(), TASK_DEF, ASK_USER_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, FIND_BREAK_DEF, AUDIT_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WEB_SEARCH_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF, ...(this.data.requirements?.length ? [CHECK_REQUIREMENT_DEF] : [])];
     // Older sessions called the shell tool "powershell": keep the name valid for their history.
     if (this.data.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use' && b.name === 'powershell'))) {
       defs.push({ ...tools.definitions(new Set(['shell']))[0], name: 'powershell' });
@@ -1164,6 +1165,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     if (u.name === 'task') return u.input.mode === 'edit' ? this.runWorker(u, meta, opts, ctx, run) : this.runTask(u, meta, opts);
     if (u.name === 'web_search') return this.runWebSearch(u, meta, opts, ctx.signal);
     if (u.name === 'ask_user') return this.runAskUser(u, meta);
+    if (u.name === 'swarm') return this.runSwarm(u, meta);
+    if (u.name === 'run_workflow') return this.runWorkflow(u, meta, opts, ctx, run);
+    if (u.name === 'generate_image') return this.runGenerateImage(u, meta, ctx.signal);
     if (u.name === 'wrap_up') return this.runWrapUp(u, meta);
     if (u.name === 'mark_chapter') {
       const title = String(u.input.title || '').trim().slice(0, 60) || 'Chapter';
@@ -1672,13 +1676,97 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const r = await new Promise((resolve) => {
       const reqId = `${u.id}:ask`;
       this.pending.set(reqId, resolve);
-      this.emit('question', { reqId, toolId: u.id, question, options });
+      this.emit('question', { reqId, toolId: u.id, question, options, multiSelect: !!u.input.multi_select });
     });
     const answer = r.decision === 'answer' ? String(r.feedback || '').trim() : '';
     const content = answer ? `The user answered: ${answer}` : 'The user did not answer. Make a reasonable assumption, state it clearly in your report, and continue.';
     meta.status = 'done'; meta.output = answer ? `Answer: ${answer}` : 'No answer';
     this.emit('tool-end', { id: u.id, ok: true, output: meta.output });
     return { type: 'tool_result', tool_use_id: u.id, content };
+  }
+
+  /** Shared peer-to-peer message board for coordinating parallel subagents. */
+  async runSwarm(u, meta) {
+    const action = String(u.input.action || 'read');
+    meta.summary = action;
+    this.emit('tool-start', { id: u.id, name: 'swarm', input: u.input, summary: action });
+    let out = '';
+    if (action === 'post') {
+      const entry = { at: Date.now(), from: String(u.input.from || 'agent'), to: String(u.input.to || 'all'), message: String(u.input.message || '').slice(0, 4000) };
+      this.swarmBoard.push(entry);
+      if (this.swarmBoard.length > 100) this.swarmBoard.shift();
+      out = `Posted to swarm board (${this.swarmBoard.length} messages).`;
+    } else if (action === 'status') {
+      out = `Swarm board: ${this.swarmBoard.length} message(s), active file locks: ${this.fileLocks.size}.`;
+    } else {
+      const recent = this.swarmBoard.slice(-20);
+      out = recent.length
+        ? recent.map((m) => `[${m.from} -> ${m.to}] ${m.message}`).join('\n')
+        : '(swarm board is empty)';
+    }
+    meta.status = 'done'; meta.output = out;
+    this.emit('tool-end', { id: u.id, ok: true, output: out });
+    return { type: 'tool_result', tool_use_id: u.id, content: out };
+  }
+
+  /** Staged parallel/pipeline workflow runner reusing runTask and runWorker. */
+  async runWorkflow(u, meta, opts, ctx, run) {
+    const stages = Array.isArray(u.input.stages) ? u.input.stages : [];
+    meta.summary = `${stages.length} stage(s)`;
+    this.emit('tool-start', { id: u.id, name: 'run_workflow', input: u.input, summary: meta.summary });
+    if (isPlanMode(this.data.mode) && stages.some((st) => (st.tasks || []).some((t) => t.mode === 'edit'))) {
+      meta.status = 'error'; meta.output = 'Plan mode blocks edit workflow stages.';
+      this.emit('tool-end', { id: u.id, ok: false, output: meta.output });
+      return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: meta.output };
+    }
+    const stageReports = [];
+    for (let si = 0; si < stages.length; si++) {
+      if (ctx.signal?.aborted) throw new Error('aborted');
+      const st = stages[si];
+      const list = Array.isArray(st.tasks) ? st.tasks : [];
+      const res = await Promise.all(list.map((t, ti) => {
+        const subCall = { id: `${u.id}:s${si}:${ti}`, name: 'task', input: { description: t.description, prompt: t.prompt, mode: t.mode || 'research' } };
+        const subMeta = { name: 'task', input: subCall.input, status: 'running', output: '' };
+        this.data.toolMeta[subCall.id] = subMeta;
+        return t.mode === 'edit' ? this.runWorker(subCall, subMeta, opts, ctx, run) : this.runTask(subCall, subMeta, opts);
+      }));
+      stageReports.push(`## Stage ${si + 1}${st.name ? `: ${st.name}` : ''}\n` + res.map((r, ti) => `### ${list[ti].description}\n${r.content}`).join('\n\n'));
+    }
+    const out = stageReports.join('\n\n') || 'Workflow completed (0 stages).';
+    meta.status = 'done'; meta.output = out.slice(0, 20000);
+    this.emit('tool-end', { id: u.id, ok: true, output: meta.output });
+    return { type: 'tool_result', tool_use_id: u.id, content: out };
+  }
+
+  /** Generates a PNG image via Gemini Imagen and saves it inside the project root. */
+  async runGenerateImage(u, meta, signal) {
+    const rel = String(u.input.path || 'generated.png');
+    meta.summary = rel;
+    this.emit('tool-start', { id: u.id, name: 'generate_image', input: u.input, summary: rel });
+    const failImg = (msg) => { meta.status = 'error'; meta.output = msg; this.emit('tool-end', { id: u.id, ok: false, output: msg }); return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: msg }; };
+    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return failImg('Read-only mode blocks writing generated images.');
+    const key = this.deps.getGeminiKey?.();
+    if (!key) return failImg('generate_image requires a Gemini API key in Settings → API keys & providers.');
+    try {
+      const abs = tools.resolveInRoot(this.data.projectDir, rel);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${encodeURIComponent(key)}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal,
+        body: JSON.stringify({ instances: [{ prompt: String(u.input.prompt || '') }], parameters: { sampleCount: 1, ...(u.input.aspect_ratio ? { aspectRatio: u.input.aspect_ratio } : {}) } }),
+      });
+      if (!resp.ok) return failImg(`Image API error HTTP ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+      const json = await resp.json();
+      const b64 = json?.predictions?.[0]?.bytesBase64Encoded;
+      if (!b64) return failImg('Image API returned no image data.');
+      await fsp.mkdir(path.dirname(abs), { recursive: true });
+      await fsp.writeFile(abs, Buffer.from(b64, 'base64'));
+      const out = `Generated image saved to ${rel}.`;
+      meta.status = 'done'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok: true, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, content: out };
+    } catch (e) { return failImg(e.message); }
   }
 
   // ---------- independent QA: checks written from the spec alone, before any code is seen ----------

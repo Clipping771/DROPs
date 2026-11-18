@@ -104,7 +104,7 @@ window.SettingsUI = (() => {
         </section>
         <section class="set-sec" data-sp="tools"><h2>Tools & MCP</h2><p class="set-desc">Connect GitHub, databases, issue trackers, browsers and more through the Model Context Protocol. Tools appear to the agent as <code>mcp__server__tool</code> and ask for permission unless the server has <code>"trust": true</code>.</p>
           <div class="set-card">
-            ${setItem('MCP servers (JSON)', '<span id="mcpErr">Same format as Claude Desktop and VS Code: stdio servers use "command" + "args" (+ "env"); remote servers use "url".</span>', '<div id="mcpStatus" class="mcp-list"></div><textarea class="textarea mono" id="setMcp" rows="9" spellcheck="false"></textarea>', 'stack')}
+            ${setItem('MCP servers (JSON)', '<span id="mcpErr">Same format as Claude Desktop and VS Code: stdio servers use "command" + "args" (+ "env"); remote servers use "url".</span>', '<div id="mcpPresets" class="mcp-presets"></div><div id="mcpStatus" class="mcp-list"></div><textarea class="textarea mono" id="setMcp" rows="9" spellcheck="false"></textarea>', 'stack')}
             ${setItem("Load the project's .mcp.json", 'Also connect servers listed in the open project. Only for repositories you trust: they can start programs.', tgl('setProjMcp'))}
           </div>
           <div class="set-card"><div class="set-sub">Custom slash commands</div>
@@ -212,6 +212,29 @@ window.SettingsUI = (() => {
     val('#setSendKey', s.sendKey || 'enter'); val('#setChatSize', s.chatSize || 'default'); val('#setChatWidth', s.chatWidth || 'default'); val('#setDensity', s.density || 'default');
     val('#setMcp', Object.keys(s.mcpServers || {}).length ? JSON.stringify(s.mcpServers, null, 2) : '');
     $('#setMcp', m).placeholder = MCP_EXAMPLE;
+    const PRESETS = {
+      filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', S.project || '.'] },
+      github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: 'YOUR_TOKEN' } },
+      playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest'] },
+      postgres: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://localhost:5432/mydb'] },
+      context7: { command: 'npx', args: ['-y', '@upstash/context7-mcp@latest'] },
+    };
+    const pBar = $('#mcpPresets', m);
+    if (pBar) {
+      pBar.innerHTML = '<span class="muted" style="font-size:12px">Quick add:</span>';
+      for (const [k, cfg] of Object.entries(PRESETS)) {
+        const b = h('button', 'btn ghost sm', `+ ${k}`);
+        b.onclick = () => {
+          let cur = {};
+          try { const raw = $('#setMcp', m).value.trim(); if (raw) cur = JSON.parse(raw); } catch { cur = {}; }
+          if (cur.mcpServers) cur = cur.mcpServers;
+          cur[k] = cfg;
+          $('#setMcp', m).value = JSON.stringify(cur, null, 2);
+          toast(`Added ${k} MCP preset (click Save to connect)`);
+        };
+        pBar.appendChild(b);
+      }
+    }
     const tog = (id, on) => { const t = $(id, m); t.classList.toggle('on', !!on); t.onclick = () => t.classList.toggle('on'); return t; };
     const T = {
       restore: tog('#setRestore', s.restoreLastProject !== false), notify: tog('#setNotify', s.notifyApproval !== false),

@@ -391,3 +391,62 @@ test('mentions: @git, @diff, @errors, @terminal, @codebase and @folder expand cl
     agent.dispose();
   }
 });
+
+test('swarm board, run_workflow stages, generate_image guards, and multi_select ask_user work cleanly', async () => {
+  const { AgentSession } = require('../src/main/agent');
+  const providers = require('../src/main/providers');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-adv-'));
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello\n');
+  const data = {
+    id: 'adv', title: 'adv', projectDir: dir, mode: 'yolo',
+    messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {},
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
+  };
+  const questions = [];
+  let agent;
+  agent = new AgentSession(data, {
+    send: (_id, type, p) => {
+      if (type === 'question') { questions.push(p); setImmediate(() => agent.respond(p.reqId, 'answer', 'A, B')); }
+    },
+    save: () => {},
+    getSettings: () => ({ autoVerify: false, completionAudit: false, evidenceCheck: false }),
+    getApiKey: () => 'x',
+    getGeminiKey: () => '',
+  });
+  const origCall = providers.callModel;
+  let step = 0;
+  providers.callModel = async ({ system }) => {
+    if (system.includes('research sub-agent')) {
+      return { content: [{ type: 'text', text: 'stage sub-result' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+    }
+    step++;
+    if (step === 1) {
+      return {
+        content: [
+          { type: 'tool_use', id: 's1', name: 'swarm', input: { action: 'post', from: 'lead', to: 'worker-1', message: 'check a.txt' } },
+          { type: 'tool_use', id: 's2', name: 'swarm', input: { action: 'read' } },
+          { type: 'tool_use', id: 'q1', name: 'ask_user', input: { question: 'Pick features', options: ['A', 'B', 'C'], multi_select: true } },
+          { type: 'tool_use', id: 'w1', name: 'run_workflow', input: { stages: [{ name: 'Inspect', tasks: [{ description: 'scan', prompt: 'scan', mode: 'research' }] }] } },
+          { type: 'tool_use', id: 'i1', name: 'generate_image', input: { prompt: 'logo', path: 'logo.png' } },
+        ],
+        model: 'fake', stop_reason: 'tool_use', usage: {},
+      };
+    }
+    return { content: [{ type: 'text', text: 'Done.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('run advanced tools', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.equal(questions.length, 1);
+    assert.equal(questions[0].multiSelect, true);
+    const results = data.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((b) => b.type === 'tool_result');
+    assert.match(String(results.find((r) => r.tool_use_id === 's1')?.content), /Posted to swarm board/);
+    assert.match(String(results.find((r) => r.tool_use_id === 's2')?.content), /\[lead -> worker-1\] check a\.txt/);
+    assert.match(String(results.find((r) => r.tool_use_id === 'q1')?.content), /A, B/);
+    assert.match(String(results.find((r) => r.tool_use_id === 'w1')?.content), /Stage 1: Inspect[\s\S]*stage sub-result/);
+    assert.match(String(results.find((r) => r.tool_use_id === 'i1')?.content), /Gemini API key/i);
+  } finally {
+    providers.callModel = origCall;
+    agent.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
