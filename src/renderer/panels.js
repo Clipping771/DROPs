@@ -397,7 +397,8 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
 
     const activeTasks = tasks.filter((t) => t.status === 'running');
     const queuedTasks = tasks.filter((t) => t.status === 'queued');
-    const pastTasks = tasks.filter((t) => ['completed', 'failed', 'cancelled'].includes(t.status)).slice(0, 20);
+    const sessionTasks = S.activeId ? tasks.filter((t) => t.session_id === S.activeId) : tasks;
+    const pastTasks = sessionTasks.filter((t) => ['completed', 'failed', 'cancelled'].includes(t.status)).slice(0, 6);
 
     const activeCount = activeTasks.length + queuedTasks.length;
     const badge = $('#tasksBadge');
@@ -407,8 +408,8 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     }
 
     const wrap = h('div', 'tasks-list');
-    await renderSchedules(wrap);
     if (!tasks.length) {
+      await renderSchedules(wrap, true);
       wrap.appendChild(h('div', 'empty', 'No tasks yet. Requests run here in the background, and scheduled ones start by themselves.'));
       box.appendChild(wrap);
       return;
@@ -489,18 +490,19 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
       }
     }
 
+    await renderSchedules(wrap, false);
     box.appendChild(wrap);
   }
 
   // ---------- scheduled tasks ----------
-  async function renderSchedules(wrap) {
+  async function renderSchedules(wrap, showEmptyHint = true) {
     let list = [];
     try { list = await api.scheduleList(); } catch { list = []; }
     const head = h('div', 'glance-title sched-head');
     head.innerHTML = '<span>Scheduled</span>';
     const add = h('button', 'btn ghost sm', 'New'); add.onclick = () => editSchedule(null);
     head.appendChild(add); wrap.appendChild(head);
-    if (!list.length) { wrap.appendChild(h('div', 'sched-empty', 'Nothing scheduled. A scheduled task runs a prompt by itself, once or on a repeat, in a new session.')); return; }
+    if (!list.length) { if (showEmptyHint) wrap.appendChild(h('div', 'sched-empty', 'Nothing scheduled. A scheduled task runs a prompt by itself, once or on a repeat, in a new session.')); return; }
     for (const s of list) {
       const row = h('div', 'task-row sched' + (s.enabled === false ? ' off' : ''));
       const next = s.enabled !== false && s.nextRun ? `next ${new Date(s.nextRun).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'off';
