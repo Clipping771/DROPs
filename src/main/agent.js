@@ -2373,7 +2373,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return true;
   }
 
-  dispose() { this.stop(); this.procs.stopAll(); this.desktop?.close(); this.desktop = null; }
+  dispose() {
+    this.stop();
+    this.procs.stopAll();
+    this.desktop?.close();
+    this.desktop = null;
+    try { require('./lsp').closeAll(this.data.projectDir).catch(() => {}); } catch { /* ignore */ }
+  }
 }
 
 module.exports = { unprovenClaimNote, modelSeesImages, readProgress, progressSection, sourceFingerprint, specFacts, evidenceNudgeAllowed, admitsUnfinished, specPlanNote, AgentSession, INTERRUPTED, NO_REPLY, STOPPED_BY_ERROR, SUMMARY_PREFIX };
