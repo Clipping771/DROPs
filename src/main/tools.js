@@ -88,6 +88,15 @@ const TOOL_DEFS = [
     },
   },
   {
+    name: 'apply_patch',
+    description: 'Apply a Codex-style multi-file patch in one atomic operation. Format: *** Begin Patch, then sections "*** Add File: <path>", "*** Update File: <path>" (with @@ hunks using space/minus/plus prefixes), or "*** Delete File: <path>", ending with *** End Patch.',
+    input_schema: {
+      type: 'object',
+      properties: { patch: { type: 'string', description: 'The full patch text' } },
+      required: ['patch'],
+    },
+  },
+  {
     name: 'list_dir',
     description: 'List files and folders in a directory (non-recursive). Common build/dependency folders are marked.',
     input_schema: { type: 'object', properties: { path: { type: 'string', description: 'Directory, default project root' } } },
@@ -259,7 +268,7 @@ const TOOL_DEFS = [
 ];
 
 const READ_ONLY = new Set(['read_file', 'list_dir', 'glob', 'grep', 'git_status', 'git_diff', 'todo_write', 'save_plan', 'process_output', 'stop_process', 'fetch_url', 'web_search', 'task', 'wrap_up', 'impact', 'code_search', 'find_references', 'type_check', 'audit', 'mark_chapter']);
-const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol', 'remember']);
+const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'apply_patch', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol', 'remember']);
 const EXPLORE_TOOLS = new Set(['read_file', 'list_dir', 'glob', 'grep', 'fetch_url', 'code_search']);
 
 function definitions(filter) {
@@ -906,6 +915,56 @@ async function prepare(ctx, name, input) {
         },
       };
     }
+    case 'apply_patch': {
+      const ops = parseApplyPatch(input.patch);
+      if (!ops.length) throw new Error('Patch contains no file operations.');
+      const prepared = [];
+      for (const op of ops) {
+        const abs = resolveInRoot(root, op.path);
+        const rel = relOf(root, abs);
+        checkFresh(ctx, abs, rel, op.kind !== 'add' && fs.existsSync(abs));
+        if (op.kind === 'add') {
+          if (fs.existsSync(abs)) throw new Error(`File already exists: ${rel}`);
+          const content = op.lines.join('\n') + (op.lines.length ? '\n' : '');
+          prepared.push({ kind: 'add', abs, rel, orig: '', content, preview: makeDiff(rel, '', content) });
+        } else if (op.kind === 'delete') {
+          if (!fs.existsSync(abs)) throw new Error(`File not found: ${rel}`);
+          const orig = await fsp.readFile(abs, 'utf8');
+          prepared.push({ kind: 'delete', abs, rel, orig, content: null, preview: makeDiff(rel, orig, '') });
+        } else {
+          if (!fs.existsSync(abs)) throw new Error(`File not found: ${rel}`);
+          const raw = await fsp.readFile(abs, 'utf8');
+          const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+          const nextNorm = applyPatchHunks(raw.replace(/\r\n/g, '\n'), op.hunks, rel);
+          const content = eol === '\r\n' ? nextNorm.replace(/\n/g, '\r\n') : nextNorm;
+          prepared.push({ kind: 'update', abs, rel, orig: raw, content, preview: makeDiff(rel, raw, content) });
+        }
+      }
+      const summary = prepared.map((p) => p.rel).join(', ');
+      return {
+        kind: 'edit', summary, files: prepared.map((p) => p.rel), preview: prepared[0].preview, abs: prepared[0].abs,
+        run: async () => {
+          const diags = [];
+          for (const p of prepared) {
+            await ctx.snapshot(p.abs);
+            if (p.kind === 'delete') {
+              await fsp.unlink(p.abs);
+              ctx.readFiles.delete(p.abs);
+              ctx.onChange(p.rel, p.preview);
+            } else {
+              await fsp.mkdir(path.dirname(p.abs), { recursive: true });
+              await atomicWrite(p.abs, p.content);
+              await markWritten(ctx, p.abs);
+              ctx.onChange(p.rel, p.preview);
+              const d = await diagnose(p.abs, p.content, ctx.root);
+              if (d) diags.push(`[${p.rel}]${d}`);
+            }
+          }
+          try { require('./codegraph').invalidateGraph(root); } catch { /* ignore */ }
+          return `Applied patch to ${prepared.length} file(s): ${summary}.${diags.join('')}`;
+        },
+      };
+    }
     case 'notebook_edit': {
       const abs = resolveInRoot(root, input.path);
       const rel = relOf(root, abs);
@@ -1169,5 +1228,58 @@ async function prepare(ctx, name, input) {
 
 const isDangerous = (cmd, root) => shell.assessCommand(cmd, root).dangerous;
 const isSafeCommand = shell.isSafeCommand;
+
+function parseApplyPatch(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const ops = [];
+  let cur = null, curHunk = null;
+  for (const line of lines) {
+    if (line === '*** Begin Patch' || line === '*** End Patch') continue;
+    const addM = /^\*\*\* Add File:\s*(.+)$/.exec(line);
+    const delM = /^\*\*\* Delete File:\s*(.+)$/.exec(line);
+    const updM = /^\*\*\* Update File:\s*(.+)$/.exec(line);
+    if (addM) { cur = { kind: 'add', path: addM[1].trim(), lines: [] }; ops.push(cur); curHunk = null; continue; }
+    if (delM) { cur = { kind: 'delete', path: delM[1].trim() }; ops.push(cur); curHunk = null; continue; }
+    if (updM) { cur = { kind: 'update', path: updM[1].trim(), hunks: [] }; ops.push(cur); curHunk = null; continue; }
+    if (!cur) continue;
+    if (cur.kind === 'add') {
+      if (line.startsWith('+')) cur.lines.push(line.slice(1));
+    } else if (cur.kind === 'update') {
+      if (line.startsWith('@@')) { curHunk = []; cur.hunks.push(curHunk); continue; }
+      if (/^[ +-]/.test(line)) {
+        if (!curHunk) { curHunk = []; cur.hunks.push(curHunk); }
+        curHunk.push(line);
+      }
+    }
+  }
+  return ops;
+}
+
+function applyPatchHunks(orig, hunks, rel) {
+  if (!hunks.length) throw new Error(`No hunks found for ${rel}.`);
+  const fileLines = orig.endsWith('\n') ? orig.slice(0, -1).split('\n') : orig.split('\n');
+  let cursor = 0;
+  for (const hunk of hunks) {
+    const oldPart = hunk.filter((l) => l[0] === ' ' || l[0] === '-').map((l) => l.slice(1));
+    const newPart = hunk.filter((l) => l[0] === ' ' || l[0] === '+').map((l) => l.slice(1));
+    let matchAt = -1;
+    for (let i = cursor; i <= fileLines.length - oldPart.length; i++) {
+      let ok = true;
+      for (let j = 0; j < oldPart.length; j++) { if (fileLines[i + j] !== oldPart[j]) { ok = false; break; } }
+      if (ok) { matchAt = i; break; }
+    }
+    if (matchAt < 0) {
+      for (let i = 0; i <= fileLines.length - oldPart.length; i++) {
+        let ok = true;
+        for (let j = 0; j < oldPart.length; j++) { if (fileLines[i + j] !== oldPart[j]) { ok = false; break; } }
+        if (ok) { matchAt = i; break; }
+      }
+    }
+    if (matchAt < 0) throw new Error(`Patch hunk did not match in ${rel}: "${oldPart.slice(0, 2).join('\\n')}"`);
+    fileLines.splice(matchAt, oldPart.length, ...newPart);
+    cursor = matchAt + newPart.length;
+  }
+  return fileLines.join('\n') + (orig.endsWith('\n') || !orig.length ? '\n' : '');
+}
 
 module.exports = { guardedLookup, definitions, validate, registerDef, prepare, READ_ONLY, EDIT_TOOLS, EXPLORE_TOOLS, ProcessManager, isDangerous, isSafeCommand, isSensitiveFile, makeDiff, resolveInRoot, isPrivateAddress, assertPublicUrl, keylessSearch, parseDuckResults, IGNORE, stripAnsi };

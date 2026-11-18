@@ -1045,6 +1045,7 @@ function showPermission(v, ev) {
   p.innerHTML = `<div class="q"><span class="q-label">Approval needed</span><span class="q-t">${what}</span></div>${ev.dangerous ? `<div class="perm-note">${icon('alert', 'xs')}<span>${esc(ev.reason || 'This action may be destructive or irreversible.')}</span></div>` : ''}`;
   const btns = h('div', 'btns');
   const allow = h('button', 'btn primary sm', 'Allow');
+  const alwaysPrefix = (!ev.dangerous && ev.kind === 'shell' && ev.commandPrefix) ? h('button', 'btn sm', `Allow "${ev.commandPrefix}"`) : null;
   const always = h('button', 'btn sm', ev.kind === 'edit' ? 'Allow all edits' : ev.kind === 'mcp' ? 'Always allow this server' : ev.kind === 'fetch' ? 'Always allow this site' : ev.kind === 'search' ? 'Always allow web search' : 'Allow all commands');
   const fb = h('input'); fb.placeholder = 'Or tell DROPs what to do instead…';
   const deny = h('button', 'btn sm', 'Deny');
@@ -1055,11 +1056,12 @@ function showPermission(v, ev) {
     if (decision !== 'deny') setWorking(v, true, 'Working');
   };
   allow.onclick = () => answer('allow');
+  if (alwaysPrefix) alwaysPrefix.onclick = () => answer('always-prefix');
   always.onclick = () => answer('always');
   deny.onclick = () => answer('deny');
   fb.onkeydown = (e) => { if (e.key === 'Enter') answer('deny'); };
   if (ev.dangerous || ev.kind === 'computer' || ev.kind === 'schedule') always.hidden = true;
-  btns.append(deny, always, allow);
+  btns.append(deny, always, ...(alwaysPrefix ? [alwaysPrefix] : []), allow);
   p.append(fb, btns);
   c.el.appendChild(p);
   autoScroll(v, true);

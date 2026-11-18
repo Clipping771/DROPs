@@ -53,7 +53,7 @@ function failureKey(name, input = {}) {
   }
 }
 
-const EDIT_CALLS = new Set(['edit_file', 'multi_edit', 'write_file', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol']);
+const EDIT_CALLS = new Set(['edit_file', 'multi_edit', 'apply_patch', 'write_file', 'notebook_edit', 'delete_file', 'move_file', 'rename_symbol']);
 
 class LoopGuard {
   constructor(limit = 3) {

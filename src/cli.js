@@ -29,14 +29,16 @@ Options:
       --mcp-config <file> JSON file with { "mcpServers": { ... } }
       --lang <code>       Language for explanations (e.g. bn for Bengali)
       --json              Print a JSON summary at the end (for scripts)
+      --jsonl             Stream JSONL events to stdout as the agent runs
       --save <file>       Save the full session JSON
+      --resume <file>     Resume a previously saved session JSON file
   -q, --quiet             Only print the final answer
   -h, --help              Show this help
 
 Exit codes: 0 done · 1 error · 2 finished but the last verification failed · 3 stopped by a limit`;
 
 function parseArgs(argv) {
-  const o = { project: process.cwd(), model: 'auto', effort: 'high', mode: 'yolo', modeExplicit: false, maxSteps: 250, json: false, quiet: false };
+  const o = { project: process.cwd(), model: 'auto', effort: 'high', mode: 'yolo', modeExplicit: false, maxSteps: 250, json: false, jsonl: false, quiet: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -54,7 +56,9 @@ function parseArgs(argv) {
     else if (a === '--mcp-config') o.mcpConfig = path.resolve(next());
     else if (a === '--lang') o.lang = next();
     else if (a === '--json') o.json = true;
+    else if (a === '--jsonl') o.jsonl = true;
     else if (a === '--save') o.save = path.resolve(next());
+    else if (a === '--resume') o.resume = path.resolve(next());
     else if (a === '-q' || a === '--quiet') o.quiet = true;
     else rest.push(a);
   }
@@ -65,8 +69,37 @@ function parseArgs(argv) {
 const tty = process.stdout.isTTY;
 const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
 
+/** Loads a previously saved session JSON file for `--resume`, or creates a fresh session object. */
+function initSessionData(o) {
+  if (o.resume) {
+    const raw = JSON.parse(fs.readFileSync(o.resume, 'utf8').replace(/^\uFEFF/, ''));
+    if (!raw || !Array.isArray(raw.messages)) throw new Error(`Invalid session file: ${o.resume}`);
+    return {
+      ...raw,
+      id: raw.id || crypto.randomUUID(),
+      projectDir: raw.projectDir || o.project,
+      updated: Date.now(),
+      model: o.model || raw.model,
+      effort: o.effort || raw.effort,
+      mode: o.modeExplicit ? o.mode : (raw.mode || o.mode),
+      archive: raw.archive || [],
+      compactions: raw.compactions || [],
+      turns: raw.turns || [],
+      toolMeta: raw.toolMeta || {},
+      todos: raw.todos || [],
+      changes: raw.changes || {},
+      usage: raw.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
+    };
+  }
+  return {
+    id: crypto.randomUUID(), title: 'New session', projectDir: o.project, created: Date.now(), updated: Date.now(),
+    model: o.model, effort: o.effort, mode: o.mode, messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {},
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
+  };
+}
+
 // Runs one task to completion. Used by the CLI and by the benchmark runner.
-async function runHeadless(o, { print = () => {} } = {}) {
+async function runHeadless(o, { print = () => {}, onEvent = null } = {}) {
   // Order: a key passed for this run (DROPS_*_API_KEY, or the older H2O_*_API_KEY) → the key saved in
   // DROPs Settings → the usual environment variable. The DROPS_ variables let scripts override a stale saved key or a stale
   // user-level GEMINI_API_KEY without touching either.
@@ -100,11 +133,7 @@ async function runHeadless(o, { print = () => {} } = {}) {
     for (const st of await mcp.sync(servers)) print('notice', `MCP ${st.name}: ${st.status}${st.error ? ' — ' + st.error : ` (${st.tools.length} tools)`}`);
   }
 
-  const data = {
-    id: crypto.randomUUID(), title: 'New session', projectDir: o.project, created: Date.now(), updated: Date.now(),
-    model: o.model, effort: o.effort, mode: o.mode, messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {},
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
-  };
+  const data = initSessionData(o);
   const result = { errors: [], notices: [], tools: 0, toolErrors: 0, models: new Set(), stoppedByLimit: false };
   let agent;
   const deps = {
@@ -113,6 +142,9 @@ async function runHeadless(o, { print = () => {} } = {}) {
     getProviderKey: (id) => { const env = require('./main/oai').PROVIDERS[id]?.env; return (env && process.env[env]) || store.getProviderKey(id); },
     save: () => {},
     send: (_id, type, p) => {
+      if (onEvent && ['text-delta', 'tool-start', 'tool-end', 'notice', 'auto-model', 'error'].includes(type)) {
+        onEvent({ type, ...(p || {}), ts: Date.now() });
+      }
       switch (type) {
         case 'text-delta': print('text', p.text); break;
         case 'tool-start': result.tools++; print('tool', `${p.name} ${p.summary || ''}`); break;
@@ -160,17 +192,20 @@ async function main() {
   if (o.help || !o.task) { console.log(HELP); process.exit(o.help ? 0 : 1); }
   if (!fs.existsSync(o.project)) { console.error(`Project folder not found: ${o.project}`); process.exit(1); }
   const print = (kind, s) => {
-    if (o.json || (o.quiet && kind !== 'error')) return;
+    if (o.json || o.jsonl || (o.quiet && kind !== 'error')) return;
     if (kind === 'text') process.stdout.write(s);
     else if (kind === 'tool') process.stdout.write(`\n${c('36', '→')} ${c('2', s)}\n`);
     else if (kind === 'toolerr') process.stdout.write(`  ${c('31', '✗')} ${c('2', s)}\n`);
     else if (kind === 'notice') process.stdout.write(`${c('2', '· ' + s)}\n`);
     else if (kind === 'error') process.stderr.write(`${c('31', 'error:')} ${s}\n`);
   };
+  const onEvent = o.jsonl ? (ev) => process.stdout.write(JSON.stringify(ev) + '\n') : null;
   try {
-    const r = await runHeadless(o, { print });
+    const r = await runHeadless(o, { print, onEvent });
     if (o.save) fs.writeFileSync(o.save, JSON.stringify(r.session, null, 2));
-    if (o.json) {
+    if (o.jsonl) {
+      onEvent({ type: 'done', ok: r.ok, seconds: r.seconds, usage: r.usage, tools: r.tools, toolErrors: r.toolErrors, changes: Object.keys(r.changes || {}), verifyFailed: r.verifyFailed, stoppedByLimit: r.stoppedByLimit, ts: Date.now() });
+    } else if (o.json) {
       const { session, ...rest } = r;
       console.log(JSON.stringify(rest, null, 2));
     } else if (o.quiet) console.log(r.answer);
@@ -186,4 +221,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { runHeadless, parseArgs };
+module.exports = { runHeadless, parseArgs, initSessionData };

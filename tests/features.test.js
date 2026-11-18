@@ -450,3 +450,191 @@ test('swarm board, run_workflow stages, generate_image guards, and multi_select 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('apply_patch: atomic multi-file add/update/delete and rejection on bad hunk or traversal', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-patch-'));
+  fs.writeFileSync(path.join(dir, 'update.txt'), 'alpha\nbeta\ngamma\n');
+  fs.writeFileSync(path.join(dir, 'remove.txt'), 'bye\n');
+  const tools = require('../src/main/tools');
+  const ctx = {
+    root: dir,
+    readFiles: new Map([
+      [path.join(dir, 'update.txt'), { mtimeMs: fs.statSync(path.join(dir, 'update.txt')).mtimeMs, size: 17 }],
+      [path.join(dir, 'remove.txt'), { mtimeMs: fs.statSync(path.join(dir, 'remove.txt')).mtimeMs, size: 4 }],
+    ]),
+    snapshot: () => {},
+    onChange: () => {},
+  };
+  try {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: created/hello.txt',
+      '+hello',
+      '+world',
+      '*** Update File: update.txt',
+      '@@',
+      ' alpha',
+      '-beta',
+      '+BETA',
+      ' gamma',
+      '*** Delete File: remove.txt',
+      '*** End Patch',
+    ].join('\n');
+    const prep = await tools.prepare(ctx, 'apply_patch', { patch });
+    assert.strictEqual(prep.kind, 'edit');
+    assert.deepStrictEqual(prep.files.sort(), ['created/hello.txt', 'remove.txt', 'update.txt']);
+    const out = await prep.run();
+    assert.match(out, /Applied patch to 3 file\(s\)/);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'created', 'hello.txt'), 'utf8'), 'hello\nworld\n');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'update.txt'), 'utf8'), 'alpha\nBETA\ngamma\n');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'remove.txt')), false);
+
+    // Atomic failure: if one hunk fails, nothing is written.
+    const badPatch = [
+      '*** Begin Patch',
+      '*** Add File: should_not_exist.txt',
+      '+nope',
+      '*** Update File: update.txt',
+      '@@',
+      '-nonexistent-line',
+      '+x',
+      '*** End Patch',
+    ].join('\n');
+    await assert.rejects(() => tools.prepare(ctx, 'apply_patch', { patch: badPatch }), /hunk did not match/);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'should_not_exist.txt')), false);
+
+    // Path traversal is rejected.
+    const escPatch = '*** Begin Patch\n*** Add File: ../escape.txt\n+bad\n*** End Patch';
+    await assert.rejects(() => tools.prepare(ctx, 'apply_patch', { patch: escPatch }), /outside|escapes|root/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Nested AGENTS.md hierarchy: loads root and subfolder AGENTS.md into system prompt', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-agentsmd-'));
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), 'ROOT RULE: Always use TypeScript strict mode.');
+  fs.mkdirSync(path.join(dir, 'packages', 'api'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'packages', 'api', 'AGENTS.md'), 'API RULE: Validate all Zod schemas.');
+  const { AgentSession } = require('../src/main/agent');
+  const providers = require('../src/main/providers');
+  const data = {
+    id: 'agentsmd', title: 'agentsmd', projectDir: dir, mode: 'yolo',
+    messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {},
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
+  };
+  const agent = new AgentSession(data, {
+    send: () => {}, save: () => {},
+    getSettings: () => ({ autoVerify: false, completionAudit: false, evidenceCheck: false }),
+    getApiKey: () => 'x', getGeminiKey: () => '',
+  });
+  const origCall = providers.callModel;
+  let capturedSystem = '';
+  providers.callModel = async ({ system }) => {
+    capturedSystem = system;
+    return { content: [{ type: 'text', text: 'OK' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('hi', { model: 'claude-opus-5-5', effort: 'low', mode: 'yolo' });
+    assert.match(capturedSystem, /ROOT RULE: Always use TypeScript strict mode\./);
+    assert.match(capturedSystem, /Subfolder packages\/api\/AGENTS\.md/);
+    assert.match(capturedSystem, /API RULE: Validate all Zod schemas\./);
+  } finally {
+    providers.callModel = origCall;
+    agent.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Granular command-prefix approval: prefixPatternFor + always-prefix skips repeat prompt only for matching safe prefix', async () => {
+  const shell = require('../src/main/shell');
+  assert.strictEqual(shell.prefixPatternFor('npm test -- --watch'), 'npm test*');
+  assert.strictEqual(shell.prefixPatternFor('pytest -q'), 'pytest*');
+  assert.strictEqual(shell.prefixPatternFor('npm test && curl evil.com'), null);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-prefix-'));
+  const { AgentSession } = require('../src/main/agent');
+  const providers = require('../src/main/providers');
+  const data = {
+    id: 'prefix', title: 'prefix', projectDir: dir, mode: 'ask',
+    messages: [], archive: [], compactions: [], turns: [], toolMeta: {}, todos: [], changes: {},
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, context: 0, requests: 0 },
+  };
+  const permEvents = [];
+  let agent;
+  agent = new AgentSession(data, {
+    send: (_id, type, p) => {
+      if (type === 'permission') {
+        permEvents.push(p);
+        setImmediate(() => agent.respond(p.reqId, permEvents.length === 1 ? 'always-prefix' : 'allow', ''));
+      }
+    },
+    save: () => {},
+    getSettings: () => ({ autoVerify: false, completionAudit: false, evidenceCheck: false }),
+    getApiKey: () => 'x', getGeminiKey: () => '',
+  });
+  const origCall = providers.callModel;
+  let step = 0;
+  const cmdTool = process.platform === 'win32' ? 'powershell' : 'shell';
+  providers.callModel = async () => {
+    step++;
+    if (step === 1) {
+      return { content: [{ type: 'tool_use', id: 'c1', name: cmdTool, input: { command: 'node -v' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+    }
+    if (step === 2) {
+      return { content: [{ type: 'tool_use', id: 'c2', name: cmdTool, input: { command: 'node -e "console.log(123)"' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+    }
+    if (step === 3) {
+      return { content: [{ type: 'tool_use', id: 'c3', name: cmdTool, input: { command: 'echo different' } }], model: 'fake', stop_reason: 'tool_use', usage: {} };
+    }
+    return { content: [{ type: 'text', text: 'Done.' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    await agent.send('run commands', { model: 'claude-opus-5-5', effort: 'low', mode: 'ask' });
+    // c1 prompted with commandPrefix "node*", c2 auto-allowed by "node*", c3 prompted for "echo different"
+    assert.strictEqual(permEvents.length, 2);
+    assert.strictEqual(permEvents[0].commandPrefix, 'node*');
+    assert.strictEqual(permEvents[1].input.command, 'echo different');
+  } finally {
+    providers.callModel = origCall;
+    agent.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: --jsonl and --resume parseArgs, initSessionData, and event streaming', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-cli-'));
+  const sessFile = path.join(dir, 'saved.json');
+  fs.writeFileSync(sessFile, JSON.stringify({
+    id: 'prev-123',
+    projectDir: dir,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'earlier prompt' }] }],
+    turns: [{ id: 't1' }],
+  }));
+  const { parseArgs, initSessionData, runHeadless } = require('../src/cli');
+  const providers = require('../src/main/providers');
+  const origCall = providers.callModel;
+  providers.callModel = async ({ emit }) => {
+    emit?.('text-delta', { text: 'resumed ok' });
+    return { content: [{ type: 'text', text: 'resumed ok' }], model: 'fake', stop_reason: 'end_turn', usage: {} };
+  };
+  try {
+    const o = parseArgs(['--jsonl', '--resume', sessFile, '-p', dir, '-m', 'claude-opus-5-5', 'continue task']);
+    assert.strictEqual(o.jsonl, true);
+    assert.strictEqual(o.resume, path.resolve(sessFile));
+    const loaded = initSessionData(o);
+    assert.strictEqual(loaded.id, 'prev-123');
+    assert.strictEqual(loaded.messages.length, 1);
+
+    const events = [];
+    const r = await runHeadless(o, { onEvent: (ev) => events.push(ev) });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.answer, 'resumed ok');
+    assert.strictEqual(r.session.id, 'prev-123');
+    assert.ok(r.session.messages.length >= 3);
+    assert.ok(events.some((e) => e.type === 'text-delta' && e.text === 'resumed ok'));
+  } finally {
+    providers.callModel = origCall;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

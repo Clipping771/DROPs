@@ -216,6 +216,18 @@ function matchRule(patterns, cmd, { anySegment = false } = {}) {
   return null;
 }
 
+/** Builds a safe wildcard prefix rule (e.g. "npm test*") for a non-chained command, or null. */
+function prefixPatternFor(cmd) {
+  const c = String(cmd || '').trim().replace(/\s+/g, ' ');
+  if (!c || CHAIN.test(c)) return null;
+  const words = c.split(' ');
+  if (!/^[a-z0-9._-]+$/i.test(words[0])) return null;
+  if (words.length >= 2 && /^[a-z0-9][a-z0-9._:-]*$/i.test(words[1])) {
+    return `${words[0]} ${words[1]}*`;
+  }
+  return `${words[0]}*`;
+}
+
 // ---------- secret shield ----------
 // Secrets found in tool output are masked before they reach the model or the UI.
 const SECRET_PATTERNS = [
@@ -254,4 +266,4 @@ function redact(text) {
   return { text, count };
 }
 
-module.exports = { sandboxLimitArgs, IS_WIN, detectHostShell, spawnShell, run, killTree, Sandbox, docker, assessCommand, isSafeCommand, writesOutsideRoot, redact, stripAnsi, parseRules, matchRule };
+module.exports = { sandboxLimitArgs, IS_WIN, detectHostShell, spawnShell, run, killTree, Sandbox, docker, assessCommand, isSafeCommand, writesOutsideRoot, redact, stripAnsi, parseRules, matchRule, prefixPatternFor };

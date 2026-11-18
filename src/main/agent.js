@@ -141,12 +141,34 @@ function dropOldToolImages(messages, keep) {
 
 function readProjectInstructions(root) {
   const out = [];
+  // Global user instructions (~/.drops/AGENTS.md) apply across all projects unless overridden locally.
+  try {
+    const globalPath = path.join(os.homedir(), '.drops', 'AGENTS.md');
+    if (fs.existsSync(globalPath)) {
+      const t = fs.readFileSync(globalPath, 'utf8').trim();
+      if (t) out.push(`## Global ~/.drops/AGENTS.md\n${t.slice(0, 20000)}`);
+    }
+  } catch { /* not present */ }
   for (const name of ['DROPs.md', 'H2O.md', 'FORGE.md', 'AGENTS.md', 'CLAUDE.md', '.drops/instructions.md', '.h2o/instructions.md', '.cursorrules']) {
     try {
       const t = fs.readFileSync(path.join(root, name), 'utf8');
       if (t.trim()) out.push(`## From ${name}\n${t.trim().slice(0, 40000)}`);
     } catch { /* not present */ }
   }
+  // Nested subfolder AGENTS.md hierarchy (closest/deepest instructions win over parent defaults).
+  try {
+    const fg = require('fast-glob');
+    const nested = fg.sync('**/AGENTS.md', {
+      cwd: root,
+      ignore: [...(tools.IGNORE || ['node_modules/**', '.git/**']), 'AGENTS.md'],
+      onlyFiles: true,
+      suppressErrors: true,
+    }).sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b)).slice(0, 8);
+    for (const rel of nested) {
+      const t = fs.readFileSync(path.join(root, rel), 'utf8').trim();
+      if (t) out.push(`## Subfolder ${rel}\n${t.slice(0, 6000)}`);
+    }
+  } catch { /* no nested AGENTS.md */ }
   // Team rules: every .md file in .drops/rules/ (or the older .h2o/rules/), committed to the repo and shared by the team.
   try {
     const dir = brand.PROJECT_DIRS.map((d) => path.join(root, d, 'rules')).find((d) => fs.existsSync(d)) || path.join(root, '.drops', 'rules');
@@ -263,6 +285,7 @@ class AgentSession {
     this.abort = null;
     this.pending = new Map();
     this.alwaysAllow = new Set();
+    this.sessionAllowPrefixes = [];
     this.readFiles = new Map();
     this.state = { compat: false };
     this.steerQueue = [];
@@ -281,6 +304,14 @@ class AgentSession {
     };
     if (name === 'rename_symbol') return ['*'];
     if (name === 'move_file') return [input.from, input.to].filter(Boolean).map(norm);
+    if (name === 'apply_patch' && typeof input.patch === 'string') {
+      const files = [];
+      for (const line of input.patch.split(/\r?\n/)) {
+        const m = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+        if (m) files.push(norm(m[1].trim()));
+      }
+      return files;
+    }
     if (['edit_file', 'multi_edit', 'write_file', 'notebook_edit', 'delete_file'].includes(name) && input.path) {
       return [norm(input.path)];
     }
@@ -1258,7 +1289,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       if (isPlanMode(mode) && !isFetch) return fail('Plan mode is on: changes and commands are not allowed. Present your plan instead.');
       const cmd = u.input.command || '';
       let risk = prep.kind === 'shell' && !this.procs.sandbox ? shell.assessCommand(cmd, this.data.projectDir) : prep.kind === 'shell' ? shell.assessCommand(cmd, null) : { dangerous: false };
-      if (prep.kind === 'edit' && u.name !== 'remember' && tools.isSensitiveFile(prep.summary)) {
+      if (prep.kind === 'edit' && u.name !== 'remember' && (prep.files || [prep.summary]).some((f) => tools.isSensitiveFile(f))) {
         risk = { dangerous: true, reason: 'Modifies a sensitive configuration, credential, or git hook file.' };
       }
       if (isReviewMode(mode) && !isFetch) {
@@ -1291,6 +1322,20 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
           return { type: 'tool_result', tool_use_id: u.id, is_error: true, content: msg };
         }
         if (r.decision === 'always') this.alwaysAllow.add(prep.permKey || prep.kind);
+        else if (r.decision === 'always-prefix' && prep.kind === 'shell' && !dangerous) {
+          const pat = shell.prefixPatternFor(cmd);
+          if (pat && !this.sessionAllowPrefixes.includes(pat)) {
+            this.sessionAllowPrefixes.push(pat);
+            if (!process.env.NODE_TEST_CONTEXT) {
+              try {
+                const store = require('./store');
+                const cur = String(this.settings().allowCommands || '').trim();
+                const lines = shell.parseRules(cur);
+                if (!lines.includes(pat)) store.setSettings({ allowCommands: cur ? `${cur}\n${pat}` : pat });
+              } catch { /* best effort */ }
+            }
+          }
+        }
         meta.status = 'running';
         this.emit('tool-running', { id: u.id });
       }
@@ -1308,15 +1353,21 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       run.guard.record(u.name, u.input, !isError);
       this.autoLesson(lessons.fromToolResult(u.name, u.input, text, !!this.procs.sandbox), u.name);
       if (isError) { run.errStreak = (run.errStreak || 0) + 1; if (run.errStreak >= 3) { run.errStreak = 0; run.escalate?.('it hit repeated tool errors'); } } else run.errStreak = 0;
-      const editedPath = u.input.path || u.input.to || u.input.file;
-      if (prep.kind === 'edit' && !isError && ctx.turn && editedPath) {
-        try { const abs = tools.resolveInRoot(this.data.projectDir, editedPath); (ctx.turn.after ||= {})[abs] = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null; } catch { /* outside the project */ }
+      const editedPaths = Array.isArray(prep.files) && prep.files.length ? prep.files : [u.input.path || u.input.to || u.input.file].filter(Boolean);
+      if (prep.kind === 'edit' && !isError && ctx.turn && editedPaths.length) {
+        for (const ep of editedPaths) {
+          try { const abs = tools.resolveInRoot(this.data.projectDir, ep); (ctx.turn.after ||= {})[abs] = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null; } catch { /* outside the project */ }
+        }
       }
       if (prep.kind === 'edit') {
-        const diagKey = editedPath || brand.memoryFile(this.data.projectDir);
-        run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false; run.editedFiles.add(diagKey);
+        const keys = editedPaths.length ? editedPaths : [brand.memoryFile(this.data.projectDir)];
+        run.edited = true; run.verifiedAfterEdit = false; run.lastVerify = null; run.failNudged = false;
+        for (const k of keys) {
+          run.editedFiles.add(k);
+          if (guards.isUiFile(k)) run.uiDirty = true;
+        }
         if (run.cross) run.cross.gen++;
-        if (guards.isUiFile(diagKey)) run.uiDirty = true;
+        const diagKey = keys[0];
         if (/Diagnostics: (SYNTAX ERROR|TYPE ERRORS|INVALID JSON)/.test(text)) run.diagErrors.set(diagKey, text.slice(text.indexOf('Diagnostics:')));
         else run.diagErrors.delete(diagKey);
       }
@@ -2009,7 +2060,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
   // ---------- user command rules (Settings → Safety) ----------
   commandRules() {
     const s = this.settings();
-    return { allow: shell.parseRules(s.allowCommands), deny: shell.parseRules(s.denyCommands) };
+    return { allow: [...shell.parseRules(s.allowCommands), ...(this.sessionAllowPrefixes || [])], deny: shell.parseRules(s.denyCommands) };
   }
 
   // ---------- after-edit hook (Settings → Agent) ----------
@@ -2176,7 +2227,8 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         }, mins * 60_000);
         timer.unref?.();
       }
-      this.emit('permission', { reqId, toolId: u.id, name: u.name, kind: prep.kind, input: u.input, summary: prep.summary, diff: prep.preview, dangerous, reason });
+      const commandPrefix = prep.kind === 'shell' && !dangerous ? shell.prefixPatternFor(u.input?.command) : null;
+      this.emit('permission', { reqId, toolId: u.id, name: u.name, kind: prep.kind, input: u.input, summary: prep.summary, diff: prep.preview, dangerous, reason, commandPrefix });
     });
   }
 
