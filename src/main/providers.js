@@ -73,11 +73,17 @@ const MODEL_PRICES = {
   'o4-mini': { in: 1.1, out: 4.4 },
   'deepseek-chat': { in: 0.27, out: 1.1 },
   'deepseek-reasoner': { in: 0.55, out: 2.19 },
+  'deepseek/deepseek-v4-flash': { in: 0.09, out: 0.18 },
+  'deepseek/deepseek-v4.1-flash-1017': { in: 0.036, out: 0.5 },
+  'deepseek/deepseek-chat': { in: 0.27, out: 1.1 },
+  'qwen/qwen3.7-flash': { in: 0.03, out: 0.13 },
+  'google/gemini-2.5-flash-lite': { in: 0.1, out: 0.4 },
 };
 const PRICE_PREFIXES = Object.entries(MODEL_PRICES).sort((a, b) => b[0].length - a[0].length);
 
 function costOf(model, u) {
   if (!model || ollama.isOllama(model) || oai.providerId(model) === 'lmstudio') return 0;
+  if (typeof u?.cost === 'number' && Number.isFinite(u.cost)) return u.cost;
   const bare = model.includes(':') ? model.slice(model.indexOf(':') + 1) : model;
   const p = CLAUDE[model] || MODEL_PRICES[bare] || PRICE_PREFIXES.find(([k]) => bare.startsWith(k))?.[1];
   if (!p) return null;

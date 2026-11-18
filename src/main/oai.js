@@ -146,7 +146,12 @@ async function streamOnce({ model, system, messages, tools, effort, signal, emit
   return {
     content: content.filter((b) => !(b.type === 'text' && !b.text)), model,
     stop_reason: hasTools ? 'tool_use' : finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' : 'end_turn',
-    usage: { input_tokens: (usage.prompt_tokens || 0) - (usage.prompt_tokens_details?.cached_tokens || 0), cache_read_input_tokens: usage.prompt_tokens_details?.cached_tokens || 0, output_tokens: usage.completion_tokens || 0 },
+    usage: {
+      input_tokens: (usage.prompt_tokens || 0) - (usage.prompt_tokens_details?.cached_tokens || 0),
+      cache_read_input_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
+      output_tokens: usage.completion_tokens || 0,
+      ...(typeof usage.cost === 'number' ? { cost: usage.cost } : {}),
+    },
   };
 }
 

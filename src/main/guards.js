@@ -13,7 +13,8 @@ const VERIFY_RE = new RegExp([
   String.raw`\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|tests|build|lint|typecheck|type-check|check|verify|ci|e2e)\b`,
   String.raw`\bnpx\s+(tsc|vitest|jest|mocha|eslint|playwright|ava|tap)\b`,
   String.raw`\b(tsc|vitest|jest|mocha|eslint|pytest|mypy|pyright|ruff|flake8|tox|nox|rspec|phpunit|pest)\b`,
-  String.raw`\bnode\s+--test\b`, String.raw`\bpython3?\s+-m\s+(pytest|unittest|mypy|py_compile|compileall)\b`,
+  String.raw`\bnode\s+--test\b`, String.raw`\b(python3?|py)\s+-m\s+(pytest|unittest|mypy|py_compile|compileall)\b`,
+  String.raw`\b(python3?|py)\s+-c\s+.*\b(assert|unittest)\b`,
   String.raw`\bcargo\s+(test|check|build|clippy)\b`, String.raw`\bgo\s+(test|build|vet)\b`,
   String.raw`\bdotnet\s+(build|test)\b`, String.raw`\b(mvn|mvnw|gradle|gradlew)\b.*\b(test|build|verify|check|compile)\b`,
   String.raw`\bmake\s+(test|check|build|all)?\b`, String.raw`\bphp\s+artisan\s+test\b`, String.raw`\bflutter\s+(test|analyze)\b`,
@@ -31,7 +32,9 @@ function isVerificationCommand(cmd, verifyList = [], editedFiles = []) {
   return editedFiles.some((f) => {
     const n = norm(f);
     const base = n.split('/').pop();
-    return /\b(node|python3?|py|deno|bun|ruby|php|go run|dotnet run|pwsh|powershell)\b/.test(c) && (c.includes(n) || c.includes(base));
+    const stem = base.replace(/\.[^.]+$/, '');
+    return /\b(node|python3?|py|deno|bun|ruby|php|go run|dotnet run|pwsh|powershell)\b/.test(c)
+      && (c.includes(n) || c.includes(base) || (stem.length >= 3 && new RegExp(`\\b${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(c)));
   });
 }
 

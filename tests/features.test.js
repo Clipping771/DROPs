@@ -729,3 +729,15 @@ test('AsyncTaskQueue: queues jobs, cancels pending, tracks completion and errors
   assert.strictEqual(q.get(j3.id).status, 'failed');
   assert.strictEqual(q.get(j3.id).error, 'boom');
 });
+
+test('OpenRouter costOf & Python verification guard tuning', () => {
+  const providers = require('../src/main/providers');
+  const guards = require('../src/main/guards');
+  assert.strictEqual(providers.costOf('openrouter:deepseek/deepseek-v4-flash', { cost: 0.0123, input_tokens: 1000, output_tokens: 500 }), 0.0123);
+  const est = providers.costOf('openrouter:deepseek/deepseek-v4-flash', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+  assert.ok(Math.abs(est - 0.27) < 1e-6);
+
+  assert.strictEqual(guards.isVerificationCommand('py -m unittest discover -s tests'), true);
+  assert.strictEqual(guards.isVerificationCommand('python -c "assert 1 == 1"'), true);
+  assert.strictEqual(guards.isVerificationCommand('python -c "from cart import Cart; print(Cart())"', [], ['cart.py']), true);
+});

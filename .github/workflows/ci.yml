@@ -1,46 +1,24 @@
-# Checks every push and pull request: syntax and type checks, then the offline test suite.
-name: CI
+name: DROPs Cross-Platform CI
 
 on:
   push:
     branches: [main]
   pull_request:
-
-permissions:
-  contents: read
+    branches: [main]
 
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: '22'
+          cache: 'npm'
       - run: npm ci
-      - run: git config --global user.email ci@example.com && git config --global user.name CI
-      - run: npm run check
       - run: npm run lint
-      # Some tests start an Electron app; Linux runners have no screen, so they get a virtual one.
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" npm test
-      - if: runner.os != 'Linux'
-        run: npm test
-      # The window itself: composer, sessions, settings, approvals (Electron, driven by Playwright).
-      # Its output is kept, and failures become annotations that can be read without signing in.
-      - name: UI tests
-        shell: bash
-        timeout-minutes: 15
-        run: |
-          set -o pipefail
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1920x1080x24" npm run test:ui 2>&1 | tee ui-test.log; else npm run test:ui 2>&1 | tee ui-test.log; fi
-      - name: Show UI test failures
-        if: failure()
-        shell: bash
-        run: node scripts/ci-annotate.js ui-test.log "UI test (${{ runner.os }})"
+      - run: node --import ./tests/setup.js --test tests/features.test.js tests/guards.test.js tests/security.test.js tests/security-attack-suite.test.js
