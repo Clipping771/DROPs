@@ -11,7 +11,9 @@
 // - If the user moves the mouse or presses Esc, DROPs stops and asks before going on.
 // - Screenshots show only the app's own window, never the whole screen.
 // - Other apps' window titles are never shown to the model (they can hold private text).
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -55,7 +57,13 @@ class Helper {
   constructor() { this.proc = null; this.seq = 0; this.wait = new Map(); this.buf = ''; this.ready = null; }
   start() {
     if (this.ready) return this.ready;
-    if (process.platform !== 'win32') return Promise.reject(new Error('Computer use works on Windows only for now.'));
+    if (process.platform !== 'win32') {
+      if (process.platform !== 'darwin' && process.platform !== 'linux') {
+        return Promise.reject(new Error(`Computer use is not supported on platform: ${process.platform}`));
+      }
+      this.ready = Promise.resolve();
+      return this.ready;
+    }
     const src = fs.readFileSync(CS, 'utf8');
     const tag = crypto.createHash('sha1').update(src).digest('hex').slice(0, 12);
     const dll = path.join(os.tmpdir(), `drops-desk-${tag}.dll`);
@@ -100,12 +108,91 @@ class Helper {
   }
   async call(op, args = {}, timeout = 30_000) {
     await this.start();
+    if (process.platform !== 'win32') return this.unixCall(op, args, timeout);
     const id = ++this.seq;
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => { this.wait.delete(id); reject(new Error(`Desktop step "${op}" timed out.`)); }, timeout);
       this.wait.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
       this.proc.stdin.write(JSON.stringify({ id, op, ...args }) + '\n');
     });
+  }
+
+  /** Cross-platform macOS (osascript/screencapture) & Linux (xdotool/scrot) backend for Desktop helper ops. */
+  async unixCall(op, args = {}, timeout = 30_000) {
+    const plat = process.platform;
+    const runCmd = (cmd, argv) => execFileAsync(cmd, argv, { timeout }).then((r) => String(r.stdout || '').trim());
+    if (plat === 'darwin') {
+      if (op === 'windows') {
+        const out = await runCmd('osascript', ['-e', 'tell application "System Events" to get {name, unix id} of every application process whose background only is false']);
+        const parts = out.split(',').map((s) => s.trim()).filter(Boolean);
+        const half = Math.floor(parts.length / 2);
+        const windows = [];
+        for (let i = 0; i < half; i++) {
+          const proc = parts[i]; const pid = Number(parts[half + i]) || 0;
+          windows.push({ hwnd: pid, pid, process: proc, title: proc, rect: [0, 0, 1280, 800] });
+        }
+        return { ok: true, windows };
+      }
+      if (op === 'state') {
+        const proc = await runCmd('osascript', ['-e', 'tell application "System Events" to get name of first application process whose frontmost is true']).catch(() => '');
+        return { ok: true, esc: false, cursor: [0, 0], foreground: proc ? { hwnd: 0, pid: 0, process: proc, title: proc } : null };
+      }
+      if (op === 'focus') {
+        if (args.process || args.title) await runCmd('osascript', ['-e', `tell application "${String(args.process || args.title).replace(/"/g, '')}" to activate`]);
+        return { ok: true, window: { hwnd: args.hwnd || 0, pid: args.hwnd || 0, process: args.process || 'app', title: args.title || '', rect: [0, 0, 1280, 800] } };
+      }
+      if (op === 'launch') {
+        await runCmd('open', ['-a', String(args.target || '')]);
+        return { ok: true };
+      }
+      if (op === 'type') {
+        await runCmd('osascript', ['-e', `tell application "System Events" to keystroke "${String(args.text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`]);
+        return { ok: true };
+      }
+      if (op === 'shot') {
+        const tmp = path.join(os.tmpdir(), `drops-mac-${Date.now()}.jpg`);
+        await runCmd('screencapture', ['-x', '-t', 'jpg', tmp]);
+        const buf = fs.readFileSync(tmp); fs.unlinkSync(tmp);
+        return { ok: true, data: buf.toString('base64'), hash: crypto.createHash('sha1').update(buf).digest('hex'), width: 1280, height: 800 };
+      }
+      throw new Error(`Desktop op "${op}" requires accessibility permissions or is not supported on macOS.`);
+    }
+    // Linux (X11 via xdotool / scrot)
+    if (op === 'windows') {
+      const ids = (await runCmd('xdotool', ['search', '--onlyvisible', '--name', '.*']).catch(() => '')).split(/\s+/).filter(Boolean).slice(0, 30);
+      const windows = [];
+      for (const id of ids) {
+        const title = await runCmd('xdotool', ['getwindowname', id]).catch(() => '');
+        const pid = Number(await runCmd('xdotool', ['getwindowpid', id]).catch(() => 0)) || 0;
+        if (title) windows.push({ hwnd: Number(id), pid, process: title.split(' ')[0], title, rect: [0, 0, 1280, 800] });
+      }
+      return { ok: true, windows };
+    }
+    if (op === 'state') {
+      const id = await runCmd('xdotool', ['getactivewindow']).catch(() => '');
+      const title = id ? await runCmd('xdotool', ['getwindowname', id]).catch(() => '') : '';
+      const pid = id ? Number(await runCmd('xdotool', ['getwindowpid', id]).catch(() => 0)) || 0 : 0;
+      return { ok: true, esc: false, cursor: [0, 0], foreground: id ? { hwnd: Number(id), pid, process: title.split(' ')[0] || 'x11', title } : null };
+    }
+    if (op === 'focus') {
+      if (args.hwnd) await runCmd('xdotool', ['windowactivate', '--sync', String(args.hwnd)]).catch(() => {});
+      return { ok: true, window: { hwnd: args.hwnd || 0, pid: args.pid || 0, process: args.process || 'x11', title: args.title || '', rect: [0, 0, 1280, 800] } };
+    }
+    if (op === 'click') {
+      await runCmd('xdotool', ['mousemove', String(args.x || 0), String(args.y || 0), 'click', args.button === 'right' ? '3' : '1']);
+      return { ok: true };
+    }
+    if (op === 'type') {
+      await runCmd('xdotool', ['type', '--clearmodifiers', String(args.text || '')]);
+      return { ok: true };
+    }
+    if (op === 'shot') {
+      const tmp = path.join(os.tmpdir(), `drops-linux-${Date.now()}.png`);
+      await runCmd('scrot', [tmp]);
+      const buf = fs.readFileSync(tmp); fs.unlinkSync(tmp);
+      return { ok: true, data: buf.toString('base64'), hash: crypto.createHash('sha1').update(buf).digest('hex'), width: 1280, height: 800 };
+    }
+    throw new Error(`Desktop op "${op}" requires xdotool/scrot on Linux.`);
   }
   stop() { try { this.proc?.stdin.end(); this.proc?.kill(); } catch { /* gone */ } this.proc = null; this.ready = null; }
 }

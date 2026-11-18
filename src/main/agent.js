@@ -496,7 +496,7 @@ class AgentSession {
       `# Operating procedure
 1. Understand first. For anything non-trivial, find the relevant code with grep/glob/read_file before changing it. Before changing a shared file, function, API route or database model, run \`impact\` on it to see what depends on it, and run the tests it lists afterwards. For broad questions or large codebases, delegate parallel investigations with the \`task\` tool (several calls in one turn) so file dumps stay out of your context.
 2. Plan. For work with 3+ steps, write a todo list with todo_write and update it immediately whenever you finish a step or start the next one (mark completed right after a step finishes, with only the active step in_progress — never leave an earlier step spinning while editing later files). For multi-file or architectural tasks, call \`save_plan\` first to pin your goal, target files, steps and verification command so they stay in context across compactions.
-3. Make minimal, surgical, idiomatic changes that match the surrounding style. Use edit_file / multi_edit for existing files (read them first); write_file only for new files or full rewrites. Never leave placeholders like "// rest of code here".
+3. Make minimal, surgical, idiomatic changes that match the surrounding style. Use \`apply_patch\` for coordinated multi-file edits in one atomic call, \`edit_file\` / \`multi_edit\` for single-file edits (read files first), and \`write_file\` only for new files or full rewrites. Use \`lsp_query\` when you need compiler-exact definitions, references, hover types, or diagnostics. Never leave placeholders like "// rest of code here".
 4. Every edit reports instant diagnostics (syntax checks). If they show an error, fix it immediately.
 5. Verify for real: run the project's type-checker, tests, linter or build with \`shell\`, read the output, and fix failures. For servers/watchers use start_process + process_output (never block \`shell\` on a command that does not exit), and stop_process when done.
 6. Batch independent read-only calls in parallel in a single turn — it is much faster.
@@ -1272,6 +1272,15 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       meta.status = 'done'; meta.output = out;
       this.emit('tool-end', { id: u.id, ok: true, output: out });
       return { type: 'tool_result', tool_use_id: u.id, content: out };
+    }
+    if (u.name === 'lsp_query') {
+      const summary = `${u.input.action || 'status'}${u.input.file ? ` ${u.input.file}` : ''}`;
+      meta.summary = summary; this.emit('tool-start', { id: u.id, name: 'lsp_query', input: u.input, summary });
+      let out; let ok = true;
+      try { out = await require('./lsp').queryLsp(this.data.projectDir, u.input); } catch (e) { out = `LSP query failed: ${e.message}`; ok = false; }
+      meta.status = ok ? 'done' : 'error'; meta.output = out;
+      this.emit('tool-end', { id: u.id, ok, output: out });
+      return { type: 'tool_result', tool_use_id: u.id, ...(ok ? {} : { is_error: true }), content: out };
     }
     if (u.name === 'check_requirement') return this.runCheckRequirement(u, meta, ctx, run);
     if (isMcp) return this.runMcp(u, meta, ctx, run, fail);

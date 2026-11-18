@@ -638,3 +638,94 @@ test('CLI: --jsonl and --resume parseArgs, initSessionData, and event streaming'
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('LSP: JSON-RPC stdio client queries definition, references, hover, and diagnostics', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drops-lsp-'));
+  const targetFile = path.join(dir, 'sample.ts');
+  fs.writeFileSync(targetFile, 'export const answer = 42;\n');
+  const mockServer = path.join(dir, 'mock-lsp.js');
+  fs.writeFileSync(mockServer, `
+    let buf = Buffer.alloc(0);
+    function send(msg) {
+      const b = Buffer.from(JSON.stringify(msg), 'utf8');
+      process.stdout.write('Content-Length: ' + b.length + '\\r\\n\\r\\n');
+      process.stdout.write(b);
+    }
+    process.stdin.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      while (true) {
+        const sep = buf.indexOf('\\r\\n\\r\\n');
+        if (sep < 0) break;
+        const m = buf.slice(0, sep).toString('ascii').match(/Content-Length:\\s*(\\d+)/i);
+        const len = Number(m[1]);
+        if (buf.length < sep + 4 + len) break;
+        const msg = JSON.parse(buf.slice(sep + 4, sep + 4 + len).toString('utf8'));
+        buf = buf.slice(sep + 4 + len);
+        if (msg.method === 'initialize') send({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } });
+        else if (msg.method === 'textDocument/didOpen') {
+          send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: msg.params.textDocument.uri, diagnostics: [{ severity: 1, range: { start: { line: 0, character: 7 } }, message: 'Mock type error' }] } });
+        } else if (msg.method === 'textDocument/definition') {
+          send({ jsonrpc: '2.0', id: msg.id, result: [{ uri: msg.params.textDocument.uri, range: { start: { line: 0, character: 13 } } }] });
+        } else if (msg.method === 'textDocument/hover') {
+          send({ jsonrpc: '2.0', id: msg.id, result: { contents: { kind: 'markdown', value: 'const answer: 42' } } });
+        } else if (msg.method === 'shutdown') {
+          send({ jsonrpc: '2.0', id: msg.id, result: null });
+        }
+      }
+    });
+  `);
+  const lsp = require('../src/main/lsp');
+  const spawnOpts = { cmd: process.execPath, args: [mockServer] };
+  try {
+    const def = await lsp.queryLsp(dir, { action: 'definition', file: 'sample.ts', line: 1, character: 14, spawnOpts });
+    assert.strictEqual(def, 'sample.ts:1:14');
+    const hov = await lsp.queryLsp(dir, { action: 'hover', file: 'sample.ts', line: 1, character: 14, spawnOpts });
+    assert.strictEqual(hov, 'const answer: 42');
+    const diag = await lsp.queryLsp(dir, { action: 'diagnostics', file: 'sample.ts', spawnOpts });
+    assert.match(diag, /\[Error\] 1:8 Mock type error/);
+  } finally {
+    await lsp.closeAll(dir);
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test('Benchmark: SWE-bench JSONL parser, failure categorization, and Markdown scorecard', () => {
+  const { parseSweBenchJsonl, categorizeFailure, formatScorecard } = require('../bench/run');
+  const tasks = parseSweBenchJsonl('{"instance_id":"sympy__1","repo":"sympy/sympy","problem_statement":"Fix bug","check":"pytest"}\n');
+  assert.strictEqual(tasks.length, 1);
+  assert.strictEqual(tasks[0].id, 'sympy__1');
+  assert.strictEqual(tasks[0].category, 'sympy');
+  assert.strictEqual(categorizeFailure({ pass: false, error: 'timeout' }), 'timeout');
+  assert.strictEqual(categorizeFailure({ pass: false, verifyFailed: true }), 'verify_failed');
+  assert.strictEqual(categorizeFailure({ pass: false }), 'patch_or_test_failed');
+  const md = formatScorecard({
+    date: '2026-11-18T00:00:00Z', model: 'auto', effort: 'high', runs: 1,
+    passed: 8, attempts: 10, successRate: 80, avgSeconds: 12, tokensIn: 1000, tokensOut: 500, cost: 0.12,
+    byCategory: { bugfix: { passed: 8, total: 10, passRate: 80 } },
+    failures: { timeout: 1, verify_failed: 1 },
+  });
+  assert.match(md, /8\/10 \(80%\)/);
+  assert.match(md, /\| bugfix \| 8 \| 10 \| 80% \|/);
+  assert.match(md, /\| timeout \| 1 \|/);
+});
+
+test('AsyncTaskQueue: queues jobs, cancels pending, tracks completion and errors', async () => {
+  const { AsyncTaskQueue } = require('../src/main/async-runner');
+  const q = new AsyncTaskQueue({
+    concurrency: 1,
+    runner: async (job) => {
+      await new Promise((r) => setTimeout(r, 25));
+      if (job.prompt === 'fail') throw new Error('boom');
+      return { ok: true, answer: `done:${job.prompt}` };
+    },
+  });
+  const j1 = q.enqueue({ projectDir: process.cwd(), prompt: 'task1' });
+  const j2 = q.enqueue({ projectDir: process.cwd(), prompt: 'cancel-me' });
+  const j3 = q.enqueue({ projectDir: process.cwd(), prompt: 'fail' });
+  assert.strictEqual(q.cancel(j2.id), true);
+  await q.drain();
+  assert.strictEqual(q.get(j1.id).status, 'done');
+  assert.strictEqual(q.get(j2.id).status, 'cancelled');
+  assert.strictEqual(q.get(j3.id).status, 'failed');
+  assert.strictEqual(q.get(j3.id).error, 'boom');
+});

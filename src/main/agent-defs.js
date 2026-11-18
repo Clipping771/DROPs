@@ -236,7 +236,22 @@ const IMAGE_GEN_DEF = {
   },
 };
 
-const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF];
+const LSP_QUERY_DEF = {
+  name: 'lsp_query',
+  description: 'Query a Language Server (TypeScript, Python, Go, Rust) for compiler-exact definition, references, hover type, or diagnostics at a file position.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['definition', 'references', 'hover', 'diagnostics', 'status'], description: 'LSP query type' },
+      file: { type: 'string', description: 'Relative path to the source file' },
+      line: { type: 'integer', description: '1-based line number (for definition, references, hover)' },
+      character: { type: 'integer', description: '1-based column number (for definition, references, hover)' },
+    },
+    required: ['action'],
+  },
+};
+
+const ALL = [TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, LSP_QUERY_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF];
 for (const d of ALL) tools.registerDef(d);
 
-module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF };
+module.exports = { TASK_DEF, WEB_SEARCH_DEF, ASK_USER_DEF, IMPACT_DEF, CODE_SEARCH_DEF, FIND_REFS_DEF, TYPE_CHECK_DEF, LSP_QUERY_DEF, AUDIT_DEF, FIND_BREAK_DEF, CHAPTER_DEF, APP_DEF, COMPUTER_DEF, SKILL_DEF, SCHEDULE_DEF, WRAP_UP_DEF, SAVE_PLAN_DEF, SWARM_DEF, WORKFLOW_DEF, IMAGE_GEN_DEF };
