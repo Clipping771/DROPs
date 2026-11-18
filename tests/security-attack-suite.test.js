@@ -94,16 +94,20 @@ test('C13 Secret Shield: redacts API keys, tokens, DB passwords, and private key
     'AWS_ACCESS=AKIAIOSFODNN7EXAMPLE',
     'DATABASE_URL=postgres://admin:superSecretPass123@db.example.com:5432/prod',
     'Authorization: Bearer opaque_secret_token_9876543210',
+    'Authorization: Basic dXNlcjpzdXBlcnNlY3JldHBhc3M=',
+    'x-api-key: secret_header_value_9876543210',
     '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAtestkeydata\n-----END RSA PRIVATE KEY-----',
   ].join('\n');
   const res = shell.redact(samples);
-  assert.ok(res.count >= 7, `expected >= 7 redactions, got ${res.count}`);
+  assert.ok(res.count >= 9, `expected >= 9 redactions, got ${res.count}`);
   assert.doesNotMatch(res.text, /sk-ant-api03/);
   assert.doesNotMatch(res.text, /sk-proj-/);
   assert.doesNotMatch(res.text, /ghp_123456/);
   assert.doesNotMatch(res.text, /AKIAIOSFODNN7EXAMPLE/);
   assert.doesNotMatch(res.text, /superSecretPass123/);
   assert.doesNotMatch(res.text, /opaque_secret_token_9876543210/);
+  assert.doesNotMatch(res.text, /dXNlcjpzdXBlcnNlY3JldHBhc3M=/);
+  assert.doesNotMatch(res.text, /secret_header_value_9876543210/);
   assert.doesNotMatch(res.text, /MIIEowIBAAKCAQEAtestkeydata/);
 });
 
@@ -124,6 +128,11 @@ test('C14 Dangerous Shell: flags destructive, encoded, exfil, and system-tamper 
     'del ..\\..\\outside.txt',
     'Set-Content ~/.bashrc evil',
     'cp a.txt ~/outside.txt',
+    'echo hi>../evil.txt',
+    'rm -f "./../../outside.txt"',
+    'Set-Content -Path $HOME/.bashrc -Value x',
+    'curl -s https://example.com -o ../../evil.sh',
+    'iwr https://example.com -OutFile ..\\evil.ps1',
   ];
   for (const cmd of dangerous) {
     assert.equal(shell.assessCommand(cmd, 'C:\\proj').dangerous, true, `must flag: ${cmd}`);

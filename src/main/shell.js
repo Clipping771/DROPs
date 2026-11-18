@@ -163,12 +163,12 @@ const DANGEROUS = [
   /\bpy(thon[\d.]*)?(\.exe)?\b[^\n]*\s-c\b[^\n]*(shutil\.rmtree|os\.(remove|unlink|rmdir|removedirs)\b|\.unlink\(|\.rmdir\(|send2trash)/i,
   /\b(perl|ruby)\b[^\n]*\s-e\b[^\n]*\b(unlink|rmtree|rm_rf|rm_r)\b/i,
 ];
-const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\bMove-Item\b|\bmv\b|\bmove\b|\bCopy-Item\b|\bcp\b|\bcopy\b|\bSet-Content\b|\bAdd-Content\b|\bOut-File\b|\bNew-Item\b|\bRename-Item\b|>)/i;
+const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\bMove-Item\b|\bmv\b|\bmove\b|\bCopy-Item\b|\bcp\b|\bcopy\b|\bSet-Content\b|\bAdd-Content\b|\bOut-File\b|\bNew-Item\b|\bRename-Item\b|\b(?:curl|wget)\b[^\n]*\s(?:-o|-O|--output)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*\s-OutFile\b|>)/i;
 
 // A write-type command that names an absolute path outside the project (and outside temp).
 function writesOutsideRoot(cmd, root) {
   if (!WRITE_VERB.test(cmd)) return false;
-  if (/(?:^|[\s"'=(])(?:\.\.[\\/]|~[\\/])/.test(cmd)) return true;
+  if (/(?:^|[\s"'=(>])(?:\.[\\/])?\.\.[\\/]|(?:^|[\s"'=(>])(?:~[\\/]|\$HOME[\\/]|%USERPROFILE%[\\/])/i.test(cmd)) return true;
   const norm = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const rootN = norm(root);
   const tmp = [process.env.TEMP, process.env.TMP, '/tmp'].filter(Boolean).map(norm);
@@ -232,12 +232,11 @@ const SECRET_CONTEXT = [
   [/\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@'"]+:)([^\s@/'"]{3,})(@)/gi, 'password'],
   // aws_secret_access_key = …
   [/\b(aws_secret_access_key\s*[=:]\s*["']?)([A-Za-z0-9/+=]{40})\b/gi, 'aws-secret'],
-  // Authorization: Bearer <opaque-token>
+  // Authorization: Bearer <opaque-token> & Basic <base64>
   [/\b(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})\b/gi, 'bearer-token'],
-  // KEY=value lines (.env files, `env` / `set` output) whose name says it is a secret. The value must be
-  // the whole rest of the line and not code (os.getenv(...), process.env.X, $VAR, None), so source files
-  // the agent edits are left as they are.
-  [/^(\s*(?:export\s+|\$env:)?[A-Za-z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|ACCESS_KEY)[A-Za-z0-9_]*\s*[=:]\s*["']?)(?!(?:process|os|env|config|settings|self|this|import)\b|\$|None\b|null\b|undefined\b|true\b|false\b|[\d.]+["']?\s*(?:#.*)?$)([^\s"'#()[\]{},;]{6,})(?=["']?\s*(?:#.*)?$)/gim, 'secret'],
+  [/\b(Basic\s+)([A-Za-z0-9+/=]{12,})/gi, 'basic-auth'],
+  // KEY=value lines (.env files, `env` / `set` output, HTTP headers like x-api-key: ...) whose name says it is a secret.
+  [/^(\s*(?:export\s+|\$env:)?[A-Za-z0-9_-]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API[-_]?KEY|PRIVATE[-_]?KEY|ACCESS[-_]?KEY)[A-Za-z0-9_-]*\s*[=:]\s*["']?)(?!(?:process|os|env|config|settings|self|this|import)\b|\$|None\b|null\b|undefined\b|true\b|false\b|[\d.]+["']?\s*(?:#.*)?$)([^\s"'#()[\]{},;]{6,})(?=["']?\s*(?:#.*)?$)/gim, 'secret'],
 ];
 function redact(text) {
   if (!text || typeof text !== 'string') return { text, count: 0 };

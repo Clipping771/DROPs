@@ -223,7 +223,13 @@ function createWindow() {
   }
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
-  win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); } });
+  const appPage = require('url').pathToFileURL(path.join(__dirname, '..', 'renderer', 'index.html')).href;
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url.split('#')[0].split('?')[0] !== appPage) {
+      e.preventDefault();
+      if (/^https?:/.test(url)) shell.openExternal(url);
+    }
+  });
   win.webContents.on('before-input-event', (_e, input) => { if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools(); });
   if (!themeListener) themeListener = nativeTheme.on('updated', () => { const th = applyTheme(store.getSettings().theme || 'dark'); win?.webContents.send('theme:changed', th); });
 }
@@ -501,10 +507,10 @@ handle('fs:read', async (root, rel) => {
   return { content: buf.toString('utf8') };
 });
 handle('fs:write', async (root, rel, content) => { await fs.promises.writeFile(resolveInRoot(projectRoot(root), rel), String(content), 'utf8'); return true; });
-const EXEC_EXT = /\.(exe|bat|cmd|ps1|vbs|vbe|jse|wsf|wsh|msi|scr|com|pif|hta)$/i;
+const EXEC_EXT = /\.(exe|bat|cmd|ps1|vbs|vbe|js|jse|wsf|wsh|msi|scr|com|pif|hta|lnk|url|reg|scf)$/i;
 handle('fs:openPath', (root, rel) => {
   const target = resolveInRoot(projectRoot(root), rel || '.');
-  if (EXEC_EXT.test(target)) { shell.showItemInFolder(target); return ''; }
+  if (EXEC_EXT.test(target.replace(/[. ]+$/, ''))) { shell.showItemInFolder(target); return ''; }
   return shell.openPath(target);
 });
 handle('fs:reveal', (root, rel) => shell.showItemInFolder(resolveInRoot(projectRoot(root), rel || '.')));
