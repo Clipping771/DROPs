@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('drops', {
   procList: invoke('proc:list'),
   procStop: invoke('proc:stop'),
   procOutput: invoke('proc:output'),
+  browserInteract: invoke('browser:interact'),
   gitStatus: invoke('git:status'),
   gitVersions: invoke('git:versions'),
   gitLog: invoke('git:log'),

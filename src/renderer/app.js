@@ -823,14 +823,71 @@ function renderBrowserPane(v, fresh) {
   const f = v?.browserFrame;
   const badge = $('#browserBadge');
   if (badge) badge.hidden = !(fresh && !$('#browserBody').offsetParent);
-  if (!f) { box.innerHTML = '<div class="empty">When DROPs uses the browser, the page it sees shows here, live.</div>'; return; }
+  const key = v?.data?.projectDir || S.project || 'default';
+
+  const runNav = async (action, payload = {}) => {
+    try {
+      const next = await api.browserInteract?.(key, action, payload);
+      if (next && v) {
+        v.browserFrame = { ...next, step: action };
+        renderBrowserPane(v, false);
+      }
+    } catch (e) { toast(e.message || 'Browser error'); }
+  };
+
   box.innerHTML = '';
+  const nav = h('div', 'bp-nav');
+  nav.innerHTML = `
+    <button class="icon-btn bp-btn" data-act="back" title="Back">←</button>
+    <button class="icon-btn bp-btn" data-act="forward" title="Forward">→</button>
+    <button class="icon-btn bp-btn" data-act="reload" title="Reload">↻</button>
+    <input class="input sm bp-addr mono" type="text" placeholder="Enter URL (e.g. http://localhost:3100)" />
+  `;
+  const addr = $('.bp-addr', nav);
+  addr.value = f?.url || '';
+  addr.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); runNav('open', { url: addr.value }); } };
+  nav.querySelectorAll('.bp-btn').forEach((b) => (b.onclick = () => runNav(b.dataset.act)));
+  box.appendChild(nav);
+
+  if (!f) {
+    box.appendChild(h('div', 'empty', 'Type a URL above (e.g. http://localhost:3100) and press Enter, or ask DROPs to open a page.'));
+    return;
+  }
+
   const head = h('div', 'bp-head');
   head.innerHTML = `${icon('globe', 'xs')}<span class="bp-url mono"></span><span class="bp-step"></span>`;
   head.querySelector('.bp-url').textContent = f.url;
   head.querySelector('.bp-step').textContent = f.step || '';
-  const img = h('img', 'bp-shot'); img.src = `data:image/jpeg;base64,${f.data}`; img.alt = f.title || 'Browser page';
-  img.onclick = () => img.classList.toggle('zoom');
+
+  const img = h('img', 'bp-shot interactive');
+  img.src = `data:image/jpeg;base64,${f.data}`;
+  img.alt = f.title || 'Browser page';
+  img.tabIndex = 0;
+  img.title = 'Click, scroll, or type directly on the live page';
+  img.onclick = (e) => {
+    img.focus();
+    const r = img.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    runNav('clickAt', { xRatio: (e.clientX - r.left) / r.width, yRatio: (e.clientY - r.top) / r.height });
+  };
+  let wheelTimer = null, wheelDelta = 0;
+  img.onwheel = (e) => {
+    e.preventDefault();
+    wheelDelta += e.deltaY;
+    if (wheelTimer) return;
+    wheelTimer = setTimeout(() => {
+      const d = wheelDelta; wheelDelta = 0; wheelTimer = null;
+      runNav('scroll', { deltaY: d });
+    }, 90);
+  };
+  img.onkeydown = (e) => {
+    if (['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+      e.preventDefault(); runNav('type', { key: e.key });
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault(); runNav('type', { text: e.key });
+    }
+  };
+
   const steps = h('div', 'bp-steps');
   for (const s of (v.browserSteps || []).slice(-8).reverse()) {
     const r = h('div', 'bp-row');

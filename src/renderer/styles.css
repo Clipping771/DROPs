@@ -2301,3 +2301,14 @@ label.pill[title="Model"]:hover { background: var(--panel-3); }
 /* The calm dark palette above is declared on :root, which also matched in light mode and gave it
    dark code blocks and dark-theme selection colours. Light mode gets its own values back. */
 [data-theme="light"] { --hover: rgba(15, 23, 42, 0.05); --active: #e8f0fe; --active-ink: #0b3d91; --code-bg: #f6f8fa; --scrim: rgba(15, 23, 42, 0.36); }
+
+/* Interactive Live Browser Pane */
+.bp-nav {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 8px; border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.bp-btn { width: 26px; height: 26px; font-size: 13px; border-radius: 6px; }
+.bp-addr { flex: 1; min-width: 0; height: 28px; font-size: 12px; padding: 0 8px; }
+.bp-shot.interactive { cursor: pointer; outline: none; border-radius: 6px; }
+.bp-shot.interactive:focus { box-shadow: 0 0 0 2px var(--accent); }

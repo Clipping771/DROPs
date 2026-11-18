@@ -32,6 +32,7 @@ const git = require('./git');
 const ollama = require('./ollama');
 const oai = require('./oai');
 const report = require('./report');
+const browser = require('./browser');
 const { McpManager, projectServers, isProjectTrusted, trustProject, untrustedRows } = require('./mcp');
 const { IGNORE, resolveInRoot } = require('./tools');
 const { listCommands } = require('./commands');
@@ -685,6 +686,7 @@ handle('agent:rewind', async (id, turnIndex) => {
 handle('proc:list', (id) => getAgent(id)?.procs.list() || []);
 handle('proc:stop', (id, pid) => getAgent(id)?.procs.stop(pid));
 handle('proc:output', (id, pid) => getAgent(id)?.procs.get(pid)?.output.slice(-200000) || '');
+handle('browser:interact', async (key, action, payload) => browser.interact(key || currentProject || 'default', action, payload));
 
 // ---------- git ----------
 // Like the file calls, git only works on the open project (the renderer's root is never trusted).

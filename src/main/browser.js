@@ -365,4 +365,42 @@ async function frame(key) {
   } catch { return null; }
 }
 
-module.exports = { available, act, closeAll, closeKey, isOpen, locate, frame, hostAllowed };
+/** Interactive controls for the user's Live Browser Pane (shares the same Playwright session). */
+async function interact(key, action, payload = {}) {
+  if (!pw) throw new Error('The browser is not available (playwright-core is not installed).');
+  const s = sessionFor(key);
+  const page = await s.ensure();
+  if (action === 'open') {
+    const raw = String(payload.url || '').trim();
+    if (!raw) return frame(key);
+    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    let u;
+    try { u = new URL(url); } catch { throw new Error(`Invalid URL: ${raw}`); }
+    if (!/^https?:$/.test(u.protocol)) throw new Error('Only http:// and https:// URLs are allowed.');
+    if (!(await hostAllowed(u.hostname))) throw new Error(`${u.hostname} is on a private network.`);
+    await page.goto(u.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+  } else if (action === 'back') {
+    await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+  } else if (action === 'forward') {
+    await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+  } else if (action === 'reload') {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+  } else if (action === 'clickAt') {
+    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    const x = Math.max(0, Math.min(vp.width - 1, Math.round(Number(payload.xRatio || 0) * vp.width)));
+    const y = Math.max(0, Math.min(vp.height - 1, Math.round(Number(payload.yRatio || 0) * vp.height)));
+    await page.mouse.click(x, y);
+    await page.waitForTimeout(180).catch(() => {});
+  } else if (action === 'scroll') {
+    await page.mouse.wheel(0, Number(payload.deltaY) || 300);
+    await page.waitForTimeout(100).catch(() => {});
+  } else if (action === 'type') {
+    if (payload.key) await page.keyboard.press(String(payload.key));
+    else if (payload.text) await page.keyboard.type(String(payload.text));
+    await page.waitForTimeout(120).catch(() => {});
+  }
+  return frame(key);
+}
+
+module.exports = { available, act, interact, closeAll, closeKey, isOpen, locate, frame, hostAllowed };
