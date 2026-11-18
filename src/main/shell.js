@@ -163,12 +163,13 @@ const DANGEROUS = [
   /\bpy(thon[\d.]*)?(\.exe)?\b[^\n]*\s-c\b[^\n]*(shutil\.rmtree|os\.(remove|unlink|rmdir|removedirs)\b|\.unlink\(|\.rmdir\(|send2trash)/i,
   /\b(perl|ruby)\b[^\n]*\s-e\b[^\n]*\b(unlink|rmtree|rm_rf|rm_r)\b/i,
 ];
-const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\bMove-Item\b|\bmv\b|\bmove\b|\bCopy-Item\b|\bcp\b|\bcopy\b|\bSet-Content\b|\bAdd-Content\b|\bOut-File\b|\bNew-Item\b|\bRename-Item\b|\b(?:curl|wget)\b[^\n]*\s(?:-o|-O|--output)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*\s-OutFile\b|>)/i;
+const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\bMove-Item\b|\bmv\b|\bmove\b|\bCopy-Item\b|\bcp\b|\bcopy\b|\bSet-Content\b|\bsc\b|\bAdd-Content\b|\bac\b|\bOut-File\b|\bNew-Item\b|\bni\b|\bRename-Item\b|\btee\b|\bdd\b[^\n]*\bof=|\b(?:curl|wget)\b[^\n]*(?:-o|-O|--output)(?=[\s=."'/\\~])|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*\s-OutFile\b|>)/i;
 
 // A write-type command that names an absolute path outside the project (and outside temp).
 function writesOutsideRoot(cmd, root) {
-  if (!WRITE_VERB.test(cmd)) return false;
-  if (/(?:^|[\s"'=(>])(?:\.[\\/])?\.\.[\\/]|(?:^|[\s"'=(>])(?:~[\\/]|\$HOME[\\/]|%USERPROFILE%[\\/])/i.test(cmd)) return true;
+  const interpWrite = /\b(?:node|deno|bun)\b[^\n]*\b(?:writeFileSync|writeFile|appendFileSync|appendFile)\b|\bpy(?:thon[\d.]*)?\b[^\n]*\bopen\s*\(/i.test(cmd);
+  if (!WRITE_VERB.test(cmd) && !interpWrite) return false;
+  if (/(?:^|[\s"'=(>]|-[oO])(?:\.[\\/])?\.\.[\\/]|(?:^|[\s"'=(>]|-[oO])(?:~[\\/]|\$HOME[\\/]|\$env:(?:USERPROFILE|APPDATA|LOCALAPPDATA)[\\/]|%(?:USERPROFILE|APPDATA|LOCALAPPDATA)%[\\/])/i.test(cmd)) return true;
   const norm = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const rootN = norm(root);
   const tmp = [process.env.TEMP, process.env.TMP, '/tmp'].filter(Boolean).map(norm);
@@ -232,9 +233,13 @@ const SECRET_CONTEXT = [
   [/\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@'"]+:)([^\s@/'"]{3,})(@)/gi, 'password'],
   // aws_secret_access_key = …
   [/\b(aws_secret_access_key\s*[=:]\s*["']?)([A-Za-z0-9/+=]{40})\b/gi, 'aws-secret'],
-  // Authorization: Bearer <opaque-token> & Basic <base64>
+  // Authorization: Bearer <opaque-token> & Authorization: Basic <base64>
   [/\b(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})\b/gi, 'bearer-token'],
-  [/\b(Basic\s+)([A-Za-z0-9+/=]{12,})/gi, 'basic-auth'],
+  [/\b(Authorization\s*:\s*Basic\s+)([A-Za-z0-9+/=]{12,})/gi, 'basic-auth'],
+  // URL query secrets (?api_key=..., &token=..., &secret=...)
+  [/([?&](?:api_?key|token|secret|password|access_token)=)([^&\s"']+)/gi, 'query-secret'],
+  // Single-line JSON secret fields ("apiKey": "...", "secret": "...", "token": "...", "password": "...")
+  [/("(?:[a-zA-Z0-9_-]*(?:api_?key|secret|token|password|passwd|private_?key|access_?key)[a-zA-Z0-9_-]*)"\s*:\s*")([^"\r\n]{6,})(")/gi, 'json-secret'],
   // KEY=value lines (.env files, `env` / `set` output, HTTP headers like x-api-key: ...) whose name says it is a secret.
   [/^(\s*(?:export\s+|\$env:)?[A-Za-z0-9_-]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API[-_]?KEY|PRIVATE[-_]?KEY|ACCESS[-_]?KEY)[A-Za-z0-9_-]*\s*[=:]\s*["']?)(?!(?:process|os|env|config|settings|self|this|import)\b|\$|None\b|null\b|undefined\b|true\b|false\b|[\d.]+["']?\s*(?:#.*)?$)([^\s"'#()[\]{},;]{6,})(?=["']?\s*(?:#.*)?$)/gim, 'secret'],
 ];

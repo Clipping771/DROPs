@@ -300,7 +300,9 @@ async function getGeminiModels(force) {
 }
 
 const handle = (ch, fn) => ipcMain.handle(ch, async (e, ...args) => {
-  if (win && e.sender !== win.webContents) throw new Error('Unauthorized IPC sender.');
+  if (win && (e.sender !== win.webContents || (e.senderFrame && e.senderFrame !== win.webContents.mainFrame))) {
+    throw new Error('Unauthorized IPC sender.');
+  }
   const url = e.senderFrame?.url;
   if (url && !url.startsWith('file://')) throw new Error('Unauthorized IPC frame origin.');
   return fn(...args);
