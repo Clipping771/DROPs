@@ -409,7 +409,7 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
 
     const wrap = h('div', 'tasks-list');
     if (!tasks.length) {
-      await renderSchedules(wrap, true);
+      await renderSchedules(wrap);
       wrap.appendChild(h('div', 'empty', 'No tasks yet. Requests run here in the background, and scheduled ones start by themselves.'));
       box.appendChild(wrap);
       return;
@@ -490,19 +490,19 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
       }
     }
 
-    await renderSchedules(wrap, false);
+    await renderSchedules(wrap);
     box.appendChild(wrap);
   }
 
   // ---------- scheduled tasks ----------
-  async function renderSchedules(wrap, showEmptyHint = true) {
+  async function renderSchedules(wrap) {
     let list = [];
     try { list = await api.scheduleList(); } catch { list = []; }
     const head = h('div', 'glance-title sched-head');
     head.innerHTML = '<span>Scheduled</span>';
     const add = h('button', 'btn ghost sm', 'New'); add.onclick = () => editSchedule(null);
     head.appendChild(add); wrap.appendChild(head);
-    if (!list.length) { if (showEmptyHint) wrap.appendChild(h('div', 'sched-empty', 'Nothing scheduled. A scheduled task runs a prompt by itself, once or on a repeat, in a new session.')); return; }
+    if (!list.length) { wrap.appendChild(h('div', 'sched-empty', 'No scheduled tasks.')); return; }
     for (const s of list) {
       const row = h('div', 'task-row sched' + (s.enabled === false ? ' off' : ''));
       const next = s.enabled !== false && s.nextRun ? `next ${new Date(s.nextRun).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'off';
