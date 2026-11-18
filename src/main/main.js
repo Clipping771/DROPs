@@ -688,6 +688,63 @@ handle('proc:stop', (id, pid) => getAgent(id)?.procs.stop(pid));
 handle('proc:output', (id, pid) => getAgent(id)?.procs.get(pid)?.output.slice(-200000) || '');
 handle('browser:interact', async (key, action, payload) => browser.interact(key || currentProject || 'default', action, payload));
 
+// Monaco Inline AI Edit (Ctrl+K)
+handle('editor:inlineAi', async ({ rel, code, selection, instruction, model }) => {
+  const s = store.getSettings();
+  const useModel = model || s.defaultModel || 'claude-opus-5-5';
+  const deps = {
+    getApiKey: () => store.getApiKey(s),
+    getGeminiKey: () => store.getGeminiKey(s),
+    getProviderKey: (pid) => store.getProviderKey(pid, s),
+    getSettings: () => store.getSettings(),
+  };
+  const prompt = [
+    `File: ${rel || 'untitled'}`,
+    selection ? `Selected code to replace:\n\`\`\`\n${selection}\n\`\`\`` : `Full file:\n\`\`\`\n${code}\n\`\`\``,
+    `Instruction: ${instruction}`,
+    'Return ONLY the replacement code (no markdown fences, no commentary).',
+  ].join('\n\n');
+  const raw = await providers.complete({
+    model: useModel,
+    system: 'You are an expert code editor. Output ONLY the exact replacement code with matching indentation. Never wrap in markdown code fences or add explanations.',
+    prompt,
+    deps,
+  });
+  return String(raw || '').replace(/^```[\w-]*\r?\n?/, '').replace(/\r?\n?```$/, '');
+});
+
+// Interactive Terminal Tab (persistent host shell per project)
+const { detectHostShell, stripAnsi, killTree } = require('./shell');
+let termProc = null;
+handle('term:start', (root) => {
+  const dir = projectRoot(root || currentProject);
+  if (termProc && !termProc.killed) return { running: true, label: detectHostShell().label };
+  const sh = detectHostShell();
+  const args = sh.kind === 'powershell' ? ['-NoLogo', '-NoExit', '-Command', '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8'] : ['-i'];
+  termProc = require('child_process').spawn(sh.file, args, { cwd: dir, windowsHide: true, env: process.env });
+  const sendChunk = (d) => {
+    const text = stripAnsi(String(d || ''));
+    if (text && win && !win.isDestroyed()) win.webContents.send('term:data', text);
+  };
+  termProc.stdout?.on('data', sendChunk);
+  termProc.stderr?.on('data', sendChunk);
+  termProc.on('close', (code) => {
+    termProc = null;
+    if (win && !win.isDestroyed()) win.webContents.send('term:data', `\n[terminal exited: ${code ?? 0}]\n`);
+  });
+  return { running: true, label: sh.label };
+});
+handle('term:input', (line) => {
+  if (!termProc || termProc.killed) throw new Error('Terminal is not running.');
+  termProc.stdin?.write(String(line || '') + '\n');
+  return true;
+});
+handle('term:stop', () => {
+  if (termProc && !termProc.killed) { killTree(termProc.pid); termProc = null; }
+  return true;
+});
+app.on('before-quit', () => { if (termProc && !termProc.killed) killTree(termProc.pid); });
+
 // ---------- git ----------
 // Like the file calls, git only works on the open project (the renderer's root is never trusted).
 handle('git:status', (root) => { try { return git.status(projectRoot(root)); } catch (e) { return { isRepo: false, error: e.message }; } });

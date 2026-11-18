@@ -1195,6 +1195,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       };
       this.data.plan = plan;
       this.save();
+      this.emit('plan-updated', { plan });
       const out = `Plan saved (${plan.steps.length} steps${plan.files.length ? `, ${plan.files.length} files` : ''}). It will stay pinned in your context.`;
       meta.summary = plan.goal.slice(0, 60); meta.status = 'done'; meta.output = out;
       this.emit('tool-start', { id: u.id, name: 'save_plan', input: u.input, summary: meta.summary });

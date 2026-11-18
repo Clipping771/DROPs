@@ -54,8 +54,9 @@ const Editor = (() => {
     if (!t) return;
     if (t.kind === 'file') {
       const save = h('button', 'btn sm ghost'); save.innerHTML = icon('save', 'xs') + 'Save'; save.title = 'Save (Ctrl+S)'; save.disabled = !t.dirty; save.onclick = () => saveActive();
+      const ai = h('button', 'btn sm ghost'); ai.innerHTML = icon('sparkles', 'xs') + 'AI Edit'; ai.title = 'Inline AI Edit (Ctrl+K)'; ai.onclick = () => openInlineAi();
       const ask = h('button', 'btn sm ghost'); ask.innerHTML = icon('at', 'xs') + 'Mention'; ask.title = 'Mention this file (and selection) in chat'; ask.onclick = () => mentionActive();
-      acts.append(ask, save);
+      acts.append(ai, ask, save);
     } else {
       const open = h('button', 'btn sm ghost'); open.innerHTML = icon('fileCode', 'xs') + 'Open file'; open.onclick = () => openFile(t.rel);
       acts.append(open);
@@ -73,6 +74,7 @@ const Editor = (() => {
         const div = h('div'); div.style.cssText = 'position:absolute;inset:0'; host.appendChild(div);
         editor = monaco.editor.create(div, { ...opts(), model: null });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveActive());
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => openInlineAi());
       }
       editor.getContainerDomNode().style.display = '';
       editor.setModel(t.model);
@@ -181,6 +183,46 @@ const Editor = (() => {
   }
   function setTheme(t) { theme = t; if (monaco) monaco.editor.setTheme(t === 'dark' ? 'drops-dark' : 'drops-light'); }
   function closeAll() { [...tabs].forEach((t) => { t.dirty = false; close(t); }); }
+
+  async function openInlineAi() {
+    if (!active || active.kind !== 'file' || !editor) return;
+    $('#edInlineAi')?.remove();
+    const bar = h('div', 'ed-inline-ai');
+    bar.id = 'edInlineAi';
+    bar.innerHTML = `<input class="input sm" placeholder="Describe inline edit for selection or file… (Enter to apply, Esc to cancel)" /><button class="btn primary sm">Apply</button><button class="icon-btn sm" title="Close">${icon('x', 'xs')}</button>`;
+    const inp = $('input', bar), applyBtn = $('.btn', bar), closeBtn = $('.icon-btn', bar);
+    const close = () => { bar.remove(); editor?.focus(); };
+    closeBtn.onclick = close;
+    const run = async () => {
+      const instruction = inp.value.trim();
+      if (!instruction) return;
+      const sel = editor.getSelection();
+      const selection = sel && !sel.isEmpty() ? active.model.getValueInRange(sel) : '';
+      const range = sel && !sel.isEmpty() ? sel : active.model.getFullModelRange();
+      applyBtn.disabled = true; applyBtn.textContent = 'Editing…';
+      try {
+        const out = await api.editorInlineAi?.({
+          rel: active.rel,
+          code: active.model.getValue(),
+          selection,
+          instruction,
+          model: $('#modelSel')?.value,
+        });
+        if (typeof out === 'string' && out.length) {
+          editor.executeEdits('inline-ai', [{ range, text: out, forceMoveMarkers: true }]);
+          toast('Inline AI edit applied (Ctrl+Z to undo)');
+          close();
+        } else toast('AI returned empty edit');
+      } catch (e) { toast(e.message || 'Inline AI failed'); applyBtn.disabled = false; applyBtn.textContent = 'Apply'; }
+    };
+    applyBtn.onclick = run;
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); run(); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(); }
+    };
+    $('#editorPane').insertBefore(bar, $('#edHost'));
+    inp.focus();
+  }
 
   $('#edClose').onclick = () => hide();
   return { openFile, openSessionDiff, openGitDiff, reloadFile, setTheme, hide, closeAll, isOpen: () => !$('#editorPane').hidden };

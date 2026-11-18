@@ -615,6 +615,12 @@ function onEvent(ev) {
     case 'permission': showPermission(v, ev); break;
     case 'question': showQuestion(v, ev); break;
     case 'todos': v.data.todos = ev.todos; renderTaskCard(v); if (cur) Panels.renderPlan(); break;
+    case 'plan-updated': {
+      v.data.plan = ev.plan;
+      renderPlanArtifact(v, ev.plan);
+      if (cur) Panels.renderPlan();
+      break;
+    }
     case 'chapter': {
       place(v, chapterEl(ev.id, ev.title, ev.summary));
       v.group = null;
@@ -814,6 +820,29 @@ function renderToc(v) {
     list.appendChild(it);
   });
   toc.append(btn, list);
+}
+
+function renderPlanArtifact(v, plan) {
+  if (!plan?.goal) return;
+  const card = h('div', 'plan-artifact-card');
+  card.innerHTML = `
+    <div class="pa-head">
+      <span class="pa-badge">${icon('list', 'xs')} Implementation Plan</span>
+      <button class="btn primary sm pa-proceed">Proceed</button>
+    </div>
+    <div class="pa-goal"></div>
+    <ol class="pa-steps"></ol>
+    ${plan.verification ? '<div class="pa-verify mono"></div>' : ''}
+  `;
+  $('.pa-goal', card).textContent = plan.goal;
+  const ol = $('.pa-steps', card);
+  for (const s of plan.steps || []) { const li = document.createElement('li'); li.textContent = s; ol.appendChild(li); }
+  if (plan.verification) $('.pa-verify', card).textContent = `Verify: ${plan.verification}`;
+  $('.pa-proceed', card).onclick = () => {
+    if (typeof setMode === 'function' && (S.mode === 'plan' || S.mode === 'architect')) { setMode('code'); persistOpts?.(); }
+    sendText('Proceed with the implementation plan.');
+  };
+  place(v, card);
 }
 
 // ---------- live browser pane ----------

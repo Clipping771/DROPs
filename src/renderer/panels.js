@@ -576,9 +576,21 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
 
   function renderPlan() {
     const box = $('#planBody'); box.innerHTML = '';
-    const todos = currentView()?.data.todos || [];
+    const v = currentView();
+    const todos = v?.data.todos || [];
     box.appendChild(overviewPanel());
-    if (!todos.length) { if (!Object.keys(currentView()?.data.changes || {}).length) box.appendChild(howPanel()); return; }
+    if (v?.data.plan?.goal) {
+      const p = v.data.plan;
+      const card = h('div', 'plan-artifact-card');
+      card.innerHTML = `<div class="pa-head"><span class="pa-badge">${icon('list', 'xs')} Active Plan</span><button class="btn primary sm pa-proceed">Proceed</button></div><div class="pa-goal"></div>`;
+      $('.pa-goal', card).textContent = p.goal;
+      $('.pa-proceed', card).onclick = () => {
+        if (typeof setMode === 'function' && (S.mode === 'plan' || S.mode === 'architect')) { setMode('code'); persistOpts?.(); }
+        sendText('Proceed with the implementation plan.');
+      };
+      box.appendChild(card);
+    }
+    if (!todos.length) { if (!Object.keys(v?.data.changes || {}).length && !v?.data.plan?.goal) box.appendChild(howPanel()); return; }
     const done = todos.filter((t) => t.status === 'completed').length;
     const head = h('div', 'todo-head'); head.innerHTML = `<span>Task plan</span><span>${done}/${todos.length}</span>`;
     const pr = h('div', 'progress'); const bar = h('div'); bar.style.width = `${(done / todos.length) * 100}%`; pr.appendChild(bar);
@@ -685,13 +697,66 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     const pre = document.querySelector(`.proc[data-id="${ev.id}"] pre`);
     if (pre) { const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40; pre.textContent = p.out.slice(-20000); if (stick) pre.scrollTop = pre.scrollHeight; }
   }
+  let termLog = '', termRunning = false, termHistory = [], termHistIdx = -1, termHooked = false;
+  function ensureTermHook() {
+    if (termHooked) return;
+    termHooked = true;
+    api.onTermData?.((chunk) => {
+      termLog += chunk;
+      if (termLog.length > 100000) termLog = termLog.slice(-80000);
+      if (/\[terminal exited:/.test(chunk)) termRunning = false;
+      const pre = $('#termLiveOut');
+      if (pre) { pre.textContent = termLog.slice(-20000); pre.scrollTop = pre.scrollHeight; }
+    });
+  }
+
   function renderProcs() {
+    ensureTermHook();
     const box = $('#termBody'); box.innerHTML = '';
+    const termCard = h('div', 'term-card');
+    termCard.innerHTML = `
+      <div class="proc-head">
+        <span class="state ${termRunning ? 'on' : ''}"></span>
+        <b class="grow">Interactive Terminal</b>
+        <button class="btn sm term-start">${termRunning ? 'Stop' : 'Start shell'}</button>
+        <button class="btn ghost sm term-clear">Clear</button>
+      </div>
+      <pre class="term-live" id="termLiveOut"></pre>
+      <div class="term-in-row"><span class="mono muted">&gt;</span><input class="input sm term-in mono" placeholder="Type command and press Enter…" /></div>
+    `;
+    const preLive = $('.term-live', termCard);
+    preLive.textContent = termLog.slice(-20000) || '(Click "Start shell" or type a command below to launch an interactive shell)';
+    $('.term-clear', termCard).onclick = () => { termLog = ''; preLive.textContent = ''; };
+    $('.term-start', termCard).onclick = async () => {
+      if (termRunning) { await api.termStop?.(); termRunning = false; renderProcs(); return; }
+      try { await api.termStart?.(S.project); termRunning = true; renderProcs(); $('.term-in', termCard)?.focus(); } catch (e) { toast(e.message || 'Could not start shell'); }
+    };
+    const inp = $('.term-in', termCard);
+    inp.onkeydown = async (e) => {
+      if (e.key === 'ArrowUp' && termHistory.length) {
+        e.preventDefault();
+        termHistIdx = termHistIdx < 0 ? termHistory.length - 1 : Math.max(0, termHistIdx - 1);
+        inp.value = termHistory[termHistIdx] || '';
+      } else if (e.key === 'ArrowDown' && termHistIdx >= 0) {
+        e.preventDefault();
+        termHistIdx = termHistIdx + 1 >= termHistory.length ? -1 : termHistIdx + 1;
+        inp.value = termHistIdx < 0 ? '' : termHistory[termHistIdx];
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const cmd = inp.value;
+        if (!cmd.trim()) return;
+        termHistory.push(cmd); termHistIdx = -1; inp.value = '';
+        if (!termRunning) { try { await api.termStart?.(S.project); termRunning = true; $('.state', termCard)?.classList.add('on'); $('.term-start', termCard).textContent = 'Stop'; } catch (err) { toast(err.message); return; } }
+        await api.termInput?.(cmd);
+      }
+    };
+    box.appendChild(termCard);
+
     const v = currentView();
     const procs = v ? [...v.procs.values()] : [];
     const running = procs.filter((p) => p.running).length;
     $('#procBadge').hidden = !running; $('#procBadge').textContent = running;
-    if (!procs.length) { box.appendChild(h('div', 'empty', 'Dev servers, watchers and other long-running processes the agent starts appear here with live output.')); return; }
+    if (!procs.length) { box.appendChild(h('div', 'empty', 'Background dev servers and watchers the agent starts appear below.')); return; }
     for (const p of procs.slice().reverse()) {
       const d = h('div', 'proc'); d.dataset.id = p.id;
       const head = h('div', 'proc-head');
