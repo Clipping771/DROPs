@@ -475,7 +475,17 @@ ${r.evidence.summary}${attacks ? `\nAttacks the app must refuse:\n${attacks}` : 
     }
 
     if (pastTasks.length) {
-      wrap.appendChild(h('div', 'glance-title', 'Recent'));
+      const head = h('div', 'glance-title recent-head');
+      head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
+      head.innerHTML = '<span>Recent</span>';
+      const clr = h('button', 'btn ghost sm', 'Clear');
+      clr.onclick = async () => {
+        await api.taskClear?.(S.activeId || null);
+        toast('Recent tasks cleared');
+        renderTasks();
+      };
+      head.appendChild(clr);
+      wrap.appendChild(head);
       for (const t of pastTasks) {
         // One quiet row per finished task: a mark, the title, how long it took.
         const card = h('div', `task-row ${t.status}`);

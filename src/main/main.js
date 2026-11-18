@@ -673,6 +673,7 @@ handle('task:get', (taskId) => taskManager.getTask(taskId));
 handle('task:cancel', (taskId) => taskManager.cancelTask(taskId));
 handle('task:reorder', (sessionId, fromIdx, toIdx) => taskManager.reorderQueue(sessionId, fromIdx, toIdx));
 handle('task:remove', (sessionId, taskId) => taskManager.removeFromQueue(sessionId, taskId));
+handle('task:clear', (sessionId) => taskManager.clearFinishedTasks(sessionId || null));
 handle('task:queue', (sessionId) => taskManager.queues.get(sessionId) || []);
 handle('task:queued', (sessionId) => taskManager.queuedFor(sessionId));
 handle('task:runNow', (taskId) => taskManager.runQueuedNow(taskId));

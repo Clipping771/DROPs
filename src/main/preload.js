@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('drops', {
   taskCancel: invoke('task:cancel'),
   taskReorder: invoke('task:reorder'),
   taskRemove: invoke('task:remove'),
+  taskClear: invoke('task:clear'),
   taskQueue: invoke('task:queue'),
   forkSession: invoke('session:fork'),
   taskQueued: invoke('task:queued'),

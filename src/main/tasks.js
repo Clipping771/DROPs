@@ -446,6 +446,29 @@ class TaskManager {
     return false;
   }
 
+  /** Removes finished (completed/failed/cancelled) tasks from the index and disk, optionally scoped to one session. */
+  clearFinishedTasks(sessionId = null) {
+    const done = new Set([STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED]);
+    const index = this.readIndex();
+    const removedIds = new Set();
+    index.tasks = (index.tasks || []).filter((t) => {
+      if (done.has(t.status) && (!sessionId || t.session_id === sessionId)) {
+        removedIds.add(t.task_id);
+        return false;
+      }
+      return true;
+    });
+    if (!removedIds.size) return 0;
+    this.writeIndex(index);
+    for (const id of removedIds) {
+      this.activeTasks.delete(id);
+      this.eventLogs.delete(id);
+      this.seqCounters.delete(id);
+      try { fs.unlinkSync(path.join(TASKS_DIR(), `${id}.json`)); } catch { /* ignore */ }
+    }
+    return removedIds.size;
+  }
+
   // Reorder task in session queue
   reorderQueue(sessionId, fromIndex, toIndex) {
     const queue = this.queues.get(sessionId);
