@@ -825,28 +825,33 @@ function renderBrowserPane(v, fresh) {
   if (badge) badge.hidden = !(fresh && !$('#browserBody').offsetParent);
   const key = v?.data?.projectDir || S.project || 'default';
 
+  const nav = h('div', 'bp-nav');
+  nav.innerHTML = `
+    <button class="icon-btn bp-btn" data-act="back" title="Back">←</button>
+    <button class="icon-btn bp-btn" data-act="forward" title="Forward">→</button>
+    <button class="icon-btn bp-btn" data-act="reload" title="Reload">↻</button>
+    <button class="icon-btn bp-btn bp-stop" data-act="stop" title="Stop loading" hidden>✕</button>
+    <input class="input sm bp-addr mono" type="text" placeholder="Enter URL (e.g. http://localhost:3100)" />
+  `;
+  const stopBtn = $('.bp-stop', nav);
   const runNav = async (action, payload = {}) => {
+    const showBusy = action !== 'move';
+    if (showBusy) { nav.classList.add('loading'); if (stopBtn) stopBtn.hidden = false; }
     try {
       const next = await api.browserInteract?.(key, action, payload);
       if (next && v) {
         v.browserFrame = { ...next, step: action };
         renderBrowserPane(v, false);
       }
-    } catch (e) { toast(e.message || 'Browser error'); }
+    } catch (e) { toast(e.message || 'Browser error'); } finally {
+      if (showBusy) { nav.classList.remove('loading'); if (stopBtn) stopBtn.hidden = true; }
+    }
   };
-
-  box.innerHTML = '';
-  const nav = h('div', 'bp-nav');
-  nav.innerHTML = `
-    <button class="icon-btn bp-btn" data-act="back" title="Back">←</button>
-    <button class="icon-btn bp-btn" data-act="forward" title="Forward">→</button>
-    <button class="icon-btn bp-btn" data-act="reload" title="Reload">↻</button>
-    <input class="input sm bp-addr mono" type="text" placeholder="Enter URL (e.g. http://localhost:3100)" />
-  `;
   const addr = $('.bp-addr', nav);
   addr.value = f?.url || '';
   addr.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); runNav('open', { url: addr.value }); } };
   nav.querySelectorAll('.bp-btn').forEach((b) => (b.onclick = () => runNav(b.dataset.act)));
+  box.innerHTML = '';
   box.appendChild(nav);
 
   if (!f) {
@@ -862,13 +867,31 @@ function renderBrowserPane(v, fresh) {
   const img = h('img', 'bp-shot interactive');
   img.src = `data:image/jpeg;base64,${f.data}`;
   img.alt = f.title || 'Browser page';
+  img.draggable = false;
   img.tabIndex = 0;
-  img.title = 'Click, scroll, or type directly on the live page';
-  img.onclick = (e) => {
+  img.title = 'Click, drag to select, scroll, or type directly on the live page';
+  let downPt = null, moveAt = 0;
+  img.onmousedown = (e) => {
     img.focus();
     const r = img.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    runNav('clickAt', { xRatio: (e.clientX - r.left) / r.width, yRatio: (e.clientY - r.top) / r.height });
+    if (r.width && r.height) downPt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, cx: e.clientX, cy: e.clientY };
+  };
+  img.onmouseup = (e) => {
+    const r = img.getBoundingClientRect();
+    if (!downPt || !r.width || !r.height) return;
+    const x2 = (e.clientX - r.left) / r.width, y2 = (e.clientY - r.top) / r.height;
+    const dist = Math.hypot(e.clientX - downPt.cx, e.clientY - downPt.cy);
+    const p = downPt; downPt = null;
+    if (dist > 6) runNav('drag', { x1: p.x, y1: p.y, x2, y2 });
+    else runNav('clickAt', { xRatio: x2, yRatio: y2 });
+  };
+  img.onmousemove = (e) => {
+    if (downPt) return;
+    const now = Date.now();
+    if (now - moveAt < 180) return;
+    moveAt = now;
+    const r = img.getBoundingClientRect();
+    if (r.width && r.height) api.browserInteract?.(key, 'move', { xRatio: (e.clientX - r.left) / r.width, yRatio: (e.clientY - r.top) / r.height }).catch(() => {});
   };
   let wheelTimer = null, wheelDelta = 0;
   img.onwheel = (e) => {

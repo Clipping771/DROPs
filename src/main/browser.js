@@ -57,7 +57,14 @@ async function launch() {
 }
 
 class BrowserSession {
-  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.api = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; }
+  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.api = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; this._lock = Promise.resolve(); }
+
+  /** Serializes AI `act()` and user `interact()` on the same Playwright page so they never race. */
+  withLock(fn) {
+    const run = this._lock.then(fn, fn);
+    this._lock = run.catch(() => {});
+    return run;
+  }
 
   async ensure(viewport) {
     this.touch();
@@ -247,6 +254,9 @@ async function snapshot(page, s, { full = false } = {}) {
 async function act(key, input, { mapUrl = (u) => u, signal } = {}) {
   if (!pw) throw new Error('The browser is not available (playwright-core is not installed).');
   const s = sessionFor(key);
+  return s.withLock(() => actInner(s, input, { mapUrl, signal }));
+}
+async function actInner(s, input, { mapUrl = (u) => u, signal } = {}) {
   const action = input.action;
   if (action === 'close') { const wasApp = !!s.app; await s.close(); return { text: wasApp ? 'App closed.' : 'Browser closed.' }; }
   if (action === 'launch') { await s.launchApp(input.path); }
@@ -369,38 +379,59 @@ async function frame(key) {
 async function interact(key, action, payload = {}) {
   if (!pw) throw new Error('The browser is not available (playwright-core is not installed).');
   const s = sessionFor(key);
-  const page = await s.ensure();
-  if (action === 'open') {
-    const raw = String(payload.url || '').trim();
-    if (!raw) return frame(key);
-    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-    let u;
-    try { u = new URL(url); } catch { throw new Error(`Invalid URL: ${raw}`); }
-    if (!/^https?:$/.test(u.protocol)) throw new Error('Only http:// and https:// URLs are allowed.');
-    if (!(await hostAllowed(u.hostname))) throw new Error(`${u.hostname} is on a private network.`);
-    await page.goto(u.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
-  } else if (action === 'back') {
-    await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-  } else if (action === 'forward') {
-    await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-  } else if (action === 'reload') {
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-  } else if (action === 'clickAt') {
-    const vp = page.viewportSize() || { width: 1280, height: 800 };
-    const x = Math.max(0, Math.min(vp.width - 1, Math.round(Number(payload.xRatio || 0) * vp.width)));
-    const y = Math.max(0, Math.min(vp.height - 1, Math.round(Number(payload.yRatio || 0) * vp.height)));
-    await page.mouse.click(x, y);
-    await page.waitForTimeout(180).catch(() => {});
-  } else if (action === 'scroll') {
-    await page.mouse.wheel(0, Number(payload.deltaY) || 300);
-    await page.waitForTimeout(100).catch(() => {});
-  } else if (action === 'type') {
-    if (payload.key) await page.keyboard.press(String(payload.key));
-    else if (payload.text) await page.keyboard.type(String(payload.text));
-    await page.waitForTimeout(120).catch(() => {});
+  if (action === 'stop') {
+    if (s.page && !s.page.isClosed()) await s.page.evaluate(() => window.stop()).catch(() => {});
+    return frame(key);
   }
-  return frame(key);
+  return s.withLock(async () => {
+    const page = await s.ensure();
+    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    const toPx = (xr, yr) => [
+      Math.max(0, Math.min(vp.width - 1, Math.round(Number(xr || 0) * vp.width))),
+      Math.max(0, Math.min(vp.height - 1, Math.round(Number(yr || 0) * vp.height))),
+    ];
+    if (action === 'open') {
+      const raw = String(payload.url || '').trim();
+      if (!raw) return frame(key);
+      const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      let u;
+      try { u = new URL(url); } catch { throw new Error(`Invalid URL: ${raw}`); }
+      if (!/^https?:$/.test(u.protocol)) throw new Error('Only http:// and https:// URLs are allowed.');
+      if (!(await hostAllowed(u.hostname))) throw new Error(`${u.hostname} is on a private network.`);
+      await page.goto(u.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    } else if (action === 'back') {
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+    } else if (action === 'forward') {
+      await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+    } else if (action === 'reload') {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    } else if (action === 'move') {
+      const [x, y] = toPx(payload.xRatio, payload.yRatio);
+      await page.mouse.move(x, y);
+      return null;
+    } else if (action === 'drag') {
+      const [x1, y1] = toPx(payload.x1, payload.y1);
+      const [x2, y2] = toPx(payload.x2, payload.y2);
+      await page.mouse.move(x1, y1);
+      await page.mouse.down();
+      await page.mouse.move(x2, y2, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForTimeout(100).catch(() => {});
+    } else if (action === 'clickAt') {
+      const [x, y] = toPx(payload.xRatio, payload.yRatio);
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(180).catch(() => {});
+    } else if (action === 'scroll') {
+      await page.mouse.wheel(0, Number(payload.deltaY) || 300);
+      await page.waitForTimeout(100).catch(() => {});
+    } else if (action === 'type') {
+      if (payload.key) await page.keyboard.press(String(payload.key));
+      else if (payload.text) await page.keyboard.type(String(payload.text));
+      await page.waitForTimeout(120).catch(() => {});
+    }
+    return frame(key);
+  });
 }
 
 module.exports = { available, act, interact, closeAll, closeKey, isOpen, locate, frame, hostAllowed };

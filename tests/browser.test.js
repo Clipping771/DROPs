@@ -200,3 +200,52 @@ test('browser: reaches this computer and the internet, not the private network o
   for (const h of ['localhost', '127.0.0.1', 'app.localhost', '::1']) assert.equal(await b.hostAllowed(h), true, h);
   for (const h of ['192.168.1.1', '10.0.0.5', '172.20.0.1', '169.254.169.254']) assert.equal(await b.hostAllowed(h), false, h);
 });
+
+test('interactive browser: user interact() and AI act() share the exact same tab, state, navigation, and lock', async (t) => {
+  const s = http.createServer((req, res) => {
+    res.setHeader('content-type', 'text/html');
+    if (req.url === '/two') return res.end('<h1>Page Two</h1><a id="back" href="/">Home</a>');
+    res.end(`<!doctype html><html><body style="margin:0;height:2000px">
+      <button id="inc" style="position:fixed;left:10px;top:10px;width:180px;height:50px" onclick="document.getElementById('out').textContent='clicked-by-user'">Click me</button>
+      <input id="box" style="position:fixed;left:10px;top:80px;width:220px;height:36px" />
+      <div id="out" style="position:fixed;left:10px;top:130px">initial</div>
+      <a id="go2" href="/two" style="position:fixed;left:10px;top:170px;width:120px;height:30px">Go two</a>
+    </body></html>`);
+  });
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${s.address().port}`;
+  const k = 'shared-' + process.pid;
+  try {
+    let f;
+    try { f = await browser.interact(k, 'open', { url: base + '/' }); } catch (e) { if (/No browser/.test(e.message)) return t.skip(e.message); throw e; }
+    assert.ok(f?.data, 'open returns live frame');
+
+    // User clicks button at (50, 35) -> xRatio ~ 50/1280, yRatio ~ 35/800
+    f = await browser.interact(k, 'clickAt', { xRatio: 50 / 1280, yRatio: 35 / 800 });
+    // AI reads the SAME tab and sees user's click!
+    const aiRead1 = await browser.act(k, { action: 'read' });
+    assert.match(aiRead1.text, /clicked-by-user/, 'AI sees DOM updated by user click');
+
+    // User focuses input and types, then navigates to /two and goes Back
+    await browser.interact(k, 'clickAt', { xRatio: 60 / 1280, yRatio: 98 / 800 });
+    await browser.interact(k, 'type', { text: 'hello-drops' });
+    const f2 = await browser.interact(k, 'open', { url: base + '/two' });
+    assert.match(f2.url, /\/two/);
+    const fBack = await browser.interact(k, 'back');
+    assert.match(fBack.url, /\/$/);
+    await browser.interact(k, 'reload');
+    await browser.interact(k, 'scroll', { deltaY: 200 });
+    await browser.interact(k, 'drag', { x1: 0.05, y1: 0.05, x2: 0.2, y2: 0.05 });
+    await browser.interact(k, 'stop');
+
+    // Concurrent AI + user calls serialize cleanly via session lock
+    const [aiR, userF] = await Promise.all([
+      browser.act(k, { action: 'read' }),
+      browser.interact(k, 'reload'),
+    ]);
+    assert.ok(aiR.text && userF?.data, 'concurrent act + interact complete without race');
+  } finally {
+    await browser.act(k, { action: 'close' }).catch(() => {});
+    s.close();
+  }
+});

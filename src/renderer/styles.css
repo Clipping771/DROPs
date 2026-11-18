@@ -2312,3 +2312,5 @@ label.pill[title="Model"]:hover { background: var(--panel-3); }
 .bp-addr { flex: 1; min-width: 0; height: 28px; font-size: 12px; padding: 0 8px; }
 .bp-shot.interactive { cursor: pointer; outline: none; border-radius: 6px; }
 .bp-shot.interactive:focus { box-shadow: 0 0 0 2px var(--accent); }
+.bp-nav.loading { border-bottom-color: var(--accent); }
+.bp-stop { color: var(--err); }
