@@ -168,6 +168,7 @@ const WRITE_VERB = /(\bRemove-Item\b|\brm\b|\bdel\b|\berase\b|\brd\b|\brmdir\b|\
 // A write-type command that names an absolute path outside the project (and outside temp).
 function writesOutsideRoot(cmd, root) {
   if (!WRITE_VERB.test(cmd)) return false;
+  if (/(?:^|[\s"'=(])(?:\.\.[\\/]|~[\\/])/.test(cmd)) return true;
   const norm = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const rootN = norm(root);
   const tmp = [process.env.TEMP, process.env.TMP, '/tmp'].filter(Boolean).map(norm);
@@ -231,6 +232,8 @@ const SECRET_CONTEXT = [
   [/\b([a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@'"]+:)([^\s@/'"]{3,})(@)/gi, 'password'],
   // aws_secret_access_key = …
   [/\b(aws_secret_access_key\s*[=:]\s*["']?)([A-Za-z0-9/+=]{40})\b/gi, 'aws-secret'],
+  // Authorization: Bearer <opaque-token>
+  [/\b(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})\b/gi, 'bearer-token'],
   // KEY=value lines (.env files, `env` / `set` output) whose name says it is a secret. The value must be
   // the whole rest of the line and not code (os.getenv(...), process.env.X, $VAR, None), so source files
   // the agent edits are left as they are.

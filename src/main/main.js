@@ -293,7 +293,12 @@ async function getGeminiModels(force) {
   return geminiModels;
 }
 
-const handle = (ch, fn) => ipcMain.handle(ch, async (_e, ...args) => fn(...args));
+const handle = (ch, fn) => ipcMain.handle(ch, async (e, ...args) => {
+  if (win && e.sender !== win.webContents) throw new Error('Unauthorized IPC sender.');
+  const url = e.senderFrame?.url;
+  if (url && !url.startsWith('file://')) throw new Error('Unauthorized IPC frame origin.');
+  return fn(...args);
+});
 
 // Ollama state: 'off' (setting disabled), 'missing' (not installed), 'stopped' (installed, not running),
 // 'empty' (running, no models), 'ready'.
@@ -496,7 +501,12 @@ handle('fs:read', async (root, rel) => {
   return { content: buf.toString('utf8') };
 });
 handle('fs:write', async (root, rel, content) => { await fs.promises.writeFile(resolveInRoot(projectRoot(root), rel), String(content), 'utf8'); return true; });
-handle('fs:openPath', (root, rel) => shell.openPath(resolveInRoot(projectRoot(root), rel || '.')));
+const EXEC_EXT = /\.(exe|bat|cmd|ps1|vbs|vbe|jse|wsf|wsh|msi|scr|com|pif|hta)$/i;
+handle('fs:openPath', (root, rel) => {
+  const target = resolveInRoot(projectRoot(root), rel || '.');
+  if (EXEC_EXT.test(target)) { shell.showItemInFolder(target); return ''; }
+  return shell.openPath(target);
+});
 handle('fs:reveal', (root, rel) => shell.showItemInFolder(resolveInRoot(projectRoot(root), rel || '.')));
 // Ctrl+K searches as you type: the project's file list is listed once and reused for a few seconds.
 let fileListCache = null; // { root, at, files }

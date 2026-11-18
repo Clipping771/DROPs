@@ -321,12 +321,20 @@ const isInside = (root, target) => {
 };
 // Real path of `p`, or of its nearest existing ancestor joined with the missing tail
 // (so files that are about to be created are checked too).
-function realish(p) {
+function realish(p, seen = new Set()) {
   const tail = [];
   let cur = p;
   for (;;) {
     try { return path.join(fs.realpathSync.native(cur), ...tail); } catch (e) {
       if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e;
+      try {
+        if (fs.lstatSync(cur).isSymbolicLink()) {
+          if (seen.has(cur)) return p;
+          seen.add(cur);
+          const linkTarget = path.resolve(path.dirname(cur), fs.readlinkSync(cur));
+          return path.join(realish(linkTarget, seen), ...tail);
+        }
+      } catch { /* not a symlink */ }
       const up = path.dirname(cur);
       if (up === cur) return p;
       tail.unshift(path.basename(cur));
