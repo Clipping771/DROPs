@@ -1,0 +1,149 @@
+{
+  "date": "2026-11-18T16:27:58.953Z",
+  "model": "phase7-validation",
+  "effort": "medium",
+  "runs": 1,
+  "tasks": 4,
+  "attempts": 6,
+  "passed": 5,
+  "successRate": 83.3,
+  "byCategory": {
+    "bugfix": {
+      "total": 1,
+      "passed": 1,
+      "passRate": 100
+    },
+    "long-horizon": {
+      "total": 1,
+      "passed": 1,
+      "passRate": 100
+    },
+    "self-recovery": {
+      "total": 1,
+      "passed": 1,
+      "passRate": 100
+    },
+    "feature": {
+      "total": 3,
+      "passed": 2,
+      "passRate": 66.7
+    }
+  },
+  "failures": {},
+  "escalations": 0,
+  "escalationRate": 0,
+  "claimedButFailed": 0,
+  "avgAttemptsPerSuccess": 1.2,
+  "costPerSuccess": 0.0076,
+  "totalSeconds": 362,
+  "avgSeconds": 60,
+  "tokensIn": 646533,
+  "tokensOut": 15144,
+  "cost": 0.038,
+  "results": [
+    {
+      "task": "cors-bugfix",
+      "category": "bugfix",
+      "model": "openrouter:deepseek/deepseek-v4-flash",
+      "pass": true,
+      "seconds": 27,
+      "tokensIn": 88126,
+      "tokensOut": 791,
+      "cost": 0.004516384,
+      "costKnown": true,
+      "tools": 5,
+      "toolErrors": 1,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "error": null
+    },
+    {
+      "task": "long-horizon-task-cli",
+      "category": "long-horizon",
+      "model": "openrouter:deepseek/deepseek-v4-flash",
+      "pass": true,
+      "seconds": 65,
+      "tokensIn": 230751,
+      "tokensOut": 7995,
+      "cost": 0.009188752000000001,
+      "costKnown": true,
+      "tools": 17,
+      "toolErrors": 0,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "error": null
+    },
+    {
+      "task": "self-recovery-multi-bug",
+      "category": "self-recovery",
+      "model": "openrouter:deepseek/deepseek-v4-flash",
+      "pass": true,
+      "seconds": 25,
+      "tokensIn": 60895,
+      "tokensOut": 1239,
+      "cost": 0.0037600010000000002,
+      "costKnown": true,
+      "tools": 6,
+      "toolErrors": 1,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "error": null
+    },
+    {
+      "task": "cookie-parser-feature",
+      "category": "feature",
+      "model": "openrouter:google/gemini-2.5-flash-lite",
+      "pass": false,
+      "seconds": 181,
+      "tokensIn": 0,
+      "tokensOut": 0,
+      "cost": 0,
+      "costKnown": true,
+      "tools": 0,
+      "toolErrors": 0,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [
+        "openrouter:google/gemini-2.5-flash-lite"
+      ],
+      "error": "timeout"
+    },
+    {
+      "task": "cookie-parser-feature",
+      "category": "feature",
+      "model": "openrouter:deepseek/deepseek-v4-flash",
+      "pass": true,
+      "seconds": 38,
+      "tokensIn": 137265,
+      "tokensOut": 2101,
+      "cost": 0.0058336384,
+      "costKnown": true,
+      "tools": 8,
+      "toolErrors": 1,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "error": null
+    },
+    {
+      "task": "cookie-parser-feature",
+      "category": "feature",
+      "model": "openrouter:anthropic/claude-haiku-5.5",
+      "pass": true,
+      "seconds": 26,
+      "tokensIn": 129496,
+      "tokensOut": 3018,
+      "cost": 0.0144586,
+      "costKnown": true,
+      "tools": 6,
+      "toolErrors": 0,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "error": null
+    }
+  ]
+}

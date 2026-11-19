@@ -1,3 +1,4 @@
+// @ts-check
 // Scheduled tasks: a prompt that runs by itself in a new session, once or on a repeat.
 //   { id, name, prompt, projectDir, model, effort, mode, repeat, time: "09:00", weekday: 1, at, enabled, nextRun, lastRun }
 // repeat: once (at a date and time) | hourly (at minute MM of `time`) | daily | weekdays (Mon–Fri) | weekly (on `weekday`, 0 = Sunday).

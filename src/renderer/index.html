@@ -58,11 +58,26 @@
         <div class="composer-wrap">
           <div class="popup" id="popup" hidden></div>
           <div class="queue-bar" id="queueBar" hidden></div>
+          <div class="suggest-strip" id="suggestStrip" role="toolbar" aria-label="Quick @ mentions and / commands" hidden>
+            <button type="button" class="suggest-chip" data-insert="@" data-i18n="chipFile">@ file</button>
+            <button type="button" class="suggest-chip" data-insert="@folder:" data-i18n="chipFolder">@ folder</button>
+            <button type="button" class="suggest-chip" data-insert="@git" data-i18n="chipGit">@git</button>
+            <button type="button" class="suggest-chip" data-insert="/plan" data-i18n="chipPlan">/plan</button>
+            <button type="button" class="suggest-chip" data-insert="/" data-i18n="chipHelp">/help</button>
+          </div>
           <div class="composer" id="composer">
             <div class="attachments" id="attachments" hidden></div>
-            <textarea id="input" rows="1" aria-label="Message to DROPs" placeholder="Ask DROPs to build, fix or explain something"></textarea>
+            <textarea id="input" rows="1" aria-label="Message to DROPs" placeholder="Type @ to tag files, / for commands"></textarea>
             <div class="composer-bar">
-              <button class="icon-btn" id="attachBtn" title="Attach image (or paste / drop)"><span data-icon="paperclip"></span></button>
+              <div class="plus-wrap">
+                <button type="button" class="icon-btn plus-btn" id="plusBtn" title="Add context or command" aria-label="Add context or command" aria-haspopup="menu" aria-expanded="false"><span data-icon="plus"></span></button>
+                <div class="plus-menu" id="plusMenu" role="menu" aria-label="Add context or command" hidden>
+                  <button type="button" class="plus-item" id="attachBtn" role="menuitem"><span data-icon="paperclip" class="sm"></span><span class="pm-label" data-i18n="plusAttach">Attach file</span></button>
+                  <button type="button" class="plus-item" data-insert="@" role="menuitem"><span data-icon="at" class="sm"></span><span class="pm-label" data-i18n="plusMention">Mention file or folder</span><span class="pm-hint">@</span></button>
+                  <button type="button" class="plus-item" data-insert="@git" role="menuitem"><span data-icon="branch" class="sm"></span><span class="pm-label" data-i18n="plusGit">Git changes</span><span class="pm-hint">@git</span></button>
+                  <button type="button" class="plus-item" data-insert="/" role="menuitem"><span data-icon="slash" class="sm"></span><span class="pm-label" data-i18n="plusCommands">Commands</span><span class="pm-hint">/</span></button>
+                </div>
+              </div>
               <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
               <label class="pill" title="Model"><span class="v" id="modelLabel"></span><span data-icon="chevronDown" class="xs"></span><select id="modelSel"></select></label>
               <button class="pill" id="optsBtn" title="Permission mode and reasoning effort (Shift+Tab changes the mode)" aria-haspopup="menu"><span data-icon="shield" class="sm"></span><span class="v" id="optsLabel"></span><span data-icon="chevronDown" class="xs"></span></button>
@@ -76,7 +91,7 @@
               <button class="stop" id="stopBtn" title="Stop (Esc)" hidden><span data-icon="square" class="sm"></span></button>
             </div>
           </div>
-          <div class="hint" id="hint">Enter to send · Shift+Enter new line · messages sent while the agent works steer it live</div>
+          <div class="hint" id="hint">@ mention files · / commands · Enter to send · Shift+Enter new line · messages sent while the agent works steer it live</div>
         </div>
       </main>
 

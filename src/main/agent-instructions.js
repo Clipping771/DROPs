@@ -1,3 +1,4 @@
+// @ts-check
 // Project instruction hierarchy (global ~/.drops/AGENTS.md, root files, nested **/AGENTS.md, team rules)
 // and per-project unfinished-work progress tracking.
 const crypto = require('crypto');

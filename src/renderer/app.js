@@ -1212,9 +1212,105 @@ function updateComposer() {
   $('#sendBtn').hidden = busy && !hasText;
   $('#sendBtn').disabled = !hasText;
   $('#sendBtn').title = busy ? 'Send now: the agent reads it at its next step (Enter) · Queue for after this task (Ctrl+Enter)' : 'Send (Enter)';
-  $('#input').placeholder = busy ? 'Enter to send now, Ctrl+Enter to queue for later' : 'Ask DROPs to build, fix or explain something';
+  const askPh = (window.UI_STRINGS?.[S.settings?.uiLang] || window.UI_STRINGS?.en)?.askPlaceholder || 'Type @ to tag files, / for commands';
+  $('#input').placeholder = busy ? 'Enter to send now, Ctrl+Enter to queue for later' : askPh;
+  updateSuggestStrip();
   renderQueue();
 }
+
+function insertComposerTrigger(token) {
+  const t = $('#input');
+  if (!t) return;
+  t.focus();
+  if (token.startsWith('/')) {
+    t.value = token;
+    t.selectionStart = t.selectionEnd = token.length;
+  } else {
+    const start = t.selectionStart ?? t.value.length;
+    const end = t.selectionEnd ?? start;
+    const before = t.value.slice(0, start);
+    const pad = before && !/\s$/.test(before) ? ' ' : '';
+    const ins = pad + token;
+    t.value = before + ins + t.value.slice(end);
+    const pos = start + ins.length;
+    t.selectionStart = t.selectionEnd = pos;
+  }
+  autosize();
+  updateComposer();
+  t.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function updateSuggestStrip() {
+  const strip = $('#suggestStrip');
+  const t = $('#input');
+  if (!strip || !t) return;
+  strip.hidden = !(document.activeElement === t && t.value === '');
+}
+
+(() => {
+  const plusBtn = $('#plusBtn');
+  const plusMenu = $('#plusMenu');
+  const strip = $('#suggestStrip');
+  const t = $('#input');
+  if (plusBtn && plusMenu) {
+    const items = () => [...plusMenu.querySelectorAll('.plus-item')];
+    const closePlus = (returnFocus = false) => {
+      if (plusMenu.hidden) return;
+      plusMenu.hidden = true;
+      plusBtn.setAttribute('aria-expanded', 'false');
+      if (returnFocus) plusBtn.focus();
+    };
+    const openPlus = (focusFirst = false) => {
+      plusMenu.hidden = false;
+      plusBtn.setAttribute('aria-expanded', 'true');
+      if (focusFirst) items()[0]?.focus();
+    };
+    plusBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (plusMenu.hidden) openPlus(false); else closePlus(false);
+    });
+    plusBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        openPlus(false);
+        const list = items();
+        (e.key === 'ArrowDown' ? list[0] : list[list.length - 1])?.focus();
+      } else if (e.key === 'Escape') {
+        closePlus(true);
+      }
+    });
+    plusMenu.addEventListener('keydown', (e) => {
+      const list = items();
+      const idx = list.indexOf(document.activeElement);
+      if (e.key === 'Escape') { e.preventDefault(); closePlus(true); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); list[(idx + 1) % list.length]?.focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); list[(idx - 1 + list.length) % list.length]?.focus(); }
+      else if (e.key === 'Home') { e.preventDefault(); list[0]?.focus(); }
+      else if (e.key === 'End') { e.preventDefault(); list[list.length - 1]?.focus(); }
+    });
+    plusMenu.addEventListener('click', (e) => {
+      const item = e.target.closest('.plus-item');
+      if (!item) return;
+      closePlus(false);
+      if (item.dataset.insert) insertComposerTrigger(item.dataset.insert);
+    });
+    document.addEventListener('click', (e) => {
+      if (!plusMenu.hidden && !e.target.closest('.plus-wrap')) closePlus(false);
+    });
+  }
+  if (strip && t) {
+    strip.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.suggest-chip')) e.preventDefault();
+    });
+    strip.addEventListener('click', (e) => {
+      const chip = e.target.closest('.suggest-chip');
+      if (chip?.dataset.insert) insertComposerTrigger(chip.dataset.insert);
+    });
+    t.addEventListener('focus', updateSuggestStrip);
+    t.addEventListener('blur', () => setTimeout(updateSuggestStrip, 0));
+    t.addEventListener('input', updateSuggestStrip);
+  }
+})();
 
 /** Messages waiting for this session, shown above the composer, each with Run/Tell now and Cancel. */
 let queueSeq = 0;

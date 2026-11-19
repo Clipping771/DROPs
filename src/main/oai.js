@@ -1,3 +1,4 @@
+// @ts-check
 // OpenAI-compatible providers: OpenAI, DeepSeek, Mistral, Groq, xAI, OpenRouter, Together, Fireworks,
 // Cerebras, LM Studio and any custom endpoint. Model ids look like "<provider>:<model>", e.g. "openai:gpt-5".
 const OpenAIPkg = require('openai');
@@ -34,7 +35,8 @@ function client(pid, settings, getKey) {
   const { baseURL, apiKey, headers } = endpoint(pid, settings, getKey);
   if (!baseURL) throw Object.assign(new Error('Set the base URL for the custom endpoint in Settings → Providers.'), { needsKey: true });
   if (!apiKey) throw Object.assign(new Error(`No ${PROVIDERS[pid].label} API key. Add it in Settings → Providers.`), { needsKey: true });
-  return new OpenAI({ apiKey, baseURL, defaultHeaders: headers, maxRetries: 2, timeout: 10 * 60 * 1000 });
+  const OpenAICtor = /** @type {any} */ (OpenAI);
+  return new OpenAICtor({ apiKey, baseURL, defaultHeaders: headers, maxRetries: 0, timeout: 10 * 60 * 1000 });
 }
 
 // Keep chat-capable models; drop embeddings, audio, image, moderation, etc.
@@ -84,6 +86,7 @@ function toMessages(system, messages) {
 async function streamOnce({ model, system, messages, tools, effort, signal, emit, settings, getKey, state }) {
   const pid = providerId(model);
   const c = client(pid, settings, getKey);
+  /** @type {any} */
   const params = {
     model: bare(model), stream: true, messages: toMessages(system, messages),
     ...(tools.length ? { tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } })) } : {}),
@@ -92,67 +95,88 @@ async function streamOnce({ model, system, messages, tools, effort, signal, emit
   if (!compat[pid]?.noUsage) params.stream_options = { include_usage: true };
   if (PROVIDERS[pid].reasoning && /^(o\d|gpt-5)/.test(params.model) && !compat[pid]?.noEffort) params.reasoning_effort = effort === 'low' ? 'low' : effort === 'medium' ? 'medium' : 'high';
 
-  let stream;
-  try { stream = await c.chat.completions.create(params, { signal }); } catch (e) {
-    // Some compatible APIs reject optional fields: retry once without them.
-    if (e?.status === 400 && (params.stream_options || params.reasoning_effort) && !signal.aborted) {
-      compat[pid] = { noUsage: true, noEffort: true };
-      delete params.stream_options; delete params.reasoning_effort;
-      stream = await c.chat.completions.create(params, { signal });
-    } else throw e;
-  }
+  const stallMs = settings.streamStallMs || 45_000;
+  const reqCtrl = new AbortController();
+  const onParentAbort = () => reqCtrl.abort();
+  signal?.addEventListener?.('abort', onParentAbort, { once: true });
+  let stalled = false;
+  let stallTimer = setTimeout(() => { stalled = true; reqCtrl.abort(); }, stallMs);
+  const bumpStall = () => { clearTimeout(stallTimer); stallTimer = setTimeout(() => { stalled = true; reqCtrl.abort(); }, stallMs); };
 
-  const content = [];
-  let textIdx = -1, thinkIdx = -1, usage = {}, finish = null;
-  const calls = new Map(); // index -> { id, name, args, blockIndex }
-  for await (const chunk of stream) {
-    if (chunk.usage) usage = chunk.usage;
-    const ch = chunk.choices?.[0];
-    if (!ch) continue;
-    if (ch.finish_reason) finish = ch.finish_reason;
-    const d = ch.delta || {};
-    const reasoning = d.reasoning_content ?? d.reasoning;
-    if (typeof reasoning === 'string' && reasoning) {
-      if (thinkIdx < 0) { content.push({ type: 'thinking', thinking: '' }); thinkIdx = content.length - 1; emit('block-start', { index: thinkIdx, blockType: 'thinking' }); }
-      content[thinkIdx].thinking += reasoning; emit('thinking-delta', { index: thinkIdx, text: reasoning });
+  try {
+    let stream;
+    try { stream = await c.chat.completions.create(params, { signal: reqCtrl.signal }); } catch (e) {
+      if (stalled) throw new Error(`Provider timed out (no response for ${Math.round(stallMs / 1000)}s).`);
+      // Some compatible APIs reject optional fields: retry once without them.
+      if (e?.status === 400 && (params.stream_options || params.reasoning_effort) && !signal.aborted) {
+        compat[pid] = { noUsage: true, noEffort: true };
+        delete params.stream_options; delete params.reasoning_effort;
+        bumpStall();
+        stream = await c.chat.completions.create(params, { signal: reqCtrl.signal });
+      } else throw e;
     }
-    if (d.content) {
-      if (textIdx < 0) {
-        if (thinkIdx >= 0) emit('block-stop', { index: thinkIdx });
-        content.push({ type: 'text', text: '' }); textIdx = content.length - 1; emit('block-start', { index: textIdx, blockType: 'text' });
+
+    const content = [];
+    let textIdx = -1, thinkIdx = -1, usage = {}, finish = null;
+    const calls = new Map(); // index -> { id, name, args, blockIndex }
+    try {
+      for await (const chunk of stream) {
+        bumpStall();
+        if (chunk.usage) usage = chunk.usage;
+        const ch = chunk.choices?.[0];
+        if (!ch) continue;
+        if (ch.finish_reason) finish = ch.finish_reason;
+        const d = ch.delta || {};
+        const reasoning = d.reasoning_content ?? d.reasoning;
+        if (typeof reasoning === 'string' && reasoning) {
+          if (thinkIdx < 0) { content.push({ type: 'thinking', thinking: '' }); thinkIdx = content.length - 1; emit('block-start', { index: thinkIdx, blockType: 'thinking' }); }
+          content[thinkIdx].thinking += reasoning; emit('thinking-delta', { index: thinkIdx, text: reasoning });
+        }
+        if (d.content) {
+          if (textIdx < 0) {
+            if (thinkIdx >= 0) emit('block-stop', { index: thinkIdx });
+            content.push({ type: 'text', text: '' }); textIdx = content.length - 1; emit('block-start', { index: textIdx, blockType: 'text' });
+          }
+          content[textIdx].text += d.content; emit('text-delta', { index: textIdx, text: d.content });
+        }
+        for (const tc of d.tool_calls || []) {
+          const key = tc.index ?? calls.size;
+          let c2 = calls.get(key);
+          if (!c2) {
+            content.push({ type: 'tool_use', id: tc.id || `oa_${Date.now().toString(36)}_${key}`, name: tc.function?.name || '', input: {} });
+            c2 = { blockIndex: content.length - 1, args: '' };
+            calls.set(key, c2);
+            emit('block-start', { index: c2.blockIndex, blockType: 'tool_use', name: content[c2.blockIndex].name, id: content[c2.blockIndex].id });
+          }
+          if (tc.function?.name && !content[c2.blockIndex].name) content[c2.blockIndex].name = tc.function.name;
+          if (tc.function?.arguments) { c2.args += tc.function.arguments; emit('input-delta', { index: c2.blockIndex, partial: tc.function.arguments }); }
+        }
       }
-      content[textIdx].text += d.content; emit('text-delta', { index: textIdx, text: d.content });
+    } catch (e) {
+      if (stalled) throw new Error(`Provider timed out (no response for ${Math.round(stallMs / 1000)}s).`);
+      throw e;
     }
-    for (const tc of d.tool_calls || []) {
-      const key = tc.index ?? calls.size;
-      let c2 = calls.get(key);
-      if (!c2) {
-        content.push({ type: 'tool_use', id: tc.id || `oa_${Date.now().toString(36)}_${key}`, name: tc.function?.name || '', input: {} });
-        c2 = { blockIndex: content.length - 1, args: '' };
-        calls.set(key, c2);
-        emit('block-start', { index: c2.blockIndex, blockType: 'tool_use', name: content[c2.blockIndex].name, id: content[c2.blockIndex].id });
-      }
-      if (tc.function?.name && !content[c2.blockIndex].name) content[c2.blockIndex].name = tc.function.name;
-      if (tc.function?.arguments) { c2.args += tc.function.arguments; emit('input-delta', { index: c2.blockIndex, partial: tc.function.arguments }); }
+    if (textIdx >= 0) emit('block-stop', { index: textIdx }); else if (thinkIdx >= 0) emit('block-stop', { index: thinkIdx });
+    for (const c2 of calls.values()) {
+      const b = content[c2.blockIndex];
+      try { b.input = c2.args ? parseToolJson(c2.args) : {}; } catch { throw new Error(`Malformed tool call JSON from ${model}`); }
+      emit('block-stop', { index: c2.blockIndex });
     }
+    const hasTools = content.some((b) => b.type === 'tool_use');
+    return {
+      content: content.filter((b) => !(b.type === 'text' && !b.text)), model,
+      stop_reason: hasTools ? 'tool_use' : finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' : 'end_turn',
+      usage: {
+        input_tokens: (usage.prompt_tokens || 0) - (usage.prompt_tokens_details?.cached_tokens || 0),
+        cache_read_input_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
+        output_tokens: usage.completion_tokens || 0,
+        ...(typeof usage.cost === 'number' ? { cost: usage.cost } : {}),
+      },
+    };
+  } finally {
+    clearTimeout(stallTimer);
+    signal?.removeEventListener?.('abort', onParentAbort);
   }
-  if (textIdx >= 0) emit('block-stop', { index: textIdx }); else if (thinkIdx >= 0) emit('block-stop', { index: thinkIdx });
-  for (const c2 of calls.values()) {
-    const b = content[c2.blockIndex];
-    try { b.input = c2.args ? parseToolJson(c2.args) : {}; } catch { throw new Error(`Malformed tool call JSON from ${model}`); }
-    emit('block-stop', { index: c2.blockIndex });
-  }
-  const hasTools = content.some((b) => b.type === 'tool_use');
-  return {
-    content: content.filter((b) => !(b.type === 'text' && !b.text)), model,
-    stop_reason: hasTools ? 'tool_use' : finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' : 'end_turn',
-    usage: {
-      input_tokens: (usage.prompt_tokens || 0) - (usage.prompt_tokens_details?.cached_tokens || 0),
-      cache_read_input_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
-      output_tokens: usage.completion_tokens || 0,
-      ...(typeof usage.cost === 'number' ? { cost: usage.cost } : {}),
-    },
-  };
 }
 
 // Rate limits and overloads are normal on free and low-tier keys (OpenRouter free models allow about
@@ -163,7 +187,7 @@ const RETRYABLE = new Set([429, 500, 502, 503]);
 const isDailyCap = (e) => /per[- ]day|daily|free-models-per-day/i.test(String(e?.message || '') + JSON.stringify(e?.error || ''));
 const waitFor = (ms, signal) => new Promise((resolve, reject) => {
   if (signal.aborted) return reject(new Error('aborted'));
-  const t = setTimeout(() => { signal.removeEventListener('abort', on); resolve(); }, ms);
+  const t = setTimeout(() => { signal.removeEventListener('abort', on); resolve(undefined); }, ms);
   const on = () => { clearTimeout(t); reject(new Error('aborted')); };
   signal.addEventListener('abort', on, { once: true });
 });

@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-18T13:41:01.150Z",
+  "model": "openrouter:anthropic/claude-haiku-5.5",
+  "effort": "medium",
+  "runs": 1,
+  "tasks": 1,
+  "attempts": 1,
+  "passed": 1,
+  "successRate": 100,
+  "byCategory": {
+    "bug fix": {
+      "total": 1,
+      "passed": 1,
+      "passRate": 100
+    }
+  },
+  "failures": {},
+  "totalSeconds": 56,
+  "avgSeconds": 56,
+  "tokensIn": 287926,
+  "tokensOut": 4913,
+  "cost": 0.031,
+  "results": [
+    {
+      "task": "py-mutable-default",
+      "category": "bug fix",
+      "pass": true,
+      "seconds": 56,
+      "tokensIn": 287926,
+      "tokensOut": 4913,
+      "cost": 0.031249100000000002,
+      "costKnown": true,
+      "tools": 13,
+      "toolErrors": 1,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "guardNudges": 5,
+      "error": null,
+      "failure": null,
+      "failureBucket": null
+    }
+  ]
+}

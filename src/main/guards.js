@@ -1,3 +1,4 @@
+// @ts-check
 // Reliability guards. Kept separate so they can be unit-tested without a model.
 //
 // Verification guard: only commands that really verify the work count (the project's own
@@ -115,6 +116,26 @@ class LoopGuard {
         this.shellFailsSinceEdit = true;
       }
     }
+  }
+  /** True when repeated failures indicate the current model tier is struggling and escalation is warranted. */
+  shouldEscalate() {
+    for (const n of this.fails.values()) if (n >= 2) return true;
+    for (const n of this.totalShellFails.values()) if (n >= 3) return true;
+    return false;
+  }
+  /** True when failures exceed safe retry bounds and the agent should stop and report the blocker. */
+  shouldStopSafely() {
+    for (const n of this.fails.values()) if (n >= this.limit + 1) return true;
+    for (const n of this.totalShellFails.values()) if (n >= this.limit + 3) return true;
+    return false;
+  }
+  /** Produces a structured Observe -> Diagnose -> Plan -> Modify -> Verify directive for a failing check. */
+  recoveryAdvice(key, output, root) {
+    const f = this.fails.get(key) || 0;
+    if (f < 2) return null;
+    const frames = projectFrames(output, root);
+    const where = frames.length ? ` Inspect these project frames first: ${frames.join(', ')}.` : '';
+    return `[DROPs recovery] Failure #${f} for ${key}.${where} Follow the recovery cycle: (1) Observe the exact error output, (2) Diagnose the root cause (do not guess), (3) Plan an alternative approach different from previous edits, (4) Modify and Verify with the smallest focused check.`;
   }
 }
 

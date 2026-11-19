@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>DROPs Independent Evaluation Dashboard</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 24px auto; max-width: 1080px; padding: 0 16px; background: #0b0e14; color: #f0f4f9; }
+  h1, h2 { font-weight: 600; }
+  .muted { color: #8b95a7; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin: 16px 0; }
+  .card { background: #131822; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 16px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  th { color: #8b95a7; font-weight: 500; }
+  code { font-family: ui-monospace, monospace; background: #1e2636; padding: 2px 6px; border-radius: 6px; }
+  .ok { color: #5bb974; } .bad { color: #f28b82; }
+</style>
+</head>
+<body>
+  <h1>DROPs Independent Evaluation Dashboard</h1>
+  <p class="muted">Generated from 6 recorded run(s) in <code>bench/results/</code>. Re-run with <code>npm run bench:dashboard</code>.</p>
+  <div class="card">
+    <h2>Model &amp; Run Comparisons</h2>
+    <table><thead><tr><th>Date</th><th>Model</th><th>Effort</th><th>Pass Rate</th><th>Avg Time</th><th>Total Cost</th><th>Cost / Success</th><th>Escalations</th></tr></thead><tbody><tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>gemini-3.5-flash-lite</code></td>
+    <td>medium</td>
+    <td><strong>12/12 (100%)</strong></td>
+    <td>83s</td>
+    <td>$0.121</td>
+    <td>$0.0101</td>
+    <td>0</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:deepseek/deepseek-v4-flash</code></td>
+    <td>medium</td>
+    <td><strong>11/12 (91.7%)</strong></td>
+    <td>42s</td>
+    <td>N/A</td>
+    <td>N/A</td>
+    <td>0</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:deepseek/deepseek-v4-flash</code></td>
+    <td>medium</td>
+    <td><strong>1/2 (50%)</strong></td>
+    <td>237s</td>
+    <td>$0.039</td>
+    <td>$0.039</td>
+    <td>0</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:anthropic/claude-haiku-5.5</code></td>
+    <td>medium</td>
+    <td><strong>11/12 (91.7%)</strong></td>
+    <td>27s</td>
+    <td>$0.182</td>
+    <td>$0.0165</td>
+    <td>0</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:anthropic/claude-haiku-5.5</code></td>
+    <td>medium</td>
+    <td><strong>1/1 (100%)</strong></td>
+    <td>56s</td>
+    <td>$0.031</td>
+    <td>$0.031</td>
+    <td>0</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:27</td>
+    <td><code>phase7-validation</code></td>
+    <td>medium</td>
+    <td><strong>5/6 (83.3%)</strong></td>
+    <td>60s</td>
+    <td>$0.038</td>
+    <td>$0.0076</td>
+    <td>0</td>
+  </tr></tbody></table>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>Success Rate by Category</h2>
+      <table><thead><tr><th>Category</th><th>Passed</th><th>Rate</th></tr></thead><tbody><tr><td>feature</td><td>18/19</td><td>94.7%</td></tr>
+<tr><td>diagnosis</td><td>3/3</td><td>100%</td></tr>
+<tr><td>bug fix</td><td>14/17</td><td>82.4%</td></tr>
+<tr><td>refactor</td><td>3/3</td><td>100%</td></tr>
+<tr><td>bugfix</td><td>1/1</td><td>100%</td></tr>
+<tr><td>long-horizon</td><td>1/1</td><td>100%</td></tr>
+<tr><td>self-recovery</td><td>1/1</td><td>100%</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Failure &amp; Recovery Buckets</h2>
+      <table><thead><tr><th>Bucket</th><th>Count</th></tr></thead><tbody><tr><td><code>tool_errors</code></td><td>2</td></tr>
+<tr><td><code>patch_or_test_failed</code></td><td>1</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Regression History</h2>
+    <table><thead><tr><th>Date</th><th>Model</th><th>Regressed</th><th>Fixed</th></tr></thead><tbody><tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:deepseek/deepseek-v4-flash</code></td>
+    <td class="bad">py-mutable-default</td>
+    <td class="ok">none</td>
+  </tr>
+<tr>
+    <td>2026-11-18 16:50</td>
+    <td><code>openrouter:anthropic/claude-haiku-5.5</code></td>
+    <td class="bad">none</td>
+    <td class="ok">py-mutable-default</td>
+  </tr></tbody></table>
+  </div>
+</body>
+</html>

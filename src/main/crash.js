@@ -1,3 +1,4 @@
+// @ts-check
 // Crash reports, kept on this computer only (nothing is uploaded).
 // - errors in the main process and the window, and a window or helper that died, become a JSON
 //   report in <DROPs data>/crashes (secret values removed, the home folder shown as ~);
@@ -68,7 +69,7 @@ function init({ dataDir, appVersion, app = null, crashReporter = null, hookProce
   try { crashReporter?.start({ uploadToServer: false, compress: true }); } catch { /* not available */ }
   if (hookProcess) {
     process.on('uncaughtException', (e) => { record('main-error', { message: e?.message || String(e), stack: e?.stack }); });
-    process.on('unhandledRejection', (e) => { record('main-rejection', { message: e?.message || String(e), stack: e?.stack }); });
+    process.on('unhandledRejection', (e) => { const err = /** @type {any} */ (e); record('main-rejection', { message: err?.message || String(e), stack: err?.stack }); });
   }
   if (app) {
     app.on('render-process-gone', (_e, _wc, d) => record('window-gone', { message: `The window's process ended: ${d.reason}`, details: d }));

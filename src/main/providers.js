@@ -1,3 +1,4 @@
+// @ts-check
 // One interface over Claude (Anthropic) and Gemini.
 // callModel() streams a turn and returns a canonical, Anthropic-shaped message:
 //   { content: [blocks], raw?, model, stop_reason, stop_details, usage }
@@ -44,9 +45,56 @@ function initialTier(prompt) {
 }
 const resolveAuto = (settings = {}, tier = 1) => {
   const prov = autoProvider(settings);
-  if (prov === 'ollama' && settings.ollamaDefaultModel) return settings.ollamaDefaultModel;
+  const ollamaModel = /** @type {any} */ (settings).ollamaDefaultModel;
+  if (prov === 'ollama' && ollamaModel) return ollamaModel;
   return TIERS[prov][Math.max(0, Math.min(2, tier))];
 };
+
+/** Classifies a user prompt into a coarse task category for historical model routing. */
+function inferTaskCategory(prompt = '') {
+  const p = String(prompt || '');
+  if (/\b(bug|fix|broken|crash|error|fail|regression)\b/i.test(p)) return 'bugfix';
+  if (/\b(refactor|clean ?up|extract|modular|rename|reorganize)\b/i.test(p)) return 'refactor';
+  if (/\b(test|spec|coverage|benchmark)\b/i.test(p)) return 'test';
+  if (/\b(add|implement|build|create|feature|support)\b/i.test(p)) return 'feature';
+  if (/^(what|why|how|where|which|explain|show|list)\b/i.test(p.trim())) return 'question';
+  return 'general';
+}
+
+/**
+ * Scores a model candidate using historical verified pass rate and cost-per-success.
+ * Higher is better; returns null when insufficient samples (< 3) exist.
+ */
+function scoreModelCandidate(stat) {
+  if (!stat || (stat.total || 0) < 3) return null;
+  const passRate = (stat.passed || 0) / stat.total;
+  const costPerSuccess = stat.passed > 0 ? (stat.totalCost || 0) / stat.passed : (stat.totalCost || 1);
+  return passRate * 100 - costPerSuccess * 25;
+}
+
+/**
+ * Selects the lowest-cost model that maintains high verified success for the task tier,
+ * using historical performance stats when available and falling back to resolveAuto().
+ */
+function selectOptimalModel({ prompt = '', category = '', settings = {}, stats = {} } = {}) {
+  const tier = initialTier(prompt);
+  const prov = autoProvider(settings);
+  const ollamaModel = /** @type {any} */ (settings).ollamaDefaultModel;
+  if (prov === 'ollama' && ollamaModel) return ollamaModel;
+  const candidates = TIERS[prov] || TIERS.gemini;
+  const scored = candidates.map((m, idx) => {
+    const key = category ? `${m}::${category}` : m;
+    const s = stats[key] || stats[m];
+    return { model: m, idx, score: scoreModelCandidate(s), passRate: s?.total ? (s.passed || 0) / s.total : null };
+  }).filter((x) => x.score !== null);
+  if (!scored.length) return resolveAuto(settings, tier);
+  // Prefer the cheapest tier that achieves >= 80% verified pass rate,
+  // or otherwise pick the highest cost-adjusted score.
+  const reliableCheap = scored.find((x) => (x.passRate || 0) >= 0.8);
+  if (reliableCheap) return reliableCheap.model;
+  scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
+  return scored[0].model;
+}
 const cheapModelFor = (model, settings = {}) => {
   const prov = model === 'auto' ? autoProvider(settings) : providerOf(model);
   if (prov === 'ollama' && model !== 'auto') return model;
@@ -105,7 +153,8 @@ function anthropicMessages(messages) {
 function anthropicClient(deps) {
   const key = deps.getApiKey();
   if (!key) throw Object.assign(new Error('No Anthropic API key set. Open Settings and add one, or pick a Gemini model.'), { needsKey: true });
-  return new Anthropic({ apiKey: key, maxRetries: 3 });
+  const AnthropicCtor = /** @type {any} */ (Anthropic).default || /** @type {any} */ (Anthropic);
+  return new AnthropicCtor({ apiKey: key, maxRetries: 3 });
 }
 
 async function anthropicTurn({ model, system, messages, tools, effort, signal, emit, deps, state, web = true }) {
@@ -194,8 +243,8 @@ async function callWithRetry(opts) {
       const wait = RETRY_DELAYS[attempt];
       opts.emit?.('notice', { message: `${opts.model}: ${String(e.message || e).split('\n')[0].slice(0, 100)}. Trying again in ${wait / 1000}s…` });
       await new Promise((resolve) => {
-        const t = setTimeout(resolve, wait);
-        opts.signal?.addEventListener?.('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+        const t = setTimeout(() => resolve(undefined), wait);
+        opts.signal?.addEventListener?.('abort', () => { clearTimeout(t); resolve(undefined); }, { once: true });
       });
       if (opts.signal?.aborted) throw e;
     }
@@ -270,4 +319,4 @@ function friendlyError(err, model) {
   return { message: msg, needsKey: !!err?.needsKey };
 }
 
-module.exports = { TIERS, autoProvider, initialTier, resolveAuto, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, isTransientError, exhaustedUntil };
+module.exports = { TIERS, autoProvider, initialTier, inferTaskCategory, resolveAuto, scoreModelCandidate, selectOptimalModel, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, isTransientError, exhaustedUntil };

@@ -26,6 +26,7 @@ Options:
       --fallback <m1,m2>  Models to switch to, in order, when the model is out of quota or credit
                           (or DROPS_FALLBACK_MODELS), e.g. openrouter:google/gemma-4-31b-it:free,ollama:gemma4:12b
       --max-steps <n>     Stop after n agent steps (default 250)
+      --timeout <sec>     Stop the run after <sec> seconds and clean up
       --mcp-config <file> JSON file with { "mcpServers": { ... } }
       --lang <code>       Language for explanations (e.g. bn for Bengali)
       --json              Print a JSON summary at the end (for scripts)
@@ -53,6 +54,7 @@ function parseArgs(argv) {
     else if (a === '--max-cost') o.maxCost = Number(next());
     else if (a === '--fallback') o.fallback = next();
     else if (a === '--max-steps') o.maxSteps = Number(next());
+    else if (a === '--timeout') o.timeout = Number(next());
     else if (a === '--mcp-config') o.mcpConfig = path.resolve(next());
     else if (a === '--lang') o.lang = next();
     else if (a === '--json') o.json = true;
@@ -99,7 +101,7 @@ function initSessionData(o) {
 }
 
 // Runs one task to completion. Used by the CLI and by the benchmark runner.
-async function runHeadless(o, { print = () => {}, onEvent = null } = {}) {
+async function runHeadless(o, { print = () => {}, onEvent = null, signal = null } = {}) {
   // Order: a key passed for this run (DROPS_*_API_KEY, or the older H2O_*_API_KEY) → the key saved in
   // DROPs Settings → the usual environment variable. The DROPS_ variables let scripts override a stale saved key or a stale
   // user-level GEMINI_API_KEY without touching either.
@@ -173,17 +175,30 @@ async function runHeadless(o, { print = () => {}, onEvent = null } = {}) {
   };
   agent = new AgentSession(data, deps);
   const t0 = Date.now();
-  // The guard state lives inside send(); read the outcome from the transcript afterwards.
-  await agent.send(o.task, { model: o.model, effort: o.effort, mode: o.modeExplicit ? o.mode : 'yolo' });
-  agent.dispose();
-  await mcp?.closeAll();
+  const timeoutMs = Number(o.timeoutMs) > 0 ? Number(o.timeoutMs) : (Number(o.timeout) > 0 ? Number(o.timeout) * 1000 : 0);
+  let timedOut = false;
+  const onAbort = () => agent.stop();
+  signal?.addEventListener?.('abort', onAbort, { once: true });
+  const timer = timeoutMs > 0 ? setTimeout(() => { timedOut = true; agent.stop(); }, timeoutMs) : null;
+  try {
+    if (!signal?.aborted) {
+      // The guard state lives inside send(); read the outcome from the transcript afterwards.
+      await agent.send(o.task, { model: o.model, effort: o.effort, mode: o.modeExplicit ? o.mode : 'yolo' });
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    signal?.removeEventListener?.('abort', onAbort);
+    agent.dispose();
+    await mcp?.closeAll();
+  }
+  if (timedOut && !result.errors.some((e) => /timeout/i.test(e))) result.errors.push('timeout');
   const last = [...data.messages].reverse().find((m) => m.role === 'assistant');
   const answer = (last?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
   const verifyFailed = data.messages.some((m) => m.role === 'user' && JSON.stringify(m.content).includes('verification command FAILED'))
     && !Object.values(data.toolMeta).slice(-3).some((t) => (t.name === 'shell' || t.name === 'powershell') && t.status === 'done');
   return {
     ok: !result.errors.length, answer, seconds: Math.round((Date.now() - t0) / 1000), usage: data.usage, tools: result.tools, toolErrors: result.toolErrors,
-    changes: data.changes, errors: result.errors, notices: result.notices, models: [...result.models], verifyFailed, stoppedByLimit: result.stoppedByLimit, session: data,
+    changes: data.changes, errors: result.errors, notices: result.notices, models: [...result.models], verifyFailed, stoppedByLimit: result.stoppedByLimit, timedOut, session: data,
   };
 }
 

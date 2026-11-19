@@ -29,76 +29,13 @@ function modelSeesImages(model) {
   return true;
 }
 
-/**
- * When the last answer claims the work is done or verified but DROPs proved less than half of the
- * requirements, the note to append to it (or null).
- */
-function unprovenClaimNote(messages, ok, total, open = []) {
-  if (!total || ok * 2 >= total) return null;
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== 'assistant') return null;
-  const text = (Array.isArray(last.content) ? last.content : [{ text: String(last.content || '') }]).map((b) => b.text || '').join(' ');
-  if (!/\b(production[- ]ready|fully (implemented|working|functional)|all (the )?(requirements|features|functional requirements)\b.{0,40}\b(met|done|addressed|implemented|working)|everything works|verified|works end to end|complete and working)\b/i.test(text)) return null;
-  if (/\b(not verified|could not verify|unverified|0 of \d+)\b/i.test(text)) return null;
-  return `[DROPs] Not proven: only ${ok} of ${total} requirements passed a check that DROPs ran itself${open.length ? ` (not verified: ${open.slice(0, 12).join(', ')}${open.length > 12 ? ', …' : ''})` : ''}. Treat the claims above as unverified until those checks pass.`;
-}
+const {
+  unprovenClaimNote, sourceFingerprint, verifiedCount, evidenceNudgeAllowed,
+  specFacts, specRequirements, mergeRequirements,
+  CHECK_REQUIREMENT_DEF, specPlanNote, admitsUnfinished, buildExecutionLedger,
+} = require('./agent-evidence');
+const agentQa = require('./agent-qa');
 
-// ---- evidence helpers ----
-/** A cheap fingerprint of the project's source files (path, size, modified time). Any change, by an
- *  edit tool or by a command, gives a different value. Installed packages and build output are ignored. */
-function sourceFingerprint(root) {
-  try {
-    const entries = fg.sync('**/*', { cwd: root, onlyFiles: true, stats: true, dot: true, suppressErrors: true, deep: 12,
-      ignore: ['**/node_modules/**', '**/.next/**', '**/.git/**', '**/dist/**', '**/build/**', '**/coverage/**', '**/test-results/**', '**/.drops/**', '**/.h2o/**', '**/*.log', '**/.turbo/**'] });
-    const h = require('crypto').createHash('sha1');
-    for (const e of entries.sort((x, y) => (x.path < y.path ? -1 : 1)).slice(0, 20000)) h.update(`${e.path}|${e.stats?.size}|${Math.round(e.stats?.mtimeMs || 0)}\n`);
-    return h.digest('hex').slice(0, 16);
-  } catch { return null; }
-}
-const verifiedCount = (reqs) => (reqs || []).filter((r) => r.status === 'verified').length;
-function evidenceNudgeAllowed(run, reqs) {
-  if (!(reqs || []).some((r) => r.status !== 'verified')) return false;
-  if ((run.evidenceTotalNudges || 0) >= 8) return false;
-  // A nudge that led to a new verified requirement resets the count of fruitless nudges.
-  if (run.evidenceNudges && verifiedCount(reqs) > (run.evidenceVerifiedAtNudge ?? -1)) run.evidenceNudges = 0;
-  // An agent that has not run a single check gets more nudges (four), each naming where to start.
-  return (run.evidenceNudges || 0) < ((run.checkCalls || 0) === 0 ? 4 : 2);
-}
-/** Facts a QA check must copy exactly: demo accounts, routes, test ids and the app's base URL. */
-function specFacts(doc) {
-  const text = String(doc || '');
-  const emails = [...new Set(text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) || [])].slice(0, 12);
-  const accounts = emails.map((email) => {
-    const i = text.indexOf(email);
-    const near = text.slice(i, i + 160);
-    // A password is either labelled ("password: x") or the very next quoted token after the email,
-    // with letters and digits ("`a@b.test` – `Admin12345`"). An email with no password is not an account.
-    const pw = /\b(?:password|pwd)\b(?:\s*(?:[:=]|is)\s*[`"']?|\s*[`"'])([^\s`"'|,;)]{4,40})/i.exec(text.slice(Math.max(0, i - 60), i + 160))
-      || /^[`"']?\s*[–:|,/-]\s*[`"']((?=[^\s`"']*\d)(?=[^\s`"']*[a-z])[^\s`"']{6,40})[`"']/i.exec(near.slice(email.length));
-    return { email, password: pw ? pw[1] : null };
-  }).filter((a) => a.password);
-  const routes = [...new Set((text.match(/(?<![\w:/.])\/[a-z0-9][\w\-/[\]:]*/gi) || []).filter((r) => !/\.(md|ts|tsx|js|json|css)$/i.test(r)))].slice(0, 40);
-  const testIds = [...new Set([...text.matchAll(/data-testid=["'`]?([\w-]+)|testid=([\w-]+)|`([a-z]+(?:-[a-z0-9]+)+)`/g)].map((m) => m[1] || m[2] || m[3]).filter(Boolean))].slice(0, 80);
-  const port = /localhost:(\d{2,5})/.exec(text)?.[1] || '3000';
-  return { accounts, routes, testIds, base: `http://localhost:${port}` };
-}
-function factsText(f) {
-  return [
-    `Base URL: ${f.base}`,
-    `Demo accounts named in the specification: ${f.accounts.length ? f.accounts.map((a) => `${a.email}${a.password ? ` / ${a.password}` : ''}`).join('; ') : 'none (sign up a new account where one is needed)'}`,
-    `Routes named: ${f.routes.join(', ') || 'none'}`,
-    `Test ids named: ${f.testIds.join(', ') || 'none (use labels and visible text)'}`,
-  ].join('\n');
-}
-/** The app's origin when nothing answers there (connection refused or no reply in 3 s); null when it is up. */
-async function appDown(url, sandbox) {
-  let target;
-  try { target = new URL(sandbox ? sandbox.mapUrl(String(url)) : String(url)); } catch { return null; }
-  if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(target.hostname)) return null;
-  try { await fetch(target.origin + '/', { signal: AbortSignal.timeout(3000), redirect: 'manual' }); return null; } catch { return target.origin; }
-}
-
-const fg = require('fast-glob');
 const NO_REPLY = '[DROPs] The previous turn ended without an answer (the app closed or the request failed).';
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const SUMMARY_PREFIX = '[Context summary of the earlier conversation — older messages were compacted]';
@@ -126,95 +63,6 @@ const LANGUAGE_NAMES = { bn: 'Bengali (বাংলা)', hi: 'Hindi', ur: 'Urdu
 const isPlanMode = (mode) => mode === 'plan' || mode === 'architect';
 const isReviewMode = (mode) => mode === 'review';
 const isCodeAutoMode = (mode) => mode === 'auto-edit' || mode === 'code';
-
-/** For a task that names a requirements document (e.g. "build the app in SPEC.md"), a note listing every
- *  requirement and journey in it, asking for a plan that covers all of them. Null when there is none. */
-// ---- Evidence-based completion -------------------------------------------------------------------
-// For a task built on a requirements document, every functional requirement must be proven by a check
-// that DROPs itself runs (a command, browser steps, or an HTTP call). The agent describes the check; the
-// system executes it and decides pass/fail from the real result. The agent's own words never count.
-
-/** The functional requirements of the first requirements document named in the task (≥ 4), or []. */
-function specRequirements(root, task) {
-  const names = [...new Set((String(task).match(/[\w./-]+\.(?:md|txt)\b/gi) || []))].slice(0, 3);
-  for (const n of names) {
-    let doc;
-    try { doc = fs.readFileSync(path.resolve(root, n), 'utf8'); } catch { continue; }
-    const fr = [...doc.matchAll(/^\|\s*(FR-\d+)\s*\|\s*([^|\n]+)/gm)].map((m) => ({ id: m[1], text: m[2].trim() }));
-    if (fr.length >= 4) { fr.doc = doc; return fr; }
-  }
-  return [];
-}
-
-/** Keeps earlier evidence for requirements that are unchanged; new or reworded ones start unverified. */
-function mergeRequirements(old = [], fresh = []) {
-  return fresh.map((r) => {
-    const prev = old.find((o) => o.id === r.id && o.text === r.text);
-    return prev ? prev : { id: r.id, text: r.text, status: 'unverified', evidence: null };
-  });
-}
-
-const CHECK_REQUIREMENT_DEF = {
-  name: 'check_requirement',
-  description: 'Prove that one requirement from the spec works. You describe a check; DROPs runs it itself and records VERIFIED or NOT verified from the real result (your own statement is never evidence). Kinds: "command" — a test or script that exercises this requirement (exit code 0, and `expect` text in its output if given); "browser" — browser steps like the browser tool ({action, url|target|value|key}) ending on a page that must show `expect`; "http" — a request to the running app whose response must be 2xx and contain `expect`. Check each requirement after building it; re-check after fixing it.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      id: { type: 'string', description: 'Requirement id, e.g. FR-3' },
-      kind: { type: 'string', enum: ['command', 'browser', 'http'] },
-      command: { type: 'string', description: 'kind=command: the test or script to run' },
-      steps: { type: 'array', items: { type: 'object' }, description: 'kind=browser: steps, e.g. [{"action":"open","url":"http://localhost:3000/login"},{"action":"fill","target":"Email","value":"a@b.co"},{"action":"click","target":"Log in"}]' },
-      url: { type: 'string', description: 'kind=http' },
-      method: { type: 'string', description: 'kind=http, default GET' },
-      body: { type: 'string', description: 'kind=http, JSON text for POST/PUT' },
-      expect: { type: 'string', description: 'Text that must appear in the output / final page / response. Required for browser and http.' },
-      use_qa: { type: 'boolean', description: 'Run the independent QA check written for this requirement (when one exists, only it can verify the requirement).' },
-      dispute: { type: 'string', description: 'Only with use_qa, once per requirement: say why the QA check itself is wrong (e.g. it logs in with an account the spec does not name, or expects text the spec does not ask for). The QA agent re-reads the spec and decides; it never sees your code.' },
-    },
-    required: ['id'],
-  },
-};
-tools.registerDef(CHECK_REQUIREMENT_DEF);
-
-function specPlanNote(root, task) {
-  const names = [...new Set((String(task).match(/[\w./-]+\.(?:md|txt)\b/gi) || []))].slice(0, 3);
-  for (const n of names) {
-    let doc;
-    try { doc = fs.readFileSync(path.resolve(root, n), 'utf8'); } catch { continue; }
-    const reqs = [...doc.matchAll(/^\|\s*((?:FR|NFR)-\d+)\s*\|\s*([^|\n]+)/gm)].map((m) => ({ id: m[1], text: m[2].trim() }));
-    const journeys = [...doc.matchAll(/^\s*[-*]\s*\*{0,2}(J\d+)\*{0,2}[\s:.–-]+(.+)$/gm)].map((m) => ({ id: m[1], text: m[2].trim() }));
-    const fr = reqs.filter((r) => r.id.startsWith('FR'));
-    if (fr.length < 4) continue;
-    const short = (s) => (s.length > 90 ? s.slice(0, 87) + '…' : s);
-    const lines = [...fr, ...reqs.filter((r) => r.id.startsWith('NFR')), ...journeys].map((r) => `- ${r.id}: ${short(r.text)}`);
-    let body = lines.join('\n');
-    if (body.length > 4000) body = body.slice(0, 4000) + '\n- … (see the document for the rest)';
-    return `[DROPs plan] ${n} lists ${fr.length} functional requirements${journeys.length ? ` and ${journeys.length} key journeys` : ''}. The task is all of them, not a first part. Before writing code, make a todo_write plan that covers every requirement (group related ones, e.g. "Contacts: FR-3, FR-4, FR-5"), then work through it one item at a time. Each functional requirement counts as done only when check_requirement has VERIFIED it (DROPs runs the check itself; your word is not evidence):\n${body}`;
-  }
-  return null;
-}
-
-/** A phrase in an agent's final answer that admits part of the task is still undone, or null. */
-function admitsUnfinished(text) {
-  const t = String(text || '');
-  const pats = [
-    /\b(?:ready for|prepared for|foundation for)\s+the\s+remaining\s+\w+(?:\s+\w+)?/i,
-    /\bthe\s+remaining\s+(?:features|requirements|pages|screens|functionality|work|items|parts|endpoints)\b(?!\s+(?:are|were|have been)\s+(?:done|complete|completed|implemented))/i,
-    /\b(?:not|n't)\s+(?:yet\s+)?(?:been\s+)?(?:implemented|built|done)\s+yet\b/i,
-    /\b(?:still|yet)\s+(?:needs?|has|have)\s+to\s+be\s+(?:implemented|built|added|done)\b/i,
-    /\b(?:left|remain(?:s|ing)?)\s+to\s+(?:implement|build|do)\b/i,
-    /\b(?:ready|about|going)\s+to\s+(?:proceed|start|begin|move on|continue)\s+(?:with|to|on)?\s*(?:implementing|building|the|adding|work)\b/i,
-    /\bI(?:'ll|\s+will)\s+(?:now|next)\s+(?:implement|build|add|proceed|continue|work on)\b/i,
-    /\bnext(?:\s+step)?,?\s+I(?:'ll|\s+will)\s+(?:implement|build|add)\b/i,
-    /\b(?:will|can)\s+be\s+(?:implemented|added|built)\s+(?:later|next|in a (?:later|future|follow-up))\b/i,
-    /\bcan\s+now\s+be\s+(?:layered|added|built|implemented)\b/i,
-    /\bI(?:'m|\s+am)\s+(?:now\s+)?(?:proceeding|moving\s+on|continuing|going)\s+(?:to|with)\s+(?:implement|build|add|the)\w*\b/i,
-    /\bfurther\s+feature\s+(?:implementation|work|development)\b/i,
-    /\b(?:further|additional|remaining)\s+(?:specific\s+)?(?:functional\s+)?(?:logic|development|functionality)\b[^.]{0,60}\b(?:can|will|should|needs?)\b/i,
-  ];
-  for (const p of pats) { const m = t.match(p); if (m) return m[0].trim(); }
-  return null;
-}
 
 class AgentSession {
   constructor(data, deps) {
@@ -688,12 +536,19 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const compactAtFor = (m) => Math.min(s.compactAt || 180000, Math.floor(providers.contextWindow(m, s) * 0.75));
     let jsonRetries = 0;
 
-    // Auto routing: start on the cheapest tier that fits the request, escalate when it struggles.
+    // Auto routing: start on the optimal historical/tier model for the task, escalate when it struggles.
+    const runT0 = Date.now();
+    let runError = null;
+    run.category = providers.inferTaskCategory(text);
     run.auto = opts.model === 'auto';
     if (run.auto) {
-      run.tier = providers.initialTier(text);
-      opts = { ...opts, model: providers.resolveAuto(s, run.tier) };
-      this.emit('auto-model', { model: opts.model, tier: run.tier, reason: ['quick question', 'normal task', 'complex task'][run.tier] });
+      const modelStats = this.deps.getModelStats ? this.deps.getModelStats() : (() => { try { return require('./store').getModelStats(); } catch { return {}; } })();
+      const chosen = providers.selectOptimalModel({ prompt: text, category: run.category, settings: s, stats: modelStats });
+      const tierList = providers.TIERS[providers.autoProvider(s)] || [];
+      const tierIdx = tierList.indexOf(chosen);
+      run.tier = tierIdx >= 0 ? tierIdx : providers.initialTier(text);
+      opts = { ...opts, model: chosen };
+      this.emit('auto-model', { model: opts.model, tier: run.tier, reason: ['quick question', 'normal task', 'complex task'][run.tier] || 'historical routing' });
     }
     let compactAt = compactAtFor(opts.model);
     let system = this.systemPrompt(opts.model, text);
@@ -942,10 +797,22 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       } else {
         // Keep the real reason in the transcript, so it is visible later and the next turn knows.
         const fe = providers.friendlyError(err, opts.model);
+        runError = fe;
         this.sealTranscript(`${STOPPED_BY_ERROR} ${String(fe.message || err).split('\n')[0].slice(0, 300)}`);
         this.data.lastError = { message: String(fe.message || err).slice(0, 500), at: Date.now(), model: opts.model };
         this.emit('error', fe);
       }
+    }
+    if (!signal.aborted && !runError?.needsKey && opts.model && opts.model !== 'auto' && opts.model !== 'fake') {
+      const outcome = {
+        model: opts.model,
+        category: run.category || 'general',
+        passed: !runError && (!run.edited || (run.verifiedAfterEdit && run.lastVerify !== 'fail')),
+        cost: Math.max(0, (this.data.usage.cost || 0) - (u0.cost || 0)),
+        seconds: Math.round((Date.now() - runT0) / 1000),
+      };
+      if (this.deps.recordModelOutcome) this.deps.recordModelOutcome(outcome);
+      else { try { require('./store').recordModelOutcome(outcome); } catch { /* ignore */ } }
     }
     this.finish(opts);
   }
@@ -1302,7 +1169,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       }
       run.guard.record(u.name, u.input, !isError);
       this.autoLesson(lessons.fromToolResult(u.name, u.input, text, !!this.procs.sandbox), u.name);
-      if (isError) { run.errStreak = (run.errStreak || 0) + 1; if (run.errStreak >= 3) { run.errStreak = 0; run.escalate?.('it hit repeated tool errors'); } } else run.errStreak = 0;
+      if (isError) {
+        const advice = run.guard.recoveryAdvice?.(guards.failureKey(u.name, u.input), text, this.data.projectDir);
+        if (advice) text += `\n\n${advice}`;
+        run.errStreak = (run.errStreak || 0) + 1;
+        if (run.errStreak >= 3 || run.guard.shouldEscalate?.()) { run.errStreak = 0; run.escalate?.('it hit repeated tool errors'); }
+      } else run.errStreak = 0;
       const editedPaths = Array.isArray(prep.files) && prep.files.length ? prep.files : [u.input.path || u.input.to || u.input.file].filter(Boolean);
       if (prep.kind === 'edit' && !isError && ctx.turn && editedPaths.length) {
         for (const ep of editedPaths) {
@@ -1770,242 +1642,13 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     } catch (e) { return failImg(e.message); }
   }
 
-  // ---------- independent QA: checks written from the spec alone, before any code is seen ----------
-  async writeQaChecks(specText, model) {
-    if (!specText) return;
-    const reqs = this.data.requirements;
-    const system = 'You are an independent QA engineer. You have NOT seen the code and you do not trust the developer. From the specification alone, write one acceptance check per functional requirement, the way a careful user would test it. Use ONLY the routes, data-testid attributes, field labels and demo accounts the specification names, copied exactly (the list after the specification has them); never invent an email, password, route or test id. If a check needs an account and the specification names none, sign up a new account with a unique email in that check first. The app runs at the base URL given after the specification. Prefer kind "browser": steps for a real browser ({"action":"open","url":...}, {"action":"fill","target":"testid=..." or a label,"value":...}, {"action":"click","target":...}, {"action":"select",...}, {"action":"press","key":"Enter"}), ending on a page that must show the "expect" text, which only a working feature shows. When a requirement saves something (create, edit, delete, a setting), add {"action":"reload"} before the end, so the check proves the data was really stored, not only shown. Use kind "http" ({"url","method","body","expect"}) only for pure API requirements. Log in first in each check that needs an account. Reply with JSON only: [{"id":"FR-1","kind":"browser","steps":[...],"expect":"..."}, ...].';
-    const facts = specFacts(specText);
-    const prompt = `Specification:\n${String(specText).slice(0, 24000)}\n\n${factsText(facts)}\n\nRequirements to cover: ${reqs.map((r) => r.id).join(', ')}`;
-    const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
-    const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const start = text.indexOf('['), end = text.lastIndexOf(']');
-    if (start < 0 || end < start) throw new Error('no JSON list in the reply');
-    let list;
-    try { list = JSON.parse(text.slice(start, end + 1)); } catch { throw new Error('the reply was not valid JSON'); }
-    let n = 0;
-    this.data.qaBase = facts.base;
-    for (const c of Array.isArray(list) ? list : []) {
-      const r = reqs.find((x) => x.id === c?.id);
-      if (!r || !['browser', 'http'].includes(c.kind) || !String(c.expect || '').trim()) continue;
-      if (c.kind === 'browser' && !(Array.isArray(c.steps) && c.steps.length && c.steps.every((st) => st && typeof st.action === 'string'))) continue;
-      if (c.kind === 'http' && !/^http:\/\/localhost:\d+\//.test(String(c.url || ''))) continue;
-      r.qa = c.kind === 'browser' ? { kind: 'browser', steps: c.steps.slice(0, 25), expect: String(c.expect).slice(0, 200) } : { kind: 'http', url: c.url, method: c.method || 'GET', body: c.body, expect: String(c.expect).slice(0, 200) };
-      n++;
-    }
-    this.emit('notice', { message: `QA agent wrote independent checks for ${n} of ${reqs.length} requirements.` });
-    await this.writeAdversarialChecks(specText, model, facts).catch((e) => this.emit('notice', { message: `Adversarial QA could not write checks: ${String(e.message || e).slice(0, 120)}` }));
-    this.save();
-  }
-
-  /** A second QA engineer tries to break each rule the spec states: wrong password, logged-out visitor,
-   *  another user's data, a lower role, empty or invalid input, duplicates. Up to two attacks per requirement. */
-  async writeAdversarialChecks(specText, model, facts) {
-    const reqs = this.data.requirements;
-    const system = 'You are an adversarial QA engineer. You have NOT seen the code. Your job is to find where the app accepts what it must refuse. For each functional requirement whose rule can be misused, write at most two attack checks, only for rules the specification states or clearly implies: a wrong password, a logged-out visitor opening a protected page, a user opening another user\'s data, a lower role opening an admin page, empty or invalid input, a duplicate. Each attack must end on a page that proves the app refused correctly: "expect" = text that must appear (e.g. the error message the spec names), and/or "expect_url" = the path the final page must be on (e.g. "/login"), and/or "forbid" = text that must NOT appear (e.g. another user\'s record). Use ONLY accounts, routes, test ids and texts from the list after the specification. Browser steps: {"action":"open","url":...}, {"action":"fill","target":...,"value":...}, {"action":"click","target":...}, {"action":"press","key":"Enter"}. For HTTP attacks use kind "http" with "expect_status" (401, 403, 404 or 400). Reply with JSON only: [{"id":"FR-1","kind":"browser","steps":[...],"expect_url":"/login","why":"logged-out visitors are sent to log in"}, ...].';
-    const prompt = `Specification:\n${String(specText).slice(0, 24000)}\n\n${factsText(facts)}\n\nRequirements: ${reqs.map((r) => `${r.id}: ${r.text}`).join('; ')}`;
-    const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
-    const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const start = text.indexOf('['), end = text.lastIndexOf(']');
-    if (start < 0 || end < start) throw new Error('no JSON list in the reply');
-    let list; try { list = JSON.parse(text.slice(start, end + 1)); } catch { throw new Error('the reply was not valid JSON'); }
-    let n = 0;
-    for (const c of Array.isArray(list) ? list : []) {
-      const r = reqs.find((x) => x.id === c?.id);
-      if (!r || !['browser', 'http'].includes(c.kind)) continue;
-      if (!String(c.expect || '').trim() && !String(c.expect_url || '').trim() && !String(c.forbid || '').trim() && !c.expect_status) continue;
-      if (c.kind === 'browser' && !(Array.isArray(c.steps) && c.steps.length && c.steps.every((st) => st && typeof st.action === 'string'))) continue;
-      if (c.kind === 'http' && !/^http:\/\/localhost:\d+\//.test(String(c.url || ''))) continue;
-      r.qaNeg = r.qaNeg || [];
-      if (r.qaNeg.length >= 2) continue;
-      r.qaNeg.push(c.kind === 'browser'
-        ? { kind: 'browser', steps: c.steps.slice(0, 20), expect: String(c.expect || '').slice(0, 200), expect_url: String(c.expect_url || '').slice(0, 100), forbid: String(c.forbid || '').slice(0, 200), why: String(c.why || '').slice(0, 160) }
-        : { kind: 'http', url: c.url, method: c.method || 'GET', body: c.body, expect: String(c.expect || '').slice(0, 200), expect_status: Number(c.expect_status) || 0, forbid: String(c.forbid || '').slice(0, 200), why: String(c.why || '').slice(0, 160) });
-      n++;
-    }
-    this.emit('notice', { message: `Adversarial QA wrote ${n} attack check${n === 1 ? '' : 's'} (wrong input, other users' data, logged-out access).` });
-  }
-
-  async reviseQaCheck(req, dispute, model) {
-    const specText = specRequirements(this.data.projectDir, 'SPEC.md').doc || '';
-    const facts = specFacts(specText);
-    const system = 'You are the independent QA engineer who wrote this acceptance check. The developer disputes it. You have NOT seen the code and you do not trust the developer: change the check only if it contradicts the specification (an account, route, test id, label or text the specification does not name, or a wrong order of steps). Never weaken it to accept behaviour the specification does not describe. Reply with JSON only: {"decision":"keep"|"revise","reason":"...","check":{...same shape as before...}}.';
-    const prompt = `Specification:\n${String(specText).slice(0, 20000)}\n\n${factsText(facts)}\n\nRequirement ${req.id}: ${req.text}\nYour check: ${JSON.stringify(req.qa)}\nLast result: ${req.evidence?.summary || 'not run'}\nDeveloper's dispute: ${dispute}`;
-    const res = await providers.callModel({ model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [], effort: 'low', signal: this.abort?.signal || new AbortController().signal, emit: () => {}, deps: this.deps, state: {} });
-    const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const a = text.indexOf('{'), b = text.lastIndexOf('}');
-    let out; try { out = JSON.parse(text.slice(a, b + 1)); } catch { throw new Error('the QA reply was not valid JSON'); }
-    req.qaRevised = true;
-    const c = out.check || {};
-    const valid = out.decision === 'revise' && ['browser', 'http'].includes(c.kind) && String(c.expect || '').trim()
-      && (c.kind === 'http' ? /^http:\/\/localhost:\d+\//.test(String(c.url || '')) : Array.isArray(c.steps) && c.steps.length && c.steps.every((st) => st && typeof st.action === 'string'));
-    if (valid) req.qa = c.kind === 'browser' ? { kind: 'browser', steps: c.steps.slice(0, 25), expect: String(c.expect).slice(0, 200) } : { kind: 'http', url: c.url, method: c.method || 'GET', body: c.body, expect: String(c.expect).slice(0, 200) };
-    this.emit('notice', { message: `QA agent ${valid ? 'revised' : 'kept'} its check for ${req.id}: ${String(out.reason || '').slice(0, 160)}` });
-    this.save();
-    return valid ? `revised (${String(out.reason || '').slice(0, 200)})` : `kept the check (${String(out.reason || 'it matches the specification').slice(0, 200)})`;
-  }
-
-  // ---------- evidence: run a requirement check and record the real result ----------
-  async runCheckRequirement(u, meta, ctx, run) {
-    const finish = (text, ok) => {
-      meta.status = ok ? 'done' : 'error'; meta.output = text;
-      this.emit('tool-end', { id: u.id, ok, output: text });
-      return { type: 'tool_result', tool_use_id: u.id, content: text, ...(ok ? {} : { is_error: true }) };
-    };
-    const reqs = this.data.requirements || [];
-    const req = reqs.find((r) => r.id === String(u.input.id || '').trim());
-    if (!req) return finish(`Unknown requirement "${u.input.id}". Requirements: ${reqs.map((r) => r.id).join(', ') || 'none'}.`, false);
-    if (isPlanMode(this.data.mode) || isReviewMode(this.data.mode)) return finish('Checks run commands and a browser, which this read-only mode does not allow.', false);
-    // The independent QA check (with its adversarial checks), when one exists, is the only check that can verify the requirement.
-    const useQa = !!req.qa && (u.input.use_qa === true || !u.input.kind);
-    const dispute = useQa ? String(u.input.dispute || '').trim() : '';
-    const { dispute: _d, ...asked } = u.input;
-    if (dispute) {
-      if (req.qaRevised) return finish(`The QA check for ${req.id} was already revised once. Make the app match the specification so this check passes.`, false);
-      const changed = await this.reviseQaCheck(req, dispute.slice(0, 600), run.model).catch((e) => `could not revise: ${String(e.message || e).slice(0, 120)}`);
-      return finish(`QA agent reviewed the dispute on ${req.id}: ${changed}. Run check_requirement with use_qa: true again.`, true);
-    }
-    const checks = useQa
-      ? [{ ...req.qa, label: 'main' }, ...(req.qaNeg || []).map((c, i) => ({ ...c, negative: true, label: `attack ${i + 1}: ${c.why || 'misuse'}` }))]
-      : [{ ...asked, label: 'own' }];
-    if (!checks[0].kind) return finish(`Say how to check ${req.id}: kind command, browser or http${req.qa ? ', or use_qa: true to run its QA check' : ''}.`, false);
-    const bad = checks.find((c) => !['command', 'browser', 'http'].includes(c.kind));
-    if (bad) return finish('kind must be command, browser or http.', false);
-
-    // A stopped app is not a failed requirement: say so and keep the status.
-    const firstUrl = checks.map((c) => (c.kind === 'http' ? c.url : (Array.isArray(c.steps) ? c.steps.find((st) => st && st.url) : null)?.url)).find(Boolean);
-    if (firstUrl) {
-      const down = await appDown(firstUrl, this.procs.sandbox);
-      if (down) {
-        run.appDownChecks = (run.appDownChecks || 0) + 1;
-        return finish(`Not checked: the app is not running at ${down}. Start it with start_process (and wait until it says it is ready), then run this check again. ${req.id} keeps its status.`, false);
-      }
-    }
-
-    if (run) run.checkCalls = (run.checkCalls || 0) + 1;
-    const results = [];
-    for (const c of checks) {
-      const r = await this.runOneCheck(c, req.id, ctx, run);
-      if (r.refused) return finish(r.refused, false);
-      results.push({ ...r, label: c.label, negative: !!c.negative });
-      if (!r.passed && !c.negative) break; // the main check failed: attacks add nothing yet
-    }
-    const passed = results.every((r) => r.passed) && results.length === checks.length;
-    const first = results[0];
-    // With a QA check, the agent's own check is recorded but cannot verify the requirement.
-    req.status = passed && (useQa || !req.qa) ? 'verified' : passed ? 'unverified' : 'failed';
-    req.lastCheck = asked; // re-run as is when the code changes later (freshness)
-    req.evidence = {
-      kind: checks[0].kind, byQa: useQa, check: first.check.slice(0, 200), expect: String(checks[0].expect || '').slice(0, 120), passed,
-      summary: (results.find((r) => !r.passed) || first).detail.split('\n')[0].slice(0, 200), at: Date.now(),
-      attacks: results.filter((r) => r.negative).map((r) => ({ label: r.label.slice(0, 120), passed: r.passed })),
-      // The code this proof belongs to: a later change makes it stale and DROPs re-checks it.
-      fingerprint: sourceFingerprint(this.data.projectDir), files: run.editedFiles ? [...run.editedFiles].slice(0, 30) : [],
-    };
-    this.emit('requirements', { requirements: reqs });
-    this.save();
-    const lines = results.map((r) => `- ${r.label}: ${r.passed ? 'passed' : 'FAILED'} (${r.check}) ${r.detail.split('\n')[0]}`);
-    const failedAttack = results.find((r) => r.negative && !r.passed);
-    const note = passed && req.qa && !useQa ? ` Your own check passed, but ${req.id} has an independent QA check: run check_requirement with use_qa: true to verify it.`
-      : failedAttack ? ` The app accepted misuse it must refuse (${failedAttack.label}). Fix the app so it refuses it, then run the check again.` : '';
-    const body = results.length > 1 ? `\n${lines.join('\n')}` : `: ${first.detail}`;
-    // The same requirement failing again: debug it, do not guess.
-    let debug = '';
-    if (!passed && run) {
-      run.reqFails = run.reqFails || new Map();
-      run.reqFails.set(req.id, (run.reqFails.get(req.id) || 0) + 1);
-      if (run.reqFails.get(req.id) >= 2 && !run.debugMode) { run.debugMode = true; run.debugTestFiles = new Set(); debug = `\n${guards.DEBUG_PROTOCOL}`; this.emit('notice', { message: `${req.id} failed twice: DROPs switched the agent to step-by-step root-cause debugging.` }); }
-    }
-    return finish(`${req.id} ${req.status === 'verified' ? 'VERIFIED' : 'NOT verified'} (${useQa ? 'QA ' : ''}${checks[0].kind}${(req.qaNeg || []).length && useQa ? ` + ${req.qaNeg.length} adversarial` : ''})${body}${note}${debug}`, passed);
-  }
-
-  /** Runs one check definition. Browser checks use a fresh browser (no leftover login). */
-  async runOneCheck(c, reqId, ctx, run) {
-    const expect = String(c.expect || '').trim(), expectUrl = String(c.expect_url || '').trim(), forbid = String(c.forbid || '').trim();
-    let passed = false, detail = '', check = '';
-    try {
-      if (c.kind === 'command') {
-        const cmd = String(c.command || '').trim();
-        check = cmd;
-        if (!cmd) return { refused: 'kind=command needs a command.' };
-        // A command that exercises nothing (echo, true, exit 0) proves nothing.
-        if (/^(echo|printf|true|exit\s+0|:|Write-(Host|Output))\b/i.test(cmd) || (!expect && !guards.isVerificationCommand(cmd, run.verify, [...(run.editedFiles || [])]))) {
-          return { refused: 'That command does not exercise the requirement. Use a test (npm test -- <name>, a script that calls the code) or add `expect` text that only the working feature prints.' };
-        }
-        if ((this.procs.sandbox ? shell.assessCommand(cmd, null) : shell.assessCommand(cmd, this.data.projectDir)).dangerous) return { refused: 'Refused: that command is flagged as dangerous.' };
-        const r = await shell.run(cmd, { cwd: this.data.projectDir, sandbox: this.procs.sandbox, signal: ctx.signal, timeoutMs: 180000 });
-        const out = shell.redact(shell.stripAnsi(r.output || '')).text;
-        const found = !expect || out.includes(expect);
-        passed = r.code === 0 && found;
-        detail = `exit ${r.code}${expect ? `, expected text ${found ? 'found' : 'NOT found'}` : ''}\n${out.trim().slice(-1500)}`;
-        if (run.verify && guards.isVerificationCommand(cmd, run.verify, [...(run.editedFiles || [])])) { run.verifiedAfterEdit = true; run.lastVerify = r.code === 0 ? 'pass' : 'fail'; }
-      } else if (c.kind === 'browser') {
-        const steps = Array.isArray(c.steps) ? c.steps.slice(0, 25) : [];
-        check = `${steps.length} browser step(s)`;
-        if (!steps.length || (!expect && !expectUrl)) return { refused: 'kind=browser needs steps and `expect` text (or `expect_url`) that the final page must show.' };
-        const browser = require('./browser');
-        const sb = this.procs.sandbox;
-        const key = `${this.data.projectDir}::check::${reqId}::${Date.now()}`;
-        let last = null, issue = null;
-        try {
-          for (const st of steps) {
-            last = await browser.act(key, st, { mapUrl: (x) => (sb ? sb.mapUrl(x) : x), signal: ctx.signal });
-            await this.emitFrame(key, `${reqId} check: ${st.action}`);
-            // A refusal (401, an error message) is the expected result of an attack, not a broken app.
-            if (last.issue && !c.negative) { issue = last.issue; break; }
-          }
-        } finally { await browser.act(key, { action: 'close' }).catch(() => {}); }
-        const text = last?.text || '';
-        const url = /URL: (\S+)/.exec(text)?.[1] || '';
-        const okText = !expect || text.includes(expect);
-        let okUrl = true;
-        if (expectUrl) { try { okUrl = new URL(url).pathname.startsWith(expectUrl); } catch { okUrl = false; } }
-        const okForbid = !forbid || !text.includes(forbid);
-        passed = !issue && okText && okUrl && okForbid;
-        detail = issue ? `the browser showed a problem: ${issue}`
-          : `${steps.length} step(s) ran;${expect ? ` expected text ${okText ? 'found' : 'NOT found'};` : ''}${expectUrl ? ` page ${okUrl ? 'is' : 'is NOT'} on ${expectUrl} (${url || 'no URL'});` : ''}${forbid ? ` forbidden text ${okForbid ? 'absent' : 'SHOWN'};` : ''}\n${text.slice(0, 1200)}`;
-      } else if (c.kind === 'http') {
-        const sb = this.procs.sandbox;
-        const url = sb ? sb.mapUrl(String(c.url || '')) : String(c.url || '');
-        check = `${(c.method || 'GET').toUpperCase()} ${c.url}`;
-        const wantStatus = Number(c.expect_status) || 0;
-        if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//i.test(url) || (!expect && !wantStatus)) return { refused: 'kind=http needs a local URL of the running app (http://localhost:<port>/…) and `expect` text (or `expect_status`).' };
-        const res = await fetch(url, { method: (c.method || 'GET').toUpperCase(), headers: c.body ? { 'content-type': 'application/json' } : {}, body: c.body ? (typeof c.body === 'string' ? c.body : JSON.stringify(c.body)) : undefined, redirect: 'manual', signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(30000)]) });
-        const body = await res.text();
-        const okText = !expect || body.includes(expect);
-        const okStatus = wantStatus ? res.status === wantStatus : (res.ok || (c.negative && res.status >= 300));
-        const okForbid = !forbid || !body.includes(forbid);
-        passed = okText && okStatus && okForbid;
-        detail = `HTTP ${res.status}${wantStatus ? ` (expected ${wantStatus})` : ''}${expect ? `, expected text ${okText ? 'found' : 'NOT found'}` : ''}${forbid ? `, forbidden text ${okForbid ? 'absent' : 'SHOWN'}` : ''}\n${body.slice(0, 1200)}`;
-      }
-    } catch (e) {
-      passed = false; detail = `the check could not run: ${String(e.message || e).split('\n')[0]}`;
-    }
-    return { passed, detail, check };
-  }
-
-  /**
-   * Freshness: a requirement verified on older code is not verified now. When the project's files
-   * changed since a proof, DROPs re-runs that check itself (no model call) before the agent may finish.
-   */
-  async reverifyStale(ctx, run) {
-    const reqs = this.data.requirements || [];
-    const fp = sourceFingerprint(this.data.projectDir);
-    const stale = reqs.filter((r) => r.status === 'verified' && r.evidence?.fingerprint && r.evidence.fingerprint !== fp && r.lastCheck);
-    if (!stale.length) return 0;
-    this.emit('notice', { message: `The code changed after ${stale.length} requirement${stale.length > 1 ? 's were' : ' was'} verified; DROPs is checking ${stale.length > 1 ? 'them' : 'it'} again.` });
-    let broken = 0;
-    for (const r of stale) {
-      r.status = 'stale';
-      const res = await this.runCheckRequirement({ id: `refresh-${r.id}-${Date.now()}`, input: { ...r.lastCheck, id: r.id } }, {}, ctx, run).catch(() => null);
-      if (r.status !== 'verified') broken++;
-      if (res && r.status === 'stale') r.evidence = { ...(r.evidence || {}), summary: String(res.content || '').split('\n')[0].slice(0, 200) };
-    }
-    this.emit('requirements', { requirements: reqs });
-    this.save();
-    if (broken) this.emit('notice', { message: `Re-check after the change: ${broken} of ${stale.length} no longer verified.` });
-    return broken;
-  }
+  // ---------- independent QA & evidence checks (extracted to agent-qa.js) ----------
+  writeQaChecks(specText, model) { return agentQa.writeQaChecks(this, specText, model); }
+  writeAdversarialChecks(specText, model, facts) { return agentQa.writeAdversarialChecks(this, specText, model, facts); }
+  reviseQaCheck(req, dispute, model) { return agentQa.reviseQaCheck(this, req, dispute, model); }
+  runCheckRequirement(u, meta, ctx, run) { return agentQa.runCheckRequirement(this, u, meta, ctx, run); }
+  runOneCheck(c, reqId, ctx, run) { return agentQa.runOneCheck(this, c, reqId, ctx, run); }
+  reverifyStale(ctx, run) { return agentQa.reverifyStale(this, ctx, run); }
 
   // ---------- user command rules (Settings → Safety) ----------
   commandRules() {
@@ -2245,15 +1888,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     const head = msgs.slice(0, cut);
     const tail = msgs.slice(cut);
     this.emit('compact-start', { reason, messages: head.length });
-    const stateLines = [];
-    if (this.data.todos?.length) {
-      stateLines.push('Active task plan:\n' + this.data.todos.map((t) => `- [${t.status}] ${t.content}`).join('\n'));
-    }
-    const changed = Object.keys(this.data.changes || {});
-    if (changed.length) stateLines.push('Files modified in this session: ' + changed.join(', '));
-    const openReqs = (this.data.requirements || []).filter((r) => r.status !== 'verified');
-    if (openReqs.length) stateLines.push(`Requirements not verified yet (${openReqs.length} of ${this.data.requirements.length}): ${openReqs.slice(0, 30).map((r) => r.id).join(', ')}`);
-    if (this.data.plan?.goal) stateLines.push(`A saved implementation plan is pinned in the system prompt (goal: ${this.data.plan.goal}).`);
+    const stateLines = buildExecutionLedger(this.data);
     const stateNote = stateLines.length ? `\n\n<session_state>\n${stateLines.join('\n')}\n</session_state>` : '';
     const summary = await providers.complete({
       model: opts.model, system: ctxEngine.SUMMARY_SYSTEM, deps: this.deps, signal,

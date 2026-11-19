@@ -1,3 +1,4 @@
+// @ts-check
 // The product name and where its files live. The app was called H2O; the old names keep working so
 // nobody loses settings, sessions, lessons or project memory:
 //   - environment variables DROPS_* (new) or H2O_* (old)

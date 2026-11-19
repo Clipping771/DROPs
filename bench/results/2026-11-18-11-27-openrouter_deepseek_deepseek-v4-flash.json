@@ -1,0 +1,70 @@
+{
+  "date": "2026-11-18T11:27:42.785Z",
+  "model": "openrouter:deepseek/deepseek-v4-flash",
+  "effort": "medium",
+  "runs": 1,
+  "tasks": 2,
+  "attempts": 2,
+  "passed": 1,
+  "successRate": 50,
+  "byCategory": {
+    "bug fix": {
+      "total": 1,
+      "passed": 0,
+      "passRate": 0
+    },
+    "feature": {
+      "total": 1,
+      "passed": 1,
+      "passRate": 100
+    }
+  },
+  "failures": {
+    "tool_errors": 1
+  },
+  "totalSeconds": 474,
+  "avgSeconds": 237,
+  "tokensIn": 675769,
+  "tokensOut": 10652,
+  "cost": 0.039,
+  "results": [
+    {
+      "task": "py-mutable-default",
+      "category": "bug fix",
+      "pass": false,
+      "seconds": 173,
+      "tokensIn": 675769,
+      "tokensOut": 10652,
+      "cost": 0.038934742,
+      "costKnown": true,
+      "tools": 58,
+      "toolErrors": 13,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "guardNudges": 5,
+      "error": null,
+      "failure": "FAIL: test_given_list_not_aliased (test_cart.T.test_given_list_not_aliased)\r |     self.assertEqual(len(src), 1)\r | AssertionError: 2 != 1\r",
+      "failureBucket": "tool_errors"
+    },
+    {
+      "task": "py-roman-numerals",
+      "category": "feature",
+      "pass": true,
+      "seconds": 301,
+      "tokensIn": 0,
+      "tokensOut": 0,
+      "cost": 0,
+      "costKnown": true,
+      "tools": 0,
+      "toolErrors": 0,
+      "verifyFailed": false,
+      "stoppedByLimit": false,
+      "models": [],
+      "guardNudges": 0,
+      "error": "timeout",
+      "failure": null,
+      "failureBucket": null
+    }
+  ]
+}

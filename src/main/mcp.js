@@ -1,3 +1,4 @@
+// @ts-check
 // MCP (Model Context Protocol) client: connects to configured servers (stdio or HTTP) and
 // exposes their tools to the agent as `mcp__<server>__<tool>`.
 const fs = require('fs');

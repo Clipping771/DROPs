@@ -58,6 +58,64 @@ function categorizeFailure(row) {
   return 'patch_or_test_failed';
 }
 
+/** Prepares a SWE-bench / dataset task workspace from a local path or GitHub repo+commit. */
+function prepareDatasetRepo(task, dir) {
+  if (!task?.repo) return;
+  if (fs.existsSync(task.repo)) {
+    fs.cpSync(task.repo, dir, { recursive: true });
+    return;
+  }
+  const url = /^https?:\/\//i.test(task.repo) ? task.repo : `https://github.com/${task.repo}.git`;
+  execSync(`git clone ${task.baseCommit ? '' : '--depth 1 '}"${url}" "${dir}"`, { stdio: 'pipe', timeout: 180000 });
+  if (task.baseCommit) execSync(`git checkout "${task.baseCommit}"`, { cwd: dir, stdio: 'pipe', timeout: 60000 });
+}
+
+/** Applies an optional SWE-bench test_patch before running the verification command. */
+function gradeDatasetTask(task, dir) {
+  if (task.testPatch) {
+    const patchFile = path.join(dir, '.drops-test.patch');
+    fs.writeFileSync(patchFile, task.testPatch, 'utf8');
+    try { execSync(`git apply "${patchFile}"`, { cwd: dir, stdio: 'pipe', timeout: 30000 }); }
+    finally { try { fs.unlinkSync(patchFile); } catch { /* ignore */ } }
+  }
+  return check(dir, task.check || 'npm test');
+}
+
+/** Aggregates benchmark run rows into summary metrics including cost-per-success and escalations. */
+function summarizeResults(results, { model = 'auto', effort = 'medium', runs = 1 } = {}) {
+  const passed = results.filter((r) => r.pass).length;
+  const byTask = new Map();
+  for (const r of results) { if (!byTask.has(r.task)) byTask.set(r.task, []); byTask.get(r.task).push(r); }
+  const passAtKTasks = [...byTask.values()].filter((list) => list.some((r) => r.pass)).length;
+  const passAtK = byTask.size ? Math.round((passAtKTasks / byTask.size) * 1000) / 10 : 0;
+  const byCategory = {};
+  for (const r of results) {
+    const c = byCategory[r.category || 'uncategorized'] ||= { total: 0, passed: 0 };
+    c.total++;
+    if (r.pass) c.passed++;
+  }
+  for (const c of Object.values(byCategory)) c.passRate = Math.round((c.passed / c.total) * 1000) / 10;
+
+  const failures = {};
+  for (const r of results) { if (r.failureBucket) failures[r.failureBucket] = (failures[r.failureBucket] || 0) + 1; }
+  const sum = (k) => results.reduce((s, r) => s + (r[k] || 0), 0);
+  const costKnown = results.length > 0 && results.every((r) => r.costKnown);
+  const cost = costKnown ? Math.round(sum('cost') * 1000) / 1000 : null;
+  const escalations = results.filter((r) => (r.models || []).length > 1).length;
+  const claimedButFailed = results.filter((r) => !r.pass && !r.verifyFailed && !r.stoppedByLimit && !r.error).length;
+  return {
+    date: new Date().toISOString(), model, effort, runs, tasks: byTask.size, attempts: results.length, passed,
+    successRate: results.length ? Math.round((passed / results.length) * 1000) / 10 : 0, ...(runs > 1 ? { passAtK } : {}),
+    byCategory, failures, escalations,
+    escalationRate: results.length ? Math.round((escalations / results.length) * 1000) / 10 : 0,
+    claimedButFailed,
+    avgAttemptsPerSuccess: passed > 0 ? Math.round((results.length / passed) * 100) / 100 : null,
+    costPerSuccess: passed > 0 && cost != null ? Math.round((cost / passed) * 10000) / 10000 : null,
+    totalSeconds: sum('seconds'), avgSeconds: results.length ? Math.round(sum('seconds') / results.length) : 0,
+    tokensIn: sum('tokensIn'), tokensOut: sum('tokensOut'), cost, results,
+  };
+}
+
 /** Formats a benchmark summary into a Markdown scorecard suitable for reviews/leaderboards. */
 function formatScorecard(summary) {
   const lines = [
@@ -66,7 +124,8 @@ function formatScorecard(summary) {
     `- **Date:** ${summary.date}`,
     `- **Model:** \`${summary.model}\` · **Effort:** \`${summary.effort}\``,
     `- **Pass Rate:** **${summary.passed}/${summary.attempts} (${summary.successRate}%)**${summary.passAtK != null ? ` · **pass@${summary.runs}:** ${summary.passAtK}%` : ''}`,
-    `- **Avg Time:** ${summary.avgSeconds}s/task · **Tokens:** ${summary.tokensIn} in / ${summary.tokensOut} out · **Cost:** ${summary.cost != null ? `$${summary.cost}` : 'N/A'}`,
+    `- **Avg Time:** ${summary.avgSeconds}s/task · **Tokens:** ${summary.tokensIn} in / ${summary.tokensOut} out · **Cost:** ${summary.cost != null ? `$${summary.cost}` : 'N/A'}${summary.costPerSuccess != null ? ` · **Cost/Success:** $${summary.costPerSuccess}` : ''}`,
+    `- **Attempts/Success:** ${summary.avgAttemptsPerSuccess ?? 'N/A'} · **Escalations:** ${summary.escalations ?? 0} (${summary.escalationRate ?? 0}%) · **Unverified False Passes:** ${summary.claimedButFailed ?? 0}`,
     ``,
     `## By Category`,
     `| Category | Passed | Total | Pass Rate |`,
@@ -117,15 +176,15 @@ async function main() {
       // A provider rate limit is not a task failure: wait and run the task again from scratch.
       for (let attempt = 1; attempt <= 3; attempt++) {
         dir = datasetTasks ? fs.mkdtempSync(path.join(os.tmpdir(), `drops-swe-${name.replace(/[^\w.-]/g, '_')}-`)) : prepare(name);
-        if (datasetTasks && task.repo && fs.existsSync(task.repo)) fs.cpSync(task.repo, dir, { recursive: true });
+        if (datasetTasks) prepareDatasetRepo(task, dir);
         t0 = Date.now(); r = null; err = null;
         try {
           r = await Promise.race([
-            runHeadless({ project: dir, task: task.prompt, model, effort, mode: 'yolo', maxSteps: 60 }),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutS * 1000)),
+            runHeadless({ project: dir, task: task.prompt, model, effort, mode: 'yolo', maxSteps: 60, timeoutMs: timeoutS * 1000 }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), (timeoutS + 15) * 1000)),
           ]);
         } catch (e) { err = e.message; }
-        g = datasetTasks ? check(dir, task.check) : grade(name, dir);
+        g = datasetTasks ? gradeDatasetTask(task, dir) : grade(name, dir);
         // A dead key / missing credentials is not a task failure: stop instead of recording fake results.
         if (!g.pass && (r?.errors || [err || '']).some((e) => /key was rejected|No API key|API key not valid|needs a key/i.test(e || ''))) {
           console.error(`\nBenchmark aborted on ${name}: the provider rejected the API key (${(r?.errors || [err])[0]}). No results saved.`);
@@ -146,35 +205,27 @@ async function main() {
         error: err || (r?.errors || [])[0] || null, failure: g.pass ? null : (g.out || '').split('\n').filter((l) => /not ok|Error|assert|FAIL/i.test(l)).slice(0, 3).join(' | '),
       };
       row.failureBucket = categorizeFailure(row);
+      try {
+        require('../src/main/store').recordModelOutcome({
+          model: (row.models && row.models[row.models.length - 1]) || model,
+          category: row.category || '',
+          passed: row.pass,
+          cost: row.cost || 0,
+          seconds: row.seconds || 0,
+        });
+      } catch { /* ignore */ }
       results.push(row);
       const tag = runs > 1 ? `${name}#${runIdx}` : name;
       console.log(`${row.pass ? 'PASS' : 'FAIL'}  ${tag.padEnd(28)} ${String(row.seconds).padStart(4)}s  ${String(row.tokensIn).padStart(7)} in ${String(row.tokensOut).padStart(6)} out  ${row.tools} tools${row.guardNudges ? `  ${row.guardNudges} guard` : ''}${row.error ? `  [${row.error.slice(0, 60)}]` : ''}`);
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
-  const passed = results.filter((r) => r.pass).length;
+  const summary = summarizeResults(results, { model, effort, runs });
+  const { passed, byCategory, passAtK } = summary;
   const byTask = new Map();
   for (const r of results) { if (!byTask.has(r.task)) byTask.set(r.task, []); byTask.get(r.task).push(r); }
   const passAtKTasks = [...byTask.values()].filter((list) => list.some((r) => r.pass)).length;
-  const passAtK = byTask.size ? Math.round((passAtKTasks / byTask.size) * 1000) / 10 : 0;
-  const byCategory = {};
-  for (const r of results) {
-    const c = byCategory[r.category || 'uncategorized'] ||= { total: 0, passed: 0 };
-    c.total++;
-    if (r.pass) c.passed++;
-  }
-  for (const c of Object.values(byCategory)) c.passRate = Math.round((c.passed / c.total) * 1000) / 10;
-
-  const failures = {};
-  for (const r of results) { if (r.failureBucket) failures[r.failureBucket] = (failures[r.failureBucket] || 0) + 1; }
-  const sum = (k) => results.reduce((s, r) => s + r[k], 0);
-  const summary = {
-    date: new Date().toISOString(), model, effort, runs, tasks: byTask.size, attempts: results.length, passed,
-    successRate: results.length ? Math.round((passed / results.length) * 1000) / 10 : 0, ...(runs > 1 ? { passAtK } : {}), byCategory, failures,
-    totalSeconds: sum('seconds'), avgSeconds: results.length ? Math.round(sum('seconds') / results.length) : 0, tokensIn: sum('tokensIn'), tokensOut: sum('tokensOut'),
-    cost: results.every((r) => r.costKnown) ? Math.round(sum('cost') * 1000) / 1000 : null, results,
-  };
-  console.log(`\nResult: ${passed}/${results.length} passed (${summary.successRate}%)${runs > 1 ? ` · pass@${runs}: ${passAtKTasks}/${byTask.size} (${passAtK}%)` : ''} · avg ${summary.avgSeconds}s/task · ${summary.tokensIn} in / ${summary.tokensOut} out tokens${summary.cost != null ? ` · $${summary.cost}` : ' · cost: billed by provider'}`);
+  console.log(`\nResult: ${passed}/${results.length} passed (${summary.successRate}%)${runs > 1 ? ` · pass@${runs}: ${passAtKTasks}/${byTask.size} (${passAtK}%)` : ''} · avg ${summary.avgSeconds}s/task · ${summary.tokensIn} in / ${summary.tokensOut} out tokens${summary.cost != null ? ` · $${summary.cost} ($${summary.costPerSuccess ?? 'N/A'}/success)` : ' · cost: billed by provider'}`);
   console.log('By category: ' + Object.entries(byCategory).map(([k, v]) => `${k} ${v.passed}/${v.total} (${v.passRate}%)`).join(' · '));
 
   if (comparePath) {
@@ -211,4 +262,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { parseSweBenchJsonl, categorizeFailure, formatScorecard };
+module.exports = { parseSweBenchJsonl, categorizeFailure, summarizeResults, formatScorecard, prepareDatasetRepo, gradeDatasetTask };

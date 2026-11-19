@@ -1,3 +1,4 @@
+// @ts-check
 // Lessons: what DROPs learned from its own mistakes, kept across sessions and projects.
 // A lesson is a short, general rule ("in the Docker sandbox `fuser` is missing; use `pkill -f`").
 // Lessons come from two places: the agent itself (`learn_lesson` tool, after it hits and fixes a

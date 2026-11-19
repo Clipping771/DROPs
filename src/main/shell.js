@@ -1,3 +1,4 @@
+// @ts-check
 // Shell execution for every platform, an optional Docker sandbox, and command/secret security.
 const fs = require('fs');
 const path = require('path');
@@ -119,7 +120,7 @@ function killTree(child) {
 }
 
 // Runs a command to completion with timeout/abort, streaming output.
-async function run(cmd, { cwd, sandbox, signal, timeoutMs = 120000, onChunk, env }) {
+async function run(cmd, { cwd, sandbox = undefined, signal = undefined, timeoutMs = 120000, onChunk = undefined, env = undefined }) {
   let child;
   try { child = await spawnShell(cmd, { cwd, sandbox, env }); } catch (e) { return { code: -1, output: e.message, killed: null }; }
   return new Promise((resolve) => {
@@ -155,7 +156,11 @@ const DANGEROUS = [
   /\b(npm|pnpm|yarn)\s+publish\b/i, /\bcargo\s+publish\b/i, /\btwine\s+upload\b/i, /\bdotnet\s+nuget\s+push\b/i,
   /\bdocker\s+(system|volume|image)\s+prune\b/i, /\bdocker\s+rm\s+-f\b/i, /\bkubectl\s+delete\b/i, /\bterraform\s+(destroy|apply)\b/i, /\bhelm\s+(uninstall|delete)\b/i,
   /\b(drop|truncate)\s+(table|database|schema)\b/i, /\bdelete\s+from\s+\w+\s*(;|$)/i,
-  /\b(powershell|pwsh)(\.exe)?\b[^\n]*\s-(e|enc|encodedcommand)\s+[A-Za-z0-9+/=]{16,}/i,
+  /\b(powershell|pwsh)(\.exe)?\b[^\n]*\s-(e|enc|encodedcommand)\s+[A-Za-z0-9+/=]{8,}/i,
+  /\bbase64\b[^\n]*(-d|-D|--decode)\b[^\n]*\|\s*(sh|bash|zsh|dash|pwsh|powershell|python[\d.]*|node|perl|ruby)\b/i,
+  /\[(?:System\.)?Convert\]::FromBase64String\s*\(/i,
+  /\[scriptblock\]::Create\s*\(/i,
+  /\beval\s+["']?\$\(/i,
   /\bStart-Process\b[^\n]*-Verb\s+RunAs/i,
   /\.git[\\/]hooks[\\/]/i,
   // Inline code that deletes files or trees (node -e, python -c, perl/ruby -e) has no shell verb to see.
@@ -181,14 +186,29 @@ function writesOutsideRoot(cmd, root) {
   });
 }
 
+/**
+ * Normalizes common shell obfuscation tricks (PowerShell backticks, CMD carets,
+ * empty quote pairs) before running security pattern checks.
+ */
+function normalizeForSecurity(cmd) {
+  return String(cmd || '')
+    .replace(/`(?=[A-Za-z0-9_.-])/g, '')
+    .replace(/\^(?=[A-Za-z0-9_./-])/g, '')
+    .replace(/""|''/g, '');
+}
+
 function assessCommand(cmd, root) {
-  for (const r of DANGEROUS) if (r.test(cmd)) return { dangerous: true, reason: 'Potentially destructive or irreversible command.' };
-  if (root && writesOutsideRoot(cmd, root)) return { dangerous: true, reason: 'This command writes or deletes files outside the project folder.' };
+  const raw = String(cmd || '');
+  const norm = normalizeForSecurity(raw);
+  for (const candidate of raw === norm ? [raw] : [raw, norm]) {
+    for (const r of DANGEROUS) if (r.test(candidate)) return { dangerous: true, reason: 'Potentially destructive or irreversible command.' };
+    if (root && writesOutsideRoot(candidate, root)) return { dangerous: true, reason: 'This command writes or deletes files outside the project folder.' };
+  }
   return { dangerous: false };
 }
 
 // Read-only commands that may run without asking in "ask" mode.
-const SAFE = /^\s*(git\s+(status|diff|log|show|branch|remote -v|rev-parse)|Get-ChildItem|Get-Content|Get-Location|Select-String|ls|dir|pwd|cat|type|head|tail|wc|where(\.exe)?|which|Test-Path|node\s+(-v|--version)|npm\s+(-v|--version|ls|list)|python3?\s+--version|dotnet\s+--(info|version)|go\s+version|cargo\s+--version)\b[^;|&>`$]*$/i;
+const SAFE = /^\s*(git\s+(status|diff|log|show|branch|remote -v|rev-parse)|Get-ChildItem|Get-Content|Get-Location|Select-String|ls|dir|pwd|cat|type|head|tail|wc|where(\.exe)?|which|Test-Path|node\s+(-v|--version)|npm\s+(-v|--version|ls|list)|python3?\s+--version|dotnet\s+--(info|version)|go\s+version|cargo\s+--version)\b[^;|&>`$^\r]*$/i;
 // `git diff/log --output=<file>` writes a file; `git branch -d/-D/-m/...` changes branches.
 const SAFE_EXCEPT = /--output\b|\bgit\s+branch\b[^\n]*\s(-[dDmMcCfu]\b|--(delete|move|copy|force|set-upstream-to|unset-upstream)\b)/;
 const isSafeCommand = (cmd) => SAFE.test(cmd) && !cmd.includes('\n') && !SAFE_EXCEPT.test(cmd);

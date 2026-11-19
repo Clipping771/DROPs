@@ -9,8 +9,19 @@ const UI_STRINGS = {
     filterSessions: 'Filter sessions…',
     filterFiles: 'Filter files…',
     paletteHint: 'Search or run a command',
-    askPlaceholder: 'Ask DROPs to build, fix or explain something',
-    hint: 'Enter to send · Shift+Enter new line · messages sent while the agent works steer it live',
+    askPlaceholder: 'Type @ to tag files, / for commands',
+    hint: '@ mention files · / commands · Enter to send · Shift+Enter new line · messages sent while the agent works steer it live',
+    plusBtnLabel: 'Add context or command',
+    plusAttach: 'Attach file',
+    plusMention: 'Mention file or folder',
+    plusGit: 'Git changes',
+    plusCommands: 'Commands',
+    chipFile: '@ file',
+    chipFolder: '@ folder',
+    chipGit: '@git',
+    chipPlan: '/plan',
+    chipHelp: '/help',
+    stripLabel: 'Quick @ mentions and / commands',
     tabPlan: 'Overview',
     tabTasks: 'Tasks',
     tabChanges: 'Changes',
@@ -29,8 +40,19 @@ const UI_STRINGS = {
     filterSessions: 'সেশন খুঁজুন…',
     filterFiles: 'ফাইল খুঁজুন…',
     paletteHint: 'কমান্ড খুঁজুন বা চালান',
-    askPlaceholder: 'DROPs-কে কিছু তৈরি, ফিক্স বা ব্যাখ্যা করতে বলুন',
-    hint: 'Enter দিয়ে পাঠান · Shift+Enter নতুন লাইন · এজেন্ট চলার সময় মেসেজ দিলে সাথে সাথে দিক নির্দেশনা নেয়',
+    askPlaceholder: 'ফাইল ট্যাগ করতে @, কমান্ডের জন্য / লিখুন',
+    hint: '@ ফাইল মেনশন · / কমান্ড · Enter দিয়ে পাঠান · Shift+Enter নতুন লাইন · এজেন্ট চলার সময় মেসেজ দিলে সাথে সাথে দিক নির্দেশনা নেয়',
+    plusBtnLabel: 'ফাইল, মেনশন বা কমান্ড যোগ করুন',
+    plusAttach: 'ফাইল সংযুক্ত করুন',
+    plusMention: 'ফাইল বা ফোল্ডার মেনশন করুন',
+    plusGit: 'গিট পরিবর্তন',
+    plusCommands: 'কমান্ডসমূহ',
+    chipFile: '@ ফাইল',
+    chipFolder: '@ ফোল্ডার',
+    chipGit: '@git',
+    chipPlan: '/plan',
+    chipHelp: '/help',
+    stripLabel: 'কুইক @ মেনশন এবং / কমান্ড',
     tabPlan: 'সারসংক্ষেপ',
     tabTasks: 'টাস্ক',
     tabChanges: 'পরিবর্তন',
@@ -57,6 +79,14 @@ function applyI18n(lang) {
   setText('#paletteBtn .muted', dict.paletteHint);
   setAttr('#input', 'placeholder', dict.askPlaceholder);
   setText('#hint', dict.hint);
+  setAttr('#plusBtn', 'title', dict.plusBtnLabel);
+  setAttr('#plusBtn', 'aria-label', dict.plusBtnLabel);
+  setAttr('#plusMenu', 'aria-label', dict.plusBtnLabel);
+  setAttr('#suggestStrip', 'aria-label', dict.stripLabel);
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    const k = el.getAttribute('data-i18n');
+    if (k && dict[k]) el.textContent = dict[k];
+  });
   // Each tab is an icon plus a label (built in boot.js): change only the label and the tooltip, so the
   // icon and the badge stay.
   const setTabLabel = (tab, label) => {

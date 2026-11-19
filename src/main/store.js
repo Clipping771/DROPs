@@ -11,6 +11,7 @@ const { execFileSync } = require('child_process');
 const dir = () => (app?.isReady?.() ? app.getPath('userData') : require('./brand').appDataDir());
 const sessionsDir = () => path.join(dir(), 'sessions');
 const settingsFile = () => path.join(dir(), 'settings.json');
+const modelStatsFile = () => path.join(dir(), 'model-stats.json');
 
 const DEFAULTS = {
   defaultModel: 'claude-opus-5-5',
@@ -471,4 +472,31 @@ async function searchSessions(query) {
   return hits.sort((a, b) => b.updated - a.updated).slice(0, 50).map(({ id, snippet }) => ({ id, snippet }));
 }
 
-module.exports = { init, setSettingsAsync, gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions, searchSessions };
+function getModelStats() {
+  return readJson(modelStatsFile(), {});
+}
+
+/**
+ * Records a completed task outcome into model-stats.json for historical model routing.
+ * Updates both the global model key and an optional `<model>::<category>` key.
+ */
+function recordModelOutcome({ model, category = '', passed, cost = 0, seconds = 0 } = {}) {
+  if (!model || model === 'auto' || model === 'fake') return;
+  try {
+    const stats = getModelStats();
+    const bump = (key) => {
+      const cur = stats[key] || { total: 0, passed: 0, totalCost: 0, totalSeconds: 0, updatedAt: 0 };
+      cur.total = (cur.total || 0) + 1;
+      if (passed) cur.passed = (cur.passed || 0) + 1;
+      cur.totalCost = Math.round(((cur.totalCost || 0) + (Number(cost) || 0)) * 1e6) / 1e6;
+      cur.totalSeconds = Math.round((cur.totalSeconds || 0) + (Number(seconds) || 0));
+      cur.updatedAt = Date.now();
+      stats[key] = cur;
+    };
+    bump(model);
+    if (category) bump(`${model}::${category}`);
+    writeJson(modelStatsFile(), stats);
+  } catch { /* best-effort stats persistence */ }
+}
+
+module.exports = { init, setSettingsAsync, gcBlobs, getSettings, setSettings, getApiKey, getGeminiKey, getProviderKey, addRecentProject, newSession, saveSession, loadSession, deleteSession, listSessions, searchSessions, getModelStats, recordModelOutcome };
