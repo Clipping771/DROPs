@@ -3,7 +3,7 @@
 
 // ---------- composer popup: slash commands + @ mentions ----------
 const Pop = { open: false, items: [], idx: 0, kind: null, start: 0, seq: 0 };
-function closePop() { Pop.open = false; $('#popup').hidden = true; }
+function closePop() { Pop.seq++; Pop.open = false; $('#popup').hidden = true; }
 const SPECIAL_MENTIONS = [
   { k: 'git', d: 'Current git status & recent commits', ic: 'branch' },
   { k: 'diff', d: 'Uncommitted git diff changes', ic: 'diff' },
@@ -61,10 +61,14 @@ function checkPop() {
     return;
   }
   const m = before.match(/(?:^|\s)@([^\s@]*)$/);
-  if (!m || !S.project) return closePop();
+  if (!m) return closePop();
   Pop.kind = 'file'; Pop.start = t.selectionStart - m[1].length - 1;
   const q = m[1].toLowerCase();
-  const specials = SPECIAL_MENTIONS.filter((s) => s.k.startsWith(q));
+  const specials = SPECIAL_MENTIONS.filter((s) => s.k.startsWith(q) && (S.project || s.k === 'url:'));
+  if (!S.project) {
+    Pop.items = specials; Pop.idx = 0; Pop.open = Pop.items.length > 0; drawPop();
+    return;
+  }
   const my = ++Pop.seq;
   setTimeout(async () => {
     if (my !== Pop.seq) return;
@@ -143,6 +147,79 @@ async function init() {
   syncPills();
 
   api.onEvent(onEvent);
+  api.onBrowserStream?.((ev) => onBrowserStream(ev));
+  const resizer = $('#inspResize');
+  if (resizer) {
+    let dragging = false;
+    try {
+      const savedInspW = Number(localStorage.getItem('drops.insp.w'));
+      if (savedInspW >= 300 && savedInspW <= 1200) $('#body')?.style.setProperty('--insp-custom-w', `${savedInspW}px`);
+    } catch { /* ignore */ }
+    resizer.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      resizer.setPointerCapture?.(e.pointerId);
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      const b = $('#body');
+      if (b?.classList.contains('browser-wide')) {
+        b.classList.remove('browser-wide');
+        const wb = $('.bp-wide-btn');
+        if (wb) { wb.classList.remove('on'); wb.innerHTML = icon('maximize', 'xs'); wb.title = 'Expand browser stage'; wb.setAttribute('aria-label', wb.title); }
+      }
+      e.preventDefault();
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const w = Math.max(300, Math.min(Math.round(window.innerWidth * 0.76), Math.round(window.innerWidth - e.clientX)));
+      $('#body')?.style.setProperty('--insp-custom-w', `${w}px`);
+    });
+    window.addEventListener('pointerup', () => {
+      if (!dragging) return;
+      dragging = false;
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      const raw = $('#body')?.style.getPropertyValue('--insp-custom-w');
+      const px = parseInt(raw, 10);
+      if (px >= 300) { try { localStorage.setItem('drops.insp.w', String(px)); } catch { /* ignore */ } }
+    });
+    resizer.addEventListener('dblclick', () => {
+      $('#body')?.style.removeProperty('--insp-custom-w');
+      try { localStorage.removeItem('drops.insp.w'); } catch { /* ignore */ }
+    });
+  }
+  const sideResizer = $('#sideResize');
+  if (sideResizer) {
+    let draggingSide = false;
+    try {
+      const savedSideW = Number(localStorage.getItem('drops.side.w'));
+      if (savedSideW >= 190 && savedSideW <= 440) $('#body')?.style.setProperty('--side-custom-w', `${savedSideW}px`);
+    } catch { /* ignore */ }
+    sideResizer.addEventListener('pointerdown', (e) => {
+      draggingSide = true;
+      sideResizer.setPointerCapture?.(e.pointerId);
+      sideResizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      e.preventDefault();
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (!draggingSide) return;
+      const w = Math.max(190, Math.min(440, Math.round(e.clientX - 56)));
+      $('#body')?.style.setProperty('--side-custom-w', `${w}px`);
+    });
+    window.addEventListener('pointerup', () => {
+      if (!draggingSide) return;
+      draggingSide = false;
+      sideResizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      const raw = $('#body')?.style.getPropertyValue('--side-custom-w');
+      const px = parseInt(raw, 10);
+      if (px >= 190) { try { localStorage.setItem('drops.side.w', String(px)); } catch { /* ignore */ } }
+    });
+    sideResizer.addEventListener('dblclick', () => {
+      $('#body')?.style.removeProperty('--side-custom-w');
+      try { localStorage.removeItem('drops.side.w'); } catch { /* ignore */ }
+    });
+  }
   // Screen readers: a button that shows only an icon gets its tooltip as its name, including buttons
   // added later (the UI is built on the fly).
   const nameIconButtons = (root) => {
@@ -163,8 +240,8 @@ async function init() {
   t.addEventListener('input', () => { autosize(); updateComposer(); checkPop(); });
   t.addEventListener('keydown', (e) => {
     if (Pop.open) {
-      if (e.key === 'ArrowDown') { Pop.idx = (Pop.idx + 1) % Pop.items.length; drawPop(); e.preventDefault(); return; }
-      if (e.key === 'ArrowUp') { Pop.idx = (Pop.idx - 1 + Pop.items.length) % Pop.items.length; drawPop(); e.preventDefault(); return; }
+      if (e.key === 'ArrowDown') { Pop.idx = (Pop.idx + 1) % Pop.items.length; drawPop(); $('#popup .opt.on')?.scrollIntoView({ block: 'nearest' }); e.preventDefault(); return; }
+      if (e.key === 'ArrowUp') { Pop.idx = (Pop.idx - 1 + Pop.items.length) % Pop.items.length; drawPop(); $('#popup .opt.on')?.scrollIntoView({ block: 'nearest' }); e.preventDefault(); return; }
       if (e.key === 'Enter' || e.key === 'Tab') { pickPop(Pop.idx); e.preventDefault(); return; }
       if (e.key === 'Escape') { closePop(); e.preventDefault(); e.stopPropagation(); return; }
     }
@@ -202,11 +279,6 @@ async function init() {
   $('#branchBtn').onclick = () => Panels.showSide('scm');
   $('#paletteBtn').onclick = () => Panels.openPalette();
   $('#themeBtn').onclick = toggleTheme;
-  // Quick buttons in the title bar: open the right place in one click (the inspector opens if hidden).
-  const openInsp = (tab) => { const b = $('#body'); const hidden = window.innerWidth <= 1280 ? !b.classList.contains('force-insp') : b.classList.contains('no-insp'); if (hidden) toggleInspector(); Panels.switchTab(tab); };
-  $('#qbFiles').onclick = () => Panels.showSide('explorer');
-  $('#qbChanges').onclick = () => openInsp('changes');
-  $('#qbProcs').onclick = () => openInsp('terminal');
   $('#inspToggle').onclick = toggleInspector;
   $('#inspToggle').classList.add('on');
   $('#railSettings').onclick = () => Panels.openSettings();
@@ -214,7 +286,7 @@ async function init() {
   $('#refreshGit').onclick = () => Panels.refreshGit();
   $$('.rail button[data-view]').forEach((b) => (b.onclick = () => Panels.showSide(b.dataset.view)));
   // Right-panel tabs: an icon each, and the name only on the open tab (all six fit any panel width).
-  const TAB_ICONS = { plan: 'layers', tasks: 'list', changes: 'diff', terminal: 'terminal', browser: 'globe', usage: 'gauge' };
+  const TAB_ICONS = { plan: 'layers', tasks: 'list', changes: 'diff', map: 'network', terminal: 'terminal', browser: 'globe', usage: 'gauge' };
   $$('#inspTabs button').forEach((b) => {
     const badge = b.querySelector('.badge');
     const label = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim();
@@ -244,18 +316,27 @@ async function init() {
   $('#effortSel').onchange = persistOpts;
   $$('#modeSeg button').forEach((b) => (b.onclick = () => { setMode(b.dataset.mode); persistOpts(); }));
   $('#optsBtn').onclick = openOptsMenu;
+  // Workspace lenses: IDE, Focus, Studio and Mission Control.
+  $$('#lensSeg .lens-btn').forEach((b) => (b.onclick = () => setLens(b.dataset.lens)));
+  $('#threadWrap').addEventListener('scroll', () => updateFloatIsland(), { passive: true });
 
   document.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
-    if (e.ctrlKey && !e.shiftKey && k === 'k') { e.preventDefault(); Panels.openPalette(); }
+    if (e.ctrlKey && !e.shiftKey && k === 'k') {
+      if (e.target?.closest?.('#editorPane')) return; // Inside Monaco editor, Ctrl+K opens Inline AI
+      e.preventDefault(); Panels.openPalette();
+    }
     else if (e.ctrlKey && e.shiftKey && k === 'p') { e.preventDefault(); Panels.openPalette(); }
     else if (e.ctrlKey && !e.shiftKey && k === 'n') { e.preventDefault(); newSession(); }
     else if (e.ctrlKey && k === ',') { e.preventDefault(); Panels.openSettings(); }
     else if (e.ctrlKey && !e.shiftKey && k === 'o') { e.preventDefault(); pickProject(); }
     else if (e.ctrlKey && !e.shiftKey && k === '\\') { e.preventDefault(); if (S.split) setSplit(null); else openSplitPicker(); }
-    else if (e.ctrlKey && !e.shiftKey && k === 'b') { e.preventDefault(); $('#body').classList.toggle('no-side'); }
+    else if (e.ctrlKey && !e.shiftKey && k === 'b') { e.preventDefault(); Panels.toggleSide(); }
     else if (e.ctrlKey && !e.shiftKey && k === 'j') { e.preventDefault(); toggleInspector(); }
     else if (e.ctrlKey && e.shiftKey && k === 'l') { e.preventDefault(); toggleTheme(); }
+    else if (e.ctrlKey && e.shiftKey && k === 'f') { e.preventDefault(); setLens(S.lens === 'focus' ? 'default' : 'focus'); }
+    else if (e.ctrlKey && e.shiftKey && k === 's') { e.preventDefault(); setLens(S.lens === 'studio' ? 'default' : 'studio'); }
+    else if (e.ctrlKey && e.shiftKey && k === 'm') { e.preventDefault(); setLens(S.lens === 'mission' ? 'default' : 'mission'); }
     else if (e.ctrlKey && !e.shiftKey && k === 'l') { e.preventDefault(); $('#input').focus(); }
     else if (e.key === 'Escape' && !document.querySelector('.overlay, .settings-page')) { const v = currentView(); if (v?.busy) api.stop(v.id); }
   });
@@ -263,7 +344,7 @@ async function init() {
   if (S.settings.lastProject && S.settings.restoreLastProject !== false) await setProject(S.settings.lastProject);
   else { await Panels.loadTree(); await Panels.renderSessions(); showCurrent(); }
   window.applyI18n?.(S.settings.uiLanguage || 'en');
-  if (!S.settings.hasKey) setTimeout(() => Panels.openSettings(), 300);
+  if (!S.settings.hasKey) setTimeout(() => Panels.openSettings('providers'), 300);
   startupNotices();
   t.focus();
 }

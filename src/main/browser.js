@@ -8,6 +8,7 @@ try { pw = require('playwright-core'); } catch { /* optional dependency */ }
 
 const IDLE_MS = 10 * 60_000;
 const ACTION_TIMEOUT = 10_000;
+const isErrorUrl = (url) => /^chrome-error:|^about:blank$/i.test(String(url || '').trim());
 
 // ---- which addresses the browser may reach ----
 // This machine (localhost, 127.x, ::1, *.localhost) for the app being built, and the public internet.
@@ -44,6 +45,15 @@ async function guardRequest(route) {
   return route.abort('addressunreachable');
 }
 const sessions = new Map();
+let streamHandler = null;
+let colorScheme = 'dark';
+function setStreamHandler(fn) { streamHandler = typeof fn === 'function' ? fn : null; }
+function setColorScheme(mode) {
+  colorScheme = mode === 'light' ? 'light' : 'dark';
+  for (const s of sessions.values()) {
+    if (s.page && !s.page.isClosed()) s.page.emulateMedia({ colorScheme }).catch(() => {});
+  }
+}
 
 const available = () => !!pw;
 
@@ -57,7 +67,7 @@ async function launch() {
 }
 
 class BrowserSession {
-  constructor(key) { this.key = key; this.browser = null; this.page = null; this.events = []; this.api = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; this._lock = Promise.resolve(); }
+  constructor(key) { this.key = key; this.browser = null; this.page = null; this.cdp = null; this.streaming = false; this.lastEmitAt = 0; this._lastTitle = ''; this._frameListener = null; this.events = []; this.api = []; this.inflight = new Set(); this.timer = null; this.lastStatus = null; this._lock = Promise.resolve(); }
 
   /** Serializes AI `act()` and user `interact()` on the same Playwright page so they never race. */
   withLock(fn) {
@@ -81,7 +91,7 @@ class BrowserSession {
       return this.page;
     }
     if (!this.browser || !this.browser.isConnected()) this.browser = await launch();
-    const context = await this.browser.newContext({ viewport: viewport || { width: 1280, height: 800 } });
+    const context = await this.browser.newContext({ viewport: viewport || { width: 1280, height: 840 }, colorScheme });
     await context.route('**/*', guardRequest);
     this.page = await context.newPage();
     this.attach(this.page);
@@ -143,7 +153,58 @@ class BrowserSession {
       if (['document', 'fetch', 'xhr', 'script'].includes(q.resourceType())) this.events.push(`request failed: ${q.method()} ${q.url().slice(0, 160)} (${q.failure()?.errorText || 'error'})`);
     });
     this.page.on('dialog', (d) => { this.events.push(`dialog (${d.type()}): ${d.message().slice(0, 200)} → accepted`); d.accept().catch(() => {}); });
+    this.page.on('load', () => { this.page?.title().then((t) => { this._lastTitle = t || ''; }).catch(() => {}); });
     return this.page;
+  }
+
+  async startStream(opts = {}) {
+    if (!this.page || this.page.isClosed() || this.app) return false;
+    if (opts.width && opts.height) {
+      const w = Math.max(480, Math.min(1600, Math.round(Number(opts.width))));
+      const h = Math.max(420, Math.min(1200, Math.round(Number(opts.height))));
+      const cur = this.page.viewportSize();
+      if (!cur || Math.abs(cur.width - w) > 36 || Math.abs(cur.height - h) > 36) {
+        await this.page.setViewportSize({ width: w, height: h }).catch(() => {});
+      }
+    }
+    if (this.streaming) return true;
+    try {
+      this.cdp = this.cdp || (await this.page.context().newCDPSession(this.page));
+      if (!this._frameListener) {
+        this._frameListener = ({ data, metadata, sessionId }) => {
+          this.cdp?.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+          const now = Date.now();
+          if (now - this.lastEmitAt < 50) return;
+          this.lastEmitAt = now;
+          if (!streamHandler || !this.page || this.page.isClosed()) return;
+          const curUrl = this.page.url();
+          if (isErrorUrl(curUrl)) return;
+          streamHandler({
+            type: 'frame',
+            key: this.key,
+            data,
+            url: curUrl,
+            title: this._lastTitle || '',
+            width: metadata?.deviceWidth || 1280,
+            height: metadata?.deviceHeight || 840,
+          });
+        };
+        this.cdp.on('Page.screencastFrame', this._frameListener);
+      }
+      await this.cdp.send('Page.startScreencast', { format: 'jpeg', quality: 82, maxWidth: 1280, maxHeight: 900, everyNthFrame: 1 });
+      this.streaming = true;
+      return true;
+    } catch {
+      this.streaming = false;
+      return false;
+    }
+  }
+
+  async stopStream() {
+    this.streaming = false;
+    if (this.cdp) {
+      try { await this.cdp.send('Page.stopScreencast'); } catch { /* ignore */ }
+    }
   }
 
   touch() {
@@ -154,6 +215,15 @@ class BrowserSession {
 
   async close() {
     clearTimeout(this.timer);
+    await this.stopStream();
+    if (this.cdp) {
+      try {
+        if (this._frameListener) this.cdp.off('Page.screencastFrame', this._frameListener);
+        await this.cdp.detach();
+      } catch { /* ignore */ }
+      this.cdp = null;
+      this._frameListener = null;
+    }
     const b = this.browser, app = this.app, tmp = this.appTmp;
     this.browser = null; this.page = null; this.app = null; this.appTmp = null;
     sessions.delete(this.key);
@@ -284,58 +354,85 @@ async function actInner(s, input, { mapUrl = (u) => u, signal } = {}) {
     return (await fingerprint(page)) === before;
   };
   if (signal?.aborted) throw new Error('Stopped.');
+  if (streamHandler && !s.app && !s.streaming) await s.startStream().catch(() => {});
 
-  switch (action) {
-    case 'open': {
-      if (!input.url) throw new Error('open needs a url.');
-      const url = mapUrl(String(input.url));
-      if (!/^https?:\/\//i.test(url)) throw new Error('Only http(s) addresses can be opened.');
-      if (!(await hostAllowed(new URL(url).hostname))) throw new Error(`${new URL(url).hostname} is on a private network. The browser opens this computer (localhost) and the public internet only.`);
-      const r = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => { throw new Error(`Could not open ${input.url}: ${String(e.message).split('\n')[0]}. Is the app running (start_process) and listening on that port?`); });
-      s.lastStatus = r?.status() ?? null;
-      await settle();
-      break;
-    }
-    case 'click': { const before = await fingerprint(page); s.inflight.clear(); await (await locate(page, input.target, 'click')).click(); s.lastStatus = null; s.unchanged = await afterInteract(before); break; }
-    case 'fill': await (await locate(page, input.target, 'fill')).fill(String(input.value ?? '')); break;
-    case 'select': { const el = await locate(page, input.target, 'fill'); await el.selectOption({ label: String(input.value ?? '') }).catch(() => el.selectOption(String(input.value ?? ''))); } await settle(); break;
-    case 'check': await (await locate(page, input.target, 'fill')).check(); break;
-    case 'press': {
-      const before = await fingerprint(page);
-      s.inflight.clear();
-      if (input.target) await (await locate(page, input.target, 'fill')).press(input.key || 'Enter');
-      else await page.keyboard.press(input.key || 'Enter');
-      const same = await afterInteract(before);
-      s.unchanged = /^(Enter|NumpadEnter)$/.test(input.key || 'Enter') && same;
-      break;
-    }
-    case 'wait': {
-      if (input.target) await (await locate(page, input.target, 'click')).waitFor({ state: 'visible', timeout: Math.min((input.seconds || 10) * 1000, 30000) });
-      else await page.waitForTimeout(Math.min((input.seconds || 2) * 1000, 15000));
-      break;
-    }
-    case 'back': await page.goBack().catch(() => {}); await settle(); break;
-    // Reload: does what was saved survive a fresh load (it is in the database, not only on screen)?
-    case 'reload': { const r = await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null); s.lastStatus = r ? r.status() : null; await settle(); break; }
-    case 'read': break;
-    case 'launch': await settle(); break; // the app was started above
-    case 'screenshot': {
-      // A slow machine (no GPU, software rendering) can need longer than one action's timeout. A desktop
-      // app that still does not answer is captured by Electron itself, which does not wait for fonts.
-      let png;
-      try { png = await page.screenshot({ fullPage: !!input.full, type: 'png', timeout: 30_000 }); } catch (e) {
-        if (!s.app) throw e;
-        const b64 = await s.app.evaluate(async ({ BrowserWindow }) => {
-          const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-          return w ? (await w.capturePage()).toPNG().toString('base64') : null;
-        });
-        if (!b64) throw e;
-        png = Buffer.from(b64, 'base64');
+  const emitCursor = (active, label = '', xRatio = 0.5, yRatio = 0.5) => {
+    if (!streamHandler || s.app) return;
+    streamHandler({ type: 'cursor', key: s.key, active, label: String(label || '').slice(0, 72), xRatio, yRatio });
+  };
+  const aimLocator = async (el, label) => {
+    try {
+      const box = await el.boundingBox();
+      const vp = page.viewportSize() || { width: 1280, height: 840 };
+      if (box && vp.width && vp.height) {
+        const xr = Math.max(0.03, Math.min(0.97, (box.x + box.width / 2) / vp.width));
+        const yr = Math.max(0.03, Math.min(0.97, (box.y + box.height / 2) / vp.height));
+        emitCursor(true, label, xr, yr);
+        return;
       }
-      const text = await snapshot(page, s);
-      return { text: `${text}\n\n[screenshot of ${page.url()}: shown below]`, images: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } }] };
+    } catch { /* ignore */ }
+    emitCursor(true, label, 0.5, 0.45);
+  };
+
+  try {
+    switch (action) {
+      case 'open': {
+        if (!input.url) throw new Error('open needs a url.');
+        const url = mapUrl(String(input.url));
+        if (!/^https?:\/\//i.test(url)) throw new Error('Only http(s) addresses can be opened.');
+        if (!(await hostAllowed(new URL(url).hostname))) throw new Error(`${new URL(url).hostname} is on a private network. The browser opens this computer (localhost) and the public internet only.`);
+        emitCursor(true, 'Opening ' + String(input.url).replace(/^https?:\/\//i, '').slice(0, 38), 0.52, 0.44);
+        const r = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => { throw new Error(`Could not open ${input.url}: ${String(e.message).split('\n')[0]}. Is the app running (start_process) and listening on that port?`); });
+        s.lastStatus = r?.status() ?? null;
+        s._lastTitle = await page.title().catch(() => '');
+        await settle();
+        break;
+      }
+      case 'click': { const before = await fingerprint(page); s.inflight.clear(); const el = await locate(page, input.target, 'click'); await aimLocator(el, 'Click ' + input.target); await el.click(); s.lastStatus = null; s.unchanged = await afterInteract(before); break; }
+      case 'fill': { const el = await locate(page, input.target, 'fill'); await aimLocator(el, 'Type into ' + input.target); await el.fill(String(input.value ?? '')); break; }
+      case 'select': { const el = await locate(page, input.target, 'fill'); await aimLocator(el, 'Select ' + input.target); await el.selectOption({ label: String(input.value ?? '') }).catch(() => el.selectOption(String(input.value ?? ''))); await settle(); break; }
+      case 'check': { const el = await locate(page, input.target, 'fill'); await aimLocator(el, 'Check ' + input.target); await el.check(); break; }
+      case 'press': {
+        const before = await fingerprint(page);
+        s.inflight.clear();
+        if (input.target) { const el = await locate(page, input.target, 'fill'); await aimLocator(el, 'Press ' + (input.key || 'Enter')); await el.press(input.key || 'Enter'); }
+        else { emitCursor(true, 'Press ' + (input.key || 'Enter'), 0.5, 0.5); await page.keyboard.press(input.key || 'Enter'); }
+        const same = await afterInteract(before);
+        s.unchanged = /^(Enter|NumpadEnter)$/.test(input.key || 'Enter') && same;
+        break;
+      }
+      case 'wait': {
+        emitCursor(true, input.target ? 'Waiting for ' + input.target : 'Waiting on page', 0.5, 0.45);
+        if (input.target) await (await locate(page, input.target, 'click')).waitFor({ state: 'visible', timeout: Math.min((input.seconds || 10) * 1000, 30000) });
+        else await page.waitForTimeout(Math.min((input.seconds || 2) * 1000, 15000));
+        break;
+      }
+      case 'back': emitCursor(true, 'Going back', 0.45, 0.45); await page.goBack().catch(() => {}); await settle(); break;
+      // Reload: does what was saved survive a fresh load (it is in the database, not only on screen)?
+      case 'reload': { emitCursor(true, 'Reloading page', 0.5, 0.45); const r = await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => null); s.lastStatus = r ? r.status() : null; await settle(); break; }
+      case 'read': emitCursor(true, 'Inspecting elements & accessibility', 0.52, 0.46); break;
+      case 'launch': await settle(); break; // the app was started above
+      case 'screenshot': {
+        emitCursor(true, 'Capturing visual snapshot', 0.5, 0.5);
+        // A slow machine (no GPU, software rendering) can need longer than one action's timeout. A desktop
+        // app that still does not answer is captured by Electron itself, which does not wait for fonts.
+        let png;
+        try { png = await page.screenshot({ fullPage: !!input.full, type: 'png', timeout: 30_000 }); } catch (e) {
+          if (!s.app) throw e;
+          const b64 = await s.app.evaluate(async ({ BrowserWindow }) => {
+            const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+            return w ? (await w.capturePage()).toPNG().toString('base64') : null;
+          });
+          if (!b64) throw e;
+          png = Buffer.from(b64, 'base64');
+        }
+        const text = await snapshot(page, s);
+        return { text: `${text}\n\n[screenshot of ${page.url()}: shown below]`, images: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } }] };
+      }
+      default: throw new Error(`Unknown browser action "${action}". Use open, click, fill, select, check, press, wait, back, reload, read, screenshot or close.`);
     }
-    default: throw new Error(`Unknown browser action "${action}". Use open, click, fill, select, check, press, wait, back, reload, read, screenshot or close.`);
+  } finally {
+    emitCursor(false);
   }
   const text = await snapshot(page, s, { full: !!input.full });
   // Problems a user would hit, for the agent's UI check: errors since this step, or a click/Enter that
@@ -370,9 +467,35 @@ async function frame(key) {
   const s = sessions.get(key);
   if (!s?.page || s.page.isClosed()) return null;
   try {
-    const png = await s.page.screenshot({ type: 'jpeg', quality: 55, timeout: 15000 });
-    return { url: s.page.url(), title: await s.page.title().catch(() => ''), data: png.toString('base64') };
+    const url = s.page.url();
+    if (isErrorUrl(url)) return { url, title: '', data: null, errorPage: true };
+    const png = await s.page.screenshot({ type: 'jpeg', quality: 82, timeout: 15000 });
+    return { url, title: await s.page.title().catch(() => ''), data: png.toString('base64') };
   } catch { return null; }
+}
+
+/** Starts, stops or resizes the CDP live screencast for a browser session. */
+async function streamControl(key, cmd, opts = {}) {
+  const s = sessions.get(key);
+  if (!s || !s.page || s.page.isClosed()) return { ok: false };
+  if (cmd === 'stop') { await s.stopStream(); return { ok: true }; }
+  if (cmd === 'resize') {
+    return s.withLock(async () => {
+      const w = Math.max(480, Math.min(1600, Math.round(Number(opts.width || 1280))));
+      const h = Math.max(420, Math.min(1200, Math.round(Number(opts.height || 840))));
+      const cur = s.page.viewportSize();
+      if (!cur || Math.abs(cur.width - w) > 36 || Math.abs(cur.height - h) > 36) {
+        await s.page.setViewportSize({ width: w, height: h }).catch(() => {});
+      }
+      if (s.streaming) return { ok: true, frame: await frame(key) };
+      return { ok: true };
+    });
+  }
+  if (cmd === 'start') {
+    const ok = await s.startStream(opts);
+    return { ok, frame: await frame(key) };
+  }
+  return { ok: false };
 }
 
 /** Interactive controls for the user's Live Browser Pane (shares the same Playwright session). */
@@ -385,7 +508,8 @@ async function interact(key, action, payload = {}) {
   }
   return s.withLock(async () => {
     const page = await s.ensure();
-    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    if (streamHandler && !s.app && !s.streaming) await s.startStream().catch(() => {});
+    const vp = page.viewportSize() || { width: 1280, height: 840 };
     const toPx = (xr, yr) => [
       Math.max(0, Math.min(vp.width - 1, Math.round(Number(xr || 0) * vp.width))),
       Math.max(0, Math.min(vp.height - 1, Math.round(Number(yr || 0) * vp.height))),
@@ -434,4 +558,22 @@ async function interact(key, action, payload = {}) {
   });
 }
 
-module.exports = { available, act, interact, closeAll, closeKey, isOpen, locate, frame, hostAllowed };
+/** Loads or reloads a local preview URL inside the live browser session and captures a fresh frame. */
+async function previewSync(key, url, { reload = false } = {}) {
+  if (!pw || !url) return null;
+  const s = sessionFor(key);
+  return s.withLock(async () => {
+    const page = await s.ensure();
+    const curUrl = page.url();
+    if (reload && curUrl === url) {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    } else {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    }
+    if (streamHandler && !s.app && !s.streaming) await s.startStream().catch(() => {});
+    await page.waitForTimeout(140).catch(() => {});
+    return frame(key);
+  });
+}
+
+module.exports = { available, act, interact, closeAll, closeKey, isOpen, locate, frame, hostAllowed, setStreamHandler, setColorScheme, streamControl, previewSync };

@@ -4,4 +4,5 @@
 ; other apps, so grant ALL APPLICATION PACKAGES read/execute on DROPs' own folder.
 !macro customInstall
   nsExec::ExecToLog 'icacls "$INSTDIR" /grant *S-1-15-2-1:(OI)(CI)(RX) /Q'
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
 !macroend

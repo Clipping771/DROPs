@@ -17,6 +17,7 @@ const guards = require('./guards');
 const shell = require('./shell');
 const lessons = require('./lessons');
 const git = require('./git');
+const preview = require('./preview');
 const { readProgress, writeProgress, progressSection, readProjectInstructions } = require('./agent-instructions');
 
 const INTERRUPTED = '[Request interrupted by user]';
@@ -81,6 +82,9 @@ class AgentSession {
     this.saveTimer = null;
     this.fileLocks = new Map();
     this.swarmBoard = [];
+    this._previewTimer = null;
+    this._previewSeq = 0;
+    this._devServerUrl = null;
     this.procs = new tools.ProcessManager(data.projectDir, (ev) => this.emit('proc', ev));
   }
 
@@ -881,6 +885,7 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
         c.added += diff.added; c.removed += diff.removed; c.edits++;
         this.data.changes[rel] = c;
         this.emit('changes', { changes: this.data.changes });
+        this.scheduleLivePreview(rel);
       },
     };
   }
@@ -1159,7 +1164,15 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     }
 
     try {
-      if (prep.kind === 'edit' && u.name !== 'remember') this.captureTsBaseline(run, u.input.path);
+      if (prep.kind === 'edit' && u.name !== 'remember') {
+        this.captureTsBaseline(run, u.input.path);
+        if (!process.env.DROPS_NO_AUTO_PREVIEW) {
+          const ep = String(u.input?.path || '').replace(/\\/g, '/');
+          if (preview.isHtml(ep) || preview.isStyleFile(ep)) {
+            this.emit('preview-status', { state: 'writing', file: ep, at: Date.now() });
+          }
+        }
+      }
       const res = await prep.run((chunk) => this.emit('tool-output', { id: u.id, chunk: shell.redact(chunk).text }));
       const red = shell.redact(typeof res === 'string' ? res : res.text);
       let text = red.count ? `${red.text}\n[DROPs secret shield: ${red.count} secret${red.count > 1 ? 's' : ''} masked]` : red.text;
@@ -1198,6 +1211,9 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
       // What the browser showed is evidence: the latest problem stays open until a later step (or a
       // fix and a fresh look) shows the page working.
       // The live browser pane: a picture of the page after each browser step (UI only, not for the model).
+      if (u.name === 'browser' && !isError && u.input.action === 'open' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\b/i.test(u.input.url || '')) {
+        this._devServerUrl = u.input.url;
+      }
       if (u.name === 'browser' && u.input.action !== 'close') await this.emitFrame(this.data.projectDir, u.input.action);
       if (u.name === 'browser') {
         const issue = typeof res === 'object' ? res.uiIssue : null;
@@ -1518,11 +1534,48 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     return done(`No single file explains it: ${cmd} still fails with any one of ${files.join(', ')} undone, but passes with all of them undone. The changes break it together; look at how they interact. Every file is back exactly as it was before this check.`);
   }
 
+  /** Schedules a debounced live browser preview update when HTML, CSS, or frontend assets are edited. */
+  scheduleLivePreview(rel) {
+    if (process.env.DROPS_NO_AUTO_PREVIEW || !this.data.projectDir) return;
+    Promise.resolve().then(async () => {
+      let pv = await preview.onFileChanged(this.data.projectDir, rel);
+      if (!pv && this._devServerUrl && /\.(jsx|tsx|vue|svelte|css|scss|html?)$/i.test(rel)) {
+        pv = { state: 'reload', file: rel, url: this._devServerUrl, pages: [], activeHtml: null };
+      }
+      if (!pv) return;
+      if (pv.state === 'building') {
+        this.emit('preview-status', { state: 'building', file: pv.file, pages: [], at: Date.now() });
+        return;
+      }
+      this.emit('preview-status', { state: 'updating', file: pv.file, url: pv.url, pages: pv.pages, activeHtml: pv.activeHtml, at: Date.now() });
+      clearTimeout(this._previewTimer);
+      const seq = ++this._previewSeq;
+      this._previewTimer = setTimeout(async () => {
+        if (seq !== this._previewSeq) return;
+        try {
+          const browser = require('./browser');
+          const f = await browser.previewSync(this.data.projectDir, pv.url, { reload: pv.state === 'reload' });
+          if (seq !== this._previewSeq || !f || f.errorPage) return;
+          this.emit('browser-frame', {
+            ...f,
+            step: `Live · ${pv.file}`,
+            livePreview: true,
+            file: pv.file,
+            pages: pv.pages,
+            activeHtml: pv.activeHtml,
+            at: Date.now(),
+          });
+        } catch { /* live preview is best-effort */ }
+      }, 180);
+    }).catch(() => {});
+  }
+
   /** Sends the browser session's current picture to the live pane. */
   async emitFrame(key, step) {
     try {
       const f = await require('./browser').frame(key);
-      if (f) this.emit('browser-frame', { ...f, step: String(step || '').slice(0, 80), at: Date.now() });
+      if (f?.errorPage) this.emit('preview-status', { state: 'unreachable', url: f.url, step: String(step || ''), at: Date.now() });
+      else if (f) this.emit('browser-frame', { ...f, step: String(step || '').slice(0, 80), at: Date.now() });
     } catch { /* the pane is optional */ }
   }
 
@@ -1866,7 +1919,12 @@ The user sees each tool call as a compact step, so do not narrate tool output ba
     r({ decision, feedback });
   }
   // Steering not yet delivered is handed back to the user by finish(), never silently dropped.
-  stop() { this.abort?.abort(); }
+  stop() {
+    clearTimeout(this._previewTimer);
+    this._previewTimer = null;
+    this._previewSeq++;
+    this.abort?.abort();
+  }
 
   // ---------- compaction ----------
   /**

@@ -16,8 +16,8 @@ const UI_STRINGS = {
     plusMention: 'Mention file or folder',
     plusGit: 'Git changes',
     plusCommands: 'Commands',
-    chipFile: '@ file',
-    chipFolder: '@ folder',
+    chipFile: '@file',
+    chipFolder: '@folder',
     chipGit: '@git',
     chipPlan: '/plan',
     chipHelp: '/help',
@@ -25,6 +25,7 @@ const UI_STRINGS = {
     tabPlan: 'Overview',
     tabTasks: 'Tasks',
     tabChanges: 'Changes',
+    tabMap: 'Map',
     tabProcesses: 'Processes',
     tabBrowser: 'Browser',
     tabUsage: 'Usage',
@@ -56,6 +57,7 @@ const UI_STRINGS = {
     tabPlan: 'সারসংক্ষেপ',
     tabTasks: 'টাস্ক',
     tabChanges: 'পরিবর্তন',
+    tabMap: 'কোড ম্যাপ',
     tabProcesses: 'প্রসেস',
     tabBrowser: 'ব্রাউজার',
     tabUsage: 'ব্যবহার',
@@ -99,6 +101,7 @@ function applyI18n(lang) {
   setTabLabel('plan', dict.tabPlan);
   setTabLabel('tasks', dict.tabTasks);
   setTabLabel('changes', dict.tabChanges);
+  setTabLabel('map', dict.tabMap);
   setTabLabel('terminal', dict.tabProcesses);
   setTabLabel('browser', dict.tabBrowser);
   setTabLabel('usage', dict.tabUsage);

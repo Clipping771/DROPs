@@ -114,7 +114,7 @@ test('CLI: parses arguments and shows help', () => {
 test('diagnostics: TypeScript type errors are reported after an edit', async () => {
   const tools = require('../src/main/tools');
   const tscDir = path.join(__dirname, '..', 'node_modules', 'typescript');
-  if (!fs.existsSync(tscDir)) return; // typescript not installed in DROPs itself: covered when a project has it
+  if (!fs.existsSync(path.join(tscDir, 'bin', 'tsc'))) return; // typescript not installed in DROPs itself: covered when a project has it
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-ts-'));
   fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['*.ts'] }));
   fs.mkdirSync(path.join(dir, 'node_modules'));

@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, crashReporter, 
 const path = require('path');
 const fs = require('fs');
 const brand = require('./brand');
+if (process.platform === 'win32') app.setAppUserModelId('dev.drops.agent');
 // Settings, saved keys and sessions: keep using the existing H2O folder after the rename to DROPs.
 app.setPath('userData', brand.appDataDir());
 // One DROPs at a time: two windows would overwrite each other's settings and sessions. A second start
@@ -33,6 +34,7 @@ const ollama = require('./ollama');
 const oai = require('./oai');
 const report = require('./report');
 const browser = require('./browser');
+const preview = require('./preview');
 const { McpManager, projectServers, isProjectTrusted, trustProject, untrustedRows } = require('./mcp');
 const { IGNORE, resolveInRoot } = require('./tools');
 const { listCommands } = require('./commands');
@@ -168,11 +170,12 @@ const taskManager = getTaskManager({
 });
 
 // ---------- theme ----------
-const OVERLAY = { dark: { color: '#131314', symbolColor: '#c4c7c5' }, light: { color: '#ffffff', symbolColor: '#444746' } };
+const OVERLAY = { dark: { color: '#0b0c0f', symbolColor: '#c4c7c5' }, light: { color: '#ffffff', symbolColor: '#444746' } };
 function effectiveTheme() { return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'; }
 function applyTheme(mode) {
   nativeTheme.themeSource = ['light', 'dark'].includes(mode) ? mode : 'system';
   const t = effectiveTheme();
+  browser.setColorScheme(t);
   if (win && !win.isDestroyed()) {
     if (process.platform !== 'darwin') { try { win.setTitleBarOverlay({ ...OVERLAY[t], height: 44 }); } catch { /* not supported */ } }
     win.setBackgroundColor(OVERLAY[t].color);
@@ -180,21 +183,39 @@ function applyTheme(mode) {
   return t;
 }
 
+function resolveAssetPath(filename) {
+  const base = path.join(__dirname, '..', 'assets', filename);
+  const unpacked = base.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+  if (unpacked !== base && fs.existsSync(unpacked)) return unpacked;
+  return base;
+}
+function resolveWindowIcon() {
+  if (process.platform === 'win32') {
+    const ico = resolveAssetPath('icon.ico');
+    if (fs.existsSync(ico)) return ico;
+  }
+  const img = nativeImage.createFromPath(resolveAssetPath('icon.png'));
+  return img.isEmpty() ? undefined : img;
+}
+
 function createWindow() {
   const mode = brand.env('THEME') || store.getSettings().theme || 'dark';
   nativeTheme.themeSource = ['light', 'dark'].includes(mode) ? mode : 'system';
   const t = effectiveTheme();
+  browser.setColorScheme(t);
   const bounds = savedBounds();
+  const winIcon = resolveWindowIcon();
   win = new BrowserWindow({
     width: 1560, height: 960, ...bounds.rect, minWidth: 1040, minHeight: 640,
     backgroundColor: OVERLAY[t].color,
     title: 'DROPs',
-    icon: path.join(__dirname, '..', 'assets', 'icon.png'),
+    ...(winIcon ? { icon: winIcon } : {}),
     // macOS keeps its native traffic lights; Windows/Linux draw caption buttons over our title bar.
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 13 } } : { titleBarStyle: 'hidden', titleBarOverlay: { ...OVERLAY[t], height: 44 } }),
     show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
   });
+  if (process.platform === 'win32' && winIcon) { try { win.setIcon(winIcon); } catch { /* ignore */ } }
   win.removeMenu();
   win.once('ready-to-show', () => { if (bounds.maximized) win.maximize(); if (!win.hiddenToTray && !(startHidden && keepInBackground())) win.show(); });
   trackBounds(win);
@@ -238,7 +259,7 @@ function createWindow() {
 // ---------- window position, tray and notifications ----------
 let quitting = false, tray = null, themeListener = null;
 const startHidden = process.argv.includes('--hidden');
-app.on('before-quit', () => { quitting = true; });
+app.on('before-quit', () => { quitting = true; preview.closeAll().catch(() => {}); });
 /** The size and place of the window last time, if it still fits on a connected screen. */
 function savedBounds() {
   const b = store.getSettings().windowBounds;
@@ -268,7 +289,7 @@ function showWindow() { if (!win || win.isDestroyed()) createWindow(); else { wi
 function ensureTray() {
   if (tray) return tray;
   try {
-    tray = new Tray(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png')).resize({ width: 16, height: 16 }));
+    tray = new Tray(nativeImage.createFromPath(resolveAssetPath('icon.png')).resize({ width: 16, height: 16 }));
     tray.setToolTip('DROPs');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open DROPs', click: showWindow },
@@ -363,10 +384,11 @@ const OLLAMA_HINT = {
 
 handle('app:info', async () => {
   const s = store.getSettings();
-  const auto = (s.hasAnthropic || s.hasGemini) ? [{ id: 'auto', label: 'Auto (cost-optimized)', provider: 'Auto' }] : [];
   const claude = Object.entries(providers.CLAUDE).map(([id, m]) => ({ id, label: m.label, provider: 'Claude' }));
   const gem = (await getGeminiModels()).map((m) => ({ ...m, provider: 'Gemini' }));
   const local = (await getOllamaModels()).map((m) => ({ ...m, provider: 'Local (Ollama)' }));
+  const hasRealLocal = local.some((m) => m.id && !m.id.startsWith('__'));
+  const auto = (s.hasAnthropic || s.hasGemini || hasRealLocal) ? [{ id: 'auto', label: 'Auto (cost-optimized)', provider: 'Auto' }] : [];
   // Keep the Local group visible with a status line, so users know why it's empty and how to fix it.
   if (!local.length && OLLAMA_HINT[ollamaState]) local.push({ id: '__ollama:' + ollamaState, label: OLLAMA_HINT[ollamaState], provider: 'Local (Ollama)', disabled: ollamaState !== 'stopped', action: ollamaState === 'stopped' ? 'start-ollama' : null });
   else if (local.length && local.every((m) => m.cloud)) local.push({ id: '__ollama:onlycloud', label: 'Only cloud models installed — download a free local model in Settings', provider: 'Local (Ollama)', disabled: true });
@@ -445,6 +467,13 @@ handle('ollama:start', () => startOllama());
 handle('mcp:status', () => mcp.status());
 handle('mcp:reconnect', async () => { await mcp.closeAll(); return syncMcp(); });
 handle('lessons:list', () => require('./lessons').list());
+handle('lessons:add', (text) => {
+  try {
+    const lessons = require('./lessons');
+    lessons.add(String(text || ''), 'agent', 'user');
+    return { ok: true, list: lessons.list() };
+  } catch (e) { return { error: e.message }; }
+});
 handle('lessons:remove', (text) => require('./lessons').remove(String(text || '')));
 handle('mcp:trustProject', async () => { if (!currentProject) return { error: 'No project open.' }; trustProject(currentProject, projectServers(currentProject)); return syncMcp(); });
 handle('theme:set', (mode) => { store.setSettings({ theme: mode }); return applyTheme(mode); });
@@ -530,6 +559,11 @@ handle('fs:search', async (root, q) => {
   const needle = String(q || '').toLowerCase();
   const score = (f) => { const l = f.toLowerCase(); const b = l.split('/').pop(); return (b.startsWith(needle) ? 0 : b.includes(needle) ? 1 : 2) * 1000 + f.length; };
   return files.filter((f) => f.toLowerCase().includes(needle)).sort((a, b) => score(a) - score(b)).slice(0, 40);
+});
+// The code map in the right panel: touched files, their neighbours and what a change could break.
+handle('codegraph:map', (root, touched) => {
+  try { return require('./codegraph').graphMap(projectRoot(root), Array.isArray(touched) ? touched.slice(0, 200).map(String) : []); }
+  catch { return { totalFiles: 0, nodes: [], edges: [], blastRadius: [] }; }
 });
 
 // ---------- custom slash commands ----------
@@ -686,41 +720,64 @@ handle('agent:rewind', async (id, turnIndex) => {
 handle('proc:list', (id) => getAgent(id)?.procs.list() || []);
 handle('proc:stop', (id, pid) => getAgent(id)?.procs.stop(pid));
 handle('proc:output', (id, pid) => getAgent(id)?.procs.get(pid)?.output.slice(-200000) || '');
+browser.setStreamHandler((ev) => {
+  if (win && !win.isDestroyed()) win.webContents.send('browser:stream', ev);
+});
 handle('browser:interact', async (key, action, payload) => browser.interact(key || currentProject || 'default', action, payload));
+handle('browser:stream', async (key, cmd, opts) => browser.streamControl(key || currentProject || 'default', cmd, opts));
+
+// Resolves a concrete runnable model for utility calls (Inline AI / commit messages), supporting 'auto', OAI & local models.
+async function resolveUtilityModel(preferred) {
+  const s = store.getSettings();
+  const chosen = String(preferred || s.defaultModel || '').trim();
+  if (chosen && chosen !== 'auto' && !chosen.startsWith('__')) {
+    const prov = providers.providerOf(chosen);
+    if ((prov === 'anthropic' && s.hasAnthropic) || (prov === 'gemini' && s.hasGemini) || prov === 'oai' || prov === 'ollama') return chosen;
+  }
+  if (s.hasAnthropic || s.hasGemini) return providers.resolveConcreteModel(chosen || s.defaultModel, s);
+  const other = (await getOaiModels(s)).filter((m) => m.id && !m.id.startsWith('__'));
+  if (other.length) return other[0].id;
+  const local = (await getOllamaModels()).filter((m) => m.id && !m.id.startsWith('__'));
+  if (local.length) return local[0].id;
+  return providers.resolveConcreteModel(chosen || s.defaultModel, s);
+}
 
 // Monaco Inline AI Edit (Ctrl+K)
 handle('editor:inlineAi', async ({ rel, code, selection, instruction, model }) => {
-  const s = store.getSettings();
-  const useModel = model || s.defaultModel || 'claude-opus-5-5';
-  const deps = {
-    getApiKey: () => store.getApiKey(s),
-    getGeminiKey: () => store.getGeminiKey(s),
-    getProviderKey: (pid) => store.getProviderKey(pid, s),
-    getSettings: () => store.getSettings(),
-  };
+  const useModel = await resolveUtilityModel(model);
   const prompt = [
     `File: ${rel || 'untitled'}`,
     selection ? `Selected code to replace:\n\`\`\`\n${selection}\n\`\`\`` : `Full file:\n\`\`\`\n${code}\n\`\`\``,
     `Instruction: ${instruction}`,
     'Return ONLY the replacement code (no markdown fences, no commentary).',
   ].join('\n\n');
-  const raw = await providers.complete({
-    model: useModel,
-    system: 'You are an expert code editor. Output ONLY the exact replacement code with matching indentation. Never wrap in markdown code fences or add explanations.',
-    prompt,
-    deps,
-  });
-  return String(raw || '').replace(/^```[\w-]*\r?\n?/, '').replace(/\r?\n?```$/, '');
+  try {
+    const raw = await providers.complete({
+      model: useModel,
+      system: 'You are an expert code editor. Output ONLY the exact replacement code with matching indentation. Never wrap in markdown code fences or add explanations.',
+      prompt,
+      deps,
+    });
+    return String(raw || '').replace(/^```[\w-]*\r?\n?/, '').replace(/\r?\n?```$/, '');
+  } catch (e) {
+    throw new Error(providers.friendlyError(e, useModel).message);
+  }
 });
 
 // Interactive Terminal Tab (persistent host shell per project)
 const { detectHostShell, stripAnsi, killTree } = require('./shell');
-let termProc = null;
+let termProc = null, termDir = null;
 handle('term:start', (root) => {
   const dir = projectRoot(root || currentProject);
-  if (termProc && !termProc.killed) return { running: true, label: detectHostShell().label };
   const sh = detectHostShell();
+  if (termProc && !termProc.killed) {
+    if (termDir && pathKey(termDir) === pathKey(dir)) return { running: true, label: sh.label, cwd: dir };
+    killTree(termProc.pid);
+    termProc = null;
+    termDir = null;
+  }
   const args = sh.kind === 'powershell' ? ['-NoLogo', '-NoExit', '-Command', '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8'] : ['-i'];
+  termDir = dir;
   termProc = require('child_process').spawn(sh.file, args, { cwd: dir, windowsHide: true, env: process.env });
   const sendChunk = (d) => {
     const text = stripAnsi(String(d || ''));
@@ -730,17 +787,24 @@ handle('term:start', (root) => {
   termProc.stderr?.on('data', sendChunk);
   termProc.on('close', (code) => {
     termProc = null;
+    termDir = null;
     if (win && !win.isDestroyed()) win.webContents.send('term:data', `\n[terminal exited: ${code ?? 0}]\n`);
   });
-  return { running: true, label: sh.label };
+  return { running: true, label: sh.label, cwd: dir };
 });
 handle('term:input', (line) => {
   if (!termProc || termProc.killed) throw new Error('Terminal is not running.');
   termProc.stdin?.write(String(line || '') + '\n');
   return true;
 });
+handle('term:interrupt', () => {
+  if (!termProc || termProc.killed) return false;
+  try { termProc.stdin?.write('\x03'); } catch { /* ignore */ }
+  return true;
+});
+handle('term:status', () => ({ running: !!(termProc && !termProc.killed), label: detectHostShell().label, cwd: termDir }));
 handle('term:stop', () => {
-  if (termProc && !termProc.killed) { killTree(termProc.pid); termProc = null; }
+  if (termProc && !termProc.killed) { killTree(termProc.pid); termProc = null; termDir = null; }
   return true;
 });
 app.on('before-quit', () => { if (termProc && !termProc.killed) killTree(termProc.pid); });
@@ -751,18 +815,24 @@ handle('git:status', (root) => { try { return git.status(projectRoot(root)); } c
 handle('git:versions', (root, rel) => { const r = projectRoot(root); resolveInRoot(r, rel); return git.fileVersions(r, rel); });
 handle('git:log', (root) => { try { return git.log(projectRoot(root)); } catch { return []; } });
 handle('git:init', (root) => git.init(projectRoot(root)));
+handle('git:stage', async (root, rel) => { const r = projectRoot(root); if (rel) resolveInRoot(r, rel); try { await git.stage(r, rel); return { ok: true }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
+handle('git:unstage', async (root, rel) => { const r = projectRoot(root); if (rel) resolveInRoot(r, rel); try { await git.unstage(r, rel); return { ok: true }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
+handle('git:discard', async (root, rel) => { const r = projectRoot(root); resolveInRoot(r, rel); try { await git.discard(r, rel); return { ok: true }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
+handle('git:branches', async (root) => { try { return await git.branches(projectRoot(root)); } catch { return { current: 'HEAD', local: [] }; } });
+handle('git:checkout', async (root, branch, create = false) => { try { return { ok: true, status: await git.checkout(projectRoot(root), branch, create) }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
 handle('git:commit', async (root, message) => { try { return { ok: true, summary: await git.commit(projectRoot(root), message) }; } catch (e) { return { error: (e.stderr || e.message).trim().slice(0, 500) }; } });
 handle('git:message', async (root, model) => {
+  const useModel = await resolveUtilityModel(model);
   try {
     const diff = await git.diffText(projectRoot(root));
     if (!diff.trim()) return { error: 'No changes to describe.' };
     const text = await providers.complete({
-      model, deps,
+      model: useModel, deps,
       system: 'You write git commit messages. Output ONLY the message: a concise imperative subject line (max 72 chars), a blank line, then 1-5 short bullet points explaining what changed and why. No code fences.',
       prompt: `Write a commit message for this diff:\n\n${diff}`,
     });
     return { message: text.replace(/^```\w*\n?|```$/g, '').trim() };
-  } catch (e) { return { error: providers.friendlyError(e, model).message }; }
+  } catch (e) { return { error: providers.friendlyError(e, useModel).message }; }
 });
 
 app.whenReady().then(async () => {

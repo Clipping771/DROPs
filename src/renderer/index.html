@@ -13,13 +13,14 @@
       <div class="tb-sep"></div>
       <button class="tb-btn" id="projectBtn" title="Switch project (Ctrl+O)"><span data-icon="folder" class="sm"></span><span id="projectName">No project</span><span data-icon="chevronDown" class="xs chev"></span></button>
       <button class="tb-btn" id="branchBtn" title="Source control" hidden><span data-icon="branch" class="sm"></span><span id="branchName"></span></button>
+      <div class="lens-seg" id="lensSeg" role="group" aria-label="Workspace layout">
+        <button type="button" class="lens-btn on" data-lens="default" title="IDE layout: sidebar, chat & panel" aria-label="IDE layout"><span data-icon="layoutIde" class="sm"></span></button>
+        <button type="button" class="lens-btn" data-lens="focus" title="Focus layout: chat only (Ctrl+Shift+F)" aria-label="Focus layout"><span data-icon="layoutFocus" class="sm"></span></button>
+        <button type="button" class="lens-btn" data-lens="studio" title="Studio layout: chat & wide workbench (Ctrl+Shift+S)" aria-label="Studio layout"><span data-icon="layoutStudio" class="sm"></span></button>
+        <button type="button" class="lens-btn" data-lens="mission" title="Mission Control (Ctrl+Shift+M)" aria-label="Mission Control"><span data-icon="grid" class="sm"></span></button>
+      </div>
       <div class="tb-title-wrap"><div class="tb-title" id="sessionTitle"></div><div class="toc" id="toc" hidden></div></div>
       <button class="tb-btn" id="paletteBtn" title="Command palette"><span data-icon="search" class="sm"></span><span class="muted">Search or run a command</span><kbd>Ctrl K</kbd></button>
-      <div class="tb-quick">
-        <button class="icon-btn" id="qbFiles" title="Files (explorer)"><span data-icon="files"></span></button>
-        <button class="icon-btn" id="qbChanges" title="Changes in this session"><span data-icon="diff"></span></button>
-        <button class="icon-btn" id="qbProcs" title="Running processes and terminal output"><span data-icon="terminal"></span></button>
-      </div>
       <button class="icon-btn" id="themeBtn" title="Toggle light/dark (Ctrl+Shift+L)"><span data-icon="sun"></span></button>
       <button class="icon-btn" id="inspToggle" title="Toggle right panel (Ctrl+J)"><span data-icon="panelRight"></span></button>
     </header>
@@ -34,6 +35,7 @@
       </nav>
 
       <aside class="sidebar" id="sidebar">
+        <div class="side-resize" id="sideResize" title="Drag to resize sidebar (double-click to reset)"></div>
         <section class="side-view" data-side="sessions">
           <div class="pane-head"><span class="grow">Sessions</span><button class="icon-btn" id="newWorktreeBtn" title="New parallel session in its own git worktree"><span data-icon="merge"></span></button><button class="icon-btn" id="newSessionBtn" title="New session (Ctrl+N)"><span data-icon="plus"></span></button></div>
           <div class="side-search"><input id="sessionSearch" class="input sm" placeholder="Filter sessions…" /></div>
@@ -51,22 +53,26 @@
       </aside>
 
       <main class="chat">
+        <div class="mission-bar" id="missionBar" hidden></div>
+        <section class="mission-deck" id="missionDeck" hidden></section>
         <div class="thread-wrap" id="threadWrap">
           <div id="threads"></div>
           <section class="hero" id="hero"></section>
         </div>
         <div class="composer-wrap">
           <div class="popup" id="popup" hidden></div>
+          <div class="float-island" id="floatIsland" role="status" hidden></div>
           <div class="queue-bar" id="queueBar" hidden></div>
           <div class="suggest-strip" id="suggestStrip" role="toolbar" aria-label="Quick @ mentions and / commands" hidden>
-            <button type="button" class="suggest-chip" data-insert="@" data-i18n="chipFile">@ file</button>
-            <button type="button" class="suggest-chip" data-insert="@folder:" data-i18n="chipFolder">@ folder</button>
+            <button type="button" class="suggest-chip" data-insert="@" data-i18n="chipFile">@file</button>
+            <button type="button" class="suggest-chip" data-insert="@folder:" data-i18n="chipFolder">@folder</button>
             <button type="button" class="suggest-chip" data-insert="@git" data-i18n="chipGit">@git</button>
             <button type="button" class="suggest-chip" data-insert="/plan" data-i18n="chipPlan">/plan</button>
             <button type="button" class="suggest-chip" data-insert="/" data-i18n="chipHelp">/help</button>
           </div>
           <div class="composer" id="composer">
             <div class="attachments" id="attachments" hidden></div>
+            <div class="ctx-mentions" id="ctxMentions" aria-label="Context added to this message" hidden></div>
             <textarea id="input" rows="1" aria-label="Message to DROPs" placeholder="Type @ to tag files, / for commands"></textarea>
             <div class="composer-bar">
               <div class="plus-wrap">
@@ -102,10 +108,12 @@
       </section>
 
       <aside class="inspector" id="inspector">
+        <div class="insp-resize" id="inspResize" title="Drag to resize panel (double-click to reset)"></div>
         <div class="tabs" id="inspTabs">
           <button data-tab="plan" class="on">Overview</button>
           <button data-tab="tasks">Tasks <span class="badge" id="tasksBadge" hidden></span></button>
           <button data-tab="changes">Changes <span class="badge" id="changesBadge" hidden></span></button>
+          <button data-tab="map">Map</button>
           <button data-tab="terminal">Processes <span class="badge" id="procBadge" hidden></span></button>
           <button data-tab="browser">Browser <span class="badge dot" id="browserBadge" hidden></span></button>
           <button data-tab="usage">Usage</button>
@@ -113,6 +121,7 @@
         <div class="tab-body" data-body="plan" id="planBody"></div>
         <div class="tab-body" data-body="tasks" id="tasksBody" hidden></div>
         <div class="tab-body" data-body="changes" id="changesBody" hidden></div>
+        <div class="tab-body" data-body="map" id="mapBody" hidden></div>
         <div class="tab-body" data-body="terminal" id="termBody" hidden></div>
         <div class="tab-body" data-body="usage" id="usageBody" hidden></div>
         <div class="tab-body" data-body="browser" id="browserBody" hidden></div>

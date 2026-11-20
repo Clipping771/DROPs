@@ -10,7 +10,7 @@ const fmtCost = (c) => '$' + (c || 0).toFixed(c && c < 1 ? 3 : 2);
 const baseName = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || p;
 const timeAgo = (t) => { const s = (Date.now() - t) / 1000; return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
 
-const S = { info: null, settings: null, theme: 'dark', project: null, sessions: [], current: null, views: new Map(), git: null, attachments: [] };
+const S = { info: null, settings: null, theme: 'dark', lens: 'default', project: null, sessions: [], current: null, views: new Map(), git: null, attachments: [] };
 const INTERRUPTED = '[Request interrupted by user]';
 const STOPPED_BY_ERROR = '[DROPs] Stopped by an error:';
 const DROPS_NOTES = { plan: 'DROPs gave the agent the requirement checklist', 'evidence check': 'Evidence check: some requirements still need proof', 'completion guard': 'Completion guard: the task list still has open items', 'completion audit': 'Completion audit: a reviewer found missing work' };
@@ -36,6 +36,12 @@ DOMPurify.addHook('uponSanitizeElement', (node, data) => {
 function renderMd(el, text, final) {
   el.innerHTML = DOMPurify.sanitize(marked.parse(text || ''));
   el.querySelectorAll('a').forEach((a) => a.setAttribute('target', '_blank'));
+  el.querySelectorAll('table').forEach((tbl) => {
+    if (tbl.parentElement?.classList.contains('md-table-wrap')) return;
+    const wrap = h('div', 'md-table-wrap');
+    tbl.replaceWith(wrap);
+    wrap.appendChild(tbl);
+  });
   if (!final) return;
   el.querySelectorAll('pre > code').forEach((c) => {
     const lang = (c.className.match(/language-(\S+)/) || [])[1] || '';
@@ -47,11 +53,17 @@ function renderMd(el, text, final) {
     head.append(b);
     c.parentElement.prepend(head);
   });
-  // file:line references open in the editor
+  // file:line references open in the editor (only for real file paths/extensions, not console.log or e.g.)
+  const FILE_EXT = /\.(?:js|jsx|ts|tsx|mjs|cjs|py|json|md|html|htm|css|scss|less|yml|yaml|toml|sh|bash|ps1|sql|go|rs|java|cs|c|cpp|h|hpp|rb|php|vue|svelte|env|txt|xml| lock|dockerfile)$/i;
   el.querySelectorAll('code').forEach((c) => {
     if (c.closest('pre')) return;
-    const m = c.textContent.match(/^([\w./\\-]+\.[\w]+)(?::(\d+))?/);
-    if (m && S.project) { c.style.cursor = 'pointer'; c.title = 'Open in editor'; c.onclick = () => Editor.openFile(m[1], Number(m[2]) || 0); }
+    const raw = c.textContent.trim();
+    const m = raw.match(/^([\w./\\-]+\.[\w-]+)(?::(\d+))?$/);
+    if (m && S.project && (m[1].includes('/') || m[1].includes('\\') || FILE_EXT.test(m[1]))) {
+      c.style.cursor = 'pointer';
+      c.title = 'Open in editor';
+      c.onclick = () => Editor.openFile(m[1], Number(m[2]) || 0);
+    }
   });
 }
 
@@ -104,6 +116,7 @@ function autoScroll(v, force) {
   if (S.current !== v.id) return;
   const w = $('#threadWrap');
   if (force || w.scrollHeight - w.scrollTop - w.clientHeight < 180) w.scrollTop = w.scrollHeight;
+  updateFloatIsland();
 }
 const countWords = (s) => { const t = (s || '').trim(); return t ? (t.match(/\S+/g) || []).length : 0; };
 // A single falling water drop that lands in a small ripple.
@@ -130,6 +143,12 @@ function setWorking(v, on, label = 'Working') {
     clearInterval(v.workTimer); v.workTimer = null;
     if (v.working) v.working.remove();
   }
+  if (S.current === v.id) {
+    renderMissionBar(v);
+    updateFloatIsland();
+    const stFloat = $('#browserBody .bp-stop-float'); if (stFloat) stFloat.hidden = !on;
+    if (!on) { const cur = $('#browserBody .bp-agent-cursor'); if (cur) cur.hidden = true; }
+  }
 }
 function fmtElapsed(ms) { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; }
 function tickWorking(v) {
@@ -137,6 +156,171 @@ function tickWorking(v) {
   const out = Math.max(0, (v.data.usage?.output || 0) - (v.turnStartOut || 0));
   v.working.querySelector('.wl-label').textContent = (v.workLabel || 'Working') + '…';
   v.working.querySelector('.wl-meta').textContent = `${fmtElapsed(Date.now() - (v.started || Date.now()))}${out ? ` · ${fmtTok(out)} tokens` : ''}`;
+  if (S.current === v.id && !$('#floatIsland')?.hidden) updateFloatIsland();
+}
+
+function collectSessionSignals(v) {
+  const names = new Set();
+  for (const c of v.tools?.values() || []) if (c?.name) names.add(c.name);
+  for (const m of v.data?.messages || []) {
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      for (const b of m.content) if (b.type === 'tool_use' && b.name) names.add(b.name);
+    }
+  }
+  const chKeys = Object.keys(v.data?.changes || {});
+  const reqs = v.data?.requirements || [];
+  const lastM = v.data?.messages?.[v.data.messages.length - 1];
+  const lastTxt = lastM && lastM.role === 'assistant' && Array.isArray(lastM.content) ? lastM.content.map((b) => b.text || '').join(' ') : '';
+  const failed = lastTxt.startsWith(STOPPED_BY_ERROR);
+  const hasPlan = !!(v.data?.todos?.length || v.data?.plan?.goal || ['read_file', 'glob', 'grep', 'list_dir', 'todo_write'].some((n) => names.has(n)));
+  const hasCode = !!(chKeys.length || ['write_file', 'edit_file', 'multi_edit'].some((n) => names.has(n)));
+  const hasRun = ['shell', 'powershell', 'start_process'].some((n) => names.has(n));
+  const hasVerify = !!(reqs.length || v.browserFrame || ['browser', 'check_requirement', 'audit'].some((n) => names.has(n)));
+  const curWork = v.busy ? String(v.workLabel || '') : '';
+  const curStage = !v.busy ? (failed ? 'error' : 'done')
+    : /browser|verify|qa/i.test(curWork) ? 'verify'
+    : /run|command|test|process/i.test(curWork) ? 'run'
+    : /write|edit/i.test(curWork) ? 'code'
+    : 'plan';
+  return { chKeys, hasPlan, hasCode, hasRun, hasVerify, failed, curStage };
+}
+
+function renderMissionBar(v) {
+  const bar = $('#missionBar');
+  if (!bar) return;
+  if (!v || v.id !== S.current || S.lens === 'mission' || !$('#hero')?.hidden || (!v.data.messages.length && !v.busy)) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const sig = collectSessionSignals(v);
+  const order = ['plan', 'code', 'run', 'verify', 'done'];
+  const activeIdx = order.indexOf(sig.curStage);
+  const defs = [
+    ['plan', 'Plan', sig.hasPlan],
+    ['code', 'Code', sig.hasCode],
+    ['run', 'Run', sig.hasRun],
+    ['verify', 'Verify', sig.hasVerify],
+    ['done', sig.failed ? 'Stopped' : 'Done', !v.busy && !sig.failed && v.data.messages.length > 0],
+  ];
+  bar.innerHTML = '';
+  const stages = h('div', 'mb-stages');
+  stages.title = defs.map(([k, lbl, doneFlag], idx) => {
+    const isAct = v.busy && sig.curStage === k;
+    const isDone = !isAct && (doneFlag || (v.busy && idx < activeIdx));
+    return `${lbl}${isDone ? ' ✓' : isAct ? ' …' : ''}`;
+  }).join(' · ');
+  const phaseMap = { plan: 'Planning', code: 'Editing', run: 'Running', verify: 'Verifying', done: 'Finishing' };
+  const phaseKey = v.busy ? (sig.curStage || 'plan') : 'done';
+  const stCls = v.busy ? 'active' : sig.failed ? 'err' : 'done';
+  const st = h('span', `mb-stage ${stCls}`);
+  const lead = v.busy
+    ? waterOrbSVG(16)
+    : sig.failed
+      ? '<svg class="mb-ic" viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>'
+      : '<svg class="mb-ic" viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M2.2 6.3 4.8 8.8 9.8 3.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  st.innerHTML = `${lead}<span class="mb-lbl"></span>`;
+  $('.mb-lbl', st).textContent = v.busy ? (phaseMap[phaseKey] || 'Working') : (sig.failed ? 'Stopped' : 'Done');
+  if (sig.chKeys.length > 0 && (phaseKey === 'code' || !v.busy)) {
+    st.appendChild(h('span', 'mb-cnt mono', String(sig.chKeys.length)));
+  }
+  stages.appendChild(st);
+  const pills = h('div', 'mb-pills');
+  if (sig.chKeys.length > 0) {
+    let totalA = 0;
+    let totalD = 0;
+    for (const f of sig.chKeys) {
+      const ch = v.data.changes[f];
+      totalA += ch?.added || 0;
+      totalD += ch?.removed || 0;
+    }
+    const diffBtn = h('button', 'mb-act mb-diff mono');
+    diffBtn.type = 'button';
+    diffBtn.title = sig.chKeys.join('\n');
+    const n = sig.chKeys.length;
+    diffBtn.innerHTML = `<span>${n} file${n === 1 ? '' : 's'}</span><span class="add-n">+${totalA}</span><span class="del-n">−${totalD}</span>`;
+    diffBtn.onclick = () => Panels.switchTab('changes');
+    pills.appendChild(diffBtn);
+  }
+  const lastTurn = v.lastTurnIndex ?? (v.data.turns?.length ? v.data.turns.length - 1 : -1);
+  if (!v.busy && lastTurn >= 0) {
+    const rw = h('button', 'mb-act mb-rw');
+    rw.type = 'button';
+    rw.title = 'Rewind to before the last turn';
+    rw.innerHTML = `${icon('undo', 'xs')}<span>Rewind #${lastTurn + 1}</span>`;
+    rw.onclick = () => rewind(v, lastTurn);
+    pills.appendChild(rw);
+  }
+  if (S.project) {
+    const mp = h('button', 'mb-act mb-map');
+    mp.type = 'button';
+    mp.title = 'Open Codebase Impact Map';
+    mp.innerHTML = `${icon('network', 'xs')}<span>Map</span>`;
+    mp.onclick = () => Panels.switchTab('map');
+    pills.appendChild(mp);
+  }
+  bar.append(stages, pills);
+}
+
+function updateFloatIsland() {
+  const box = $('#floatIsland');
+  if (!box) return;
+  const v = currentView();
+  const w = $('#threadWrap');
+  if (!v || !w || S.lens === 'mission' || !$('#hero')?.hidden) { box.hidden = true; return; }
+  const dist = w.scrollHeight - w.scrollTop - w.clientHeight;
+  if (v.busy && dist > 100) {
+    box.hidden = false;
+    const secs = v.started ? fmtElapsed(Date.now() - v.started) : '0s';
+    box.innerHTML = `${waterOrbSVG(16)}<span class="fi-label"></span><span class="fi-meta mono"></span><button type="button" class="btn ghost sm fi-jump">${icon('arrowDown', 'xs')}Live</button><button type="button" class="btn danger sm fi-stop">${icon('square', 'xs')}Stop</button>`;
+    $('.fi-label', box).textContent = (v.workLabel || 'Working') + '…';
+    $('.fi-meta', box).textContent = secs;
+    $('.fi-jump', box).onclick = () => autoScroll(v, true);
+    $('.fi-stop', box).onclick = () => api.stop(v.id);
+  } else if (!v.busy && dist > 260) {
+    box.hidden = false;
+    box.innerHTML = `<button type="button" class="btn ghost sm fi-jump">${icon('arrowDown', 'xs')}Jump to latest</button>`;
+    $('.fi-jump', box).onclick = () => autoScroll(v, true);
+  } else {
+    box.hidden = true;
+  }
+}
+
+function setLens(lens = 'default') {
+  const valid = ['default', 'focus', 'studio', 'mission'];
+  if (!valid.includes(lens)) lens = 'default';
+  S.lens = lens;
+  const b = $('#body');
+  if (b) {
+    b.dataset.lens = lens;
+    b.style.removeProperty('--insp-custom-w');
+    b.classList.remove('browser-wide');
+    const wb = $('.bp-wide-btn');
+    if (wb) { wb.classList.remove('on'); wb.innerHTML = icon('maximize', 'xs'); wb.title = 'Expand browser stage'; wb.setAttribute('aria-label', wb.title); }
+    if (lens === 'focus' || lens === 'studio') b.classList.remove('force-side');
+  }
+  $$('#lensSeg .lens-btn').forEach((btn) => btn.classList.toggle('on', btn.dataset.lens === lens));
+  const isMission = lens === 'mission';
+  if ($('#missionDeck')) $('#missionDeck').hidden = !isMission;
+  if ($('#threadWrap')) $('#threadWrap').hidden = isMission;
+  const cw = $('.composer-wrap'); if (cw) cw.hidden = isMission;
+  if (isMission) {
+    Panels.renderMissionDeck?.();
+  } else if (lens === 'studio' && b) {
+    S.userClosedInsp = false;
+    b.classList.remove('no-insp');
+    if (window.innerWidth <= 1280) b.classList.add('force-insp');
+    $('#inspToggle')?.classList.add('on');
+    if (!$('#mapBody')?.hidden) Panels.renderMap?.();
+  } else if (lens === 'default' && b) {
+    S.userClosedInsp = false;
+    b.classList.remove('no-side', 'force-side', 'no-insp');
+    if (window.innerWidth <= 1280) b.classList.add('force-insp');
+    $('#inspToggle')?.classList.toggle('on', window.innerWidth <= 1280 ? b.classList.contains('force-insp') : !b.classList.contains('no-insp'));
+  }
+  renderMissionBar(currentView());
+  updateFloatIsland();
+  Panels.renderStatus?.();
 }
 
 function renderHistory(v) {
@@ -489,9 +673,10 @@ function onEvent(ev) {
       v.busy = ev.busy;
       setWorking(v, ev.busy);
       if (ev.busy) { v.turnStartCost = v.data.usage.cost; v.turnStartOut = v.data.usage.output || 0; }
-      if (cur) { updateComposer(); Panels.renderStatus(); }
+      if (cur) { updateComposer(); Panels.renderStatus(); Panels.renderPlan(); renderMissionBar(v); }
       Panels.markSession(v);
       Panels.renderTasks?.();
+      if (S.lens === 'mission') Panels.renderMissionDeck?.();
       break;
     case 'task-started':
     case 'task-queued':
@@ -610,15 +795,19 @@ function onEvent(ev) {
       if (ev.diff && ev.ok) Editor.reloadFile(ev.diff.path);
       c.collapse(ev.ok);
       Panels.markSession(v);
+      if (cur) {
+        renderMissionBar(v);
+        if (['read_file', 'write_file', 'edit_file', 'multi_edit'].includes(c.name) && $('#mapBody') && !$('#mapBody').hidden) Panels.renderMap?.();
+      }
       break;
     }
     case 'permission': showPermission(v, ev); break;
     case 'question': showQuestion(v, ev); break;
-    case 'todos': v.data.todos = ev.todos; renderTaskCard(v); if (cur) Panels.renderPlan(); break;
+    case 'todos': v.data.todos = ev.todos; renderTaskCard(v); if (cur) { Panels.renderPlan(); renderMissionBar(v); } break;
     case 'plan-updated': {
       v.data.plan = ev.plan;
       renderPlanArtifact(v, ev.plan);
-      if (cur) Panels.renderPlan();
+      if (cur) { Panels.renderPlan(); renderMissionBar(v); }
       break;
     }
     case 'chapter': {
@@ -627,11 +816,30 @@ function onEvent(ev) {
       if (cur) renderToc(v);
       break;
     }
+    case 'preview-status': {
+      v.previewStatus = ev;
+      if (Array.isArray(ev.pages) && ev.pages.length) v.previewPages = ev.pages;
+      if (cur) {
+        ensureBrowserStageOpen(v);
+        renderBrowserPane(v, true);
+      }
+      break;
+    }
     case 'browser-frame': {
       v.browserFrame = ev;
+      if (Array.isArray(ev.pages) && ev.pages.length) v.previewPages = ev.pages;
+      if (ev.livePreview) {
+        v.previewStatus = { state: 'live', file: ev.file, url: ev.url, at: ev.at };
+        v._animateNextFrame = true;
+      } else {
+        v.previewStatus = null;
+      }
       (v.browserSteps ||= []).push({ step: ev.step, url: ev.url, at: ev.at });
       if (v.browserSteps.length > 30) v.browserSteps.shift();
-      if (cur) renderBrowserPane(v, true);
+      if (cur) {
+        ensureBrowserStageOpen(v);
+        renderBrowserPane(v, true);
+      }
       break;
     }
     case 'wrap-up': {
@@ -639,8 +847,8 @@ function onEvent(ev) {
       v.pendingWrapUp = { recap: ev.recap, ask: ev.ask, options: ev.options };
       break;
     }
-    case 'changes': v.data.changes = ev.changes; if (cur) { Panels.renderChanges(); Panels.refreshTreeMarks(); Panels.refreshGitSoon(); } break;
-    case 'requirements': v.data.requirements = ev.requirements; if (cur) Panels.renderPlan(); break;
+    case 'changes': v.data.changes = ev.changes; if (cur) { Panels.renderChanges(); Panels.refreshTreeMarks(); Panels.refreshTreeSoon?.(); Panels.refreshGitSoon(); renderMissionBar(v); if ($('#mapBody') && !$('#mapBody').hidden) Panels.renderMap?.(); } if (S.lens === 'mission') Panels.renderMissionDeck?.(); break;
+    case 'requirements': v.data.requirements = ev.requirements; if (cur) { Panels.renderPlan(); renderMissionBar(v); } break;
     case 'usage': v.data.usage = ev.usage; if (cur) { Panels.renderUsage(); updateCtx(); Panels.renderStatus(); } break;
     case 'notice': place(v, noticeEl('info', ev.message)); break;
     case 'auto-model': {
@@ -687,6 +895,7 @@ function onEvent(ev) {
       break;
     }
     case 'done': {
+      v.busy = false;
       setWorking(v, false);
       // Finished while you were looking at another session: mark it unread in the sidebar.
       if (S.current !== v.id) (S.unread ||= new Set()).add(v.id);
@@ -711,11 +920,12 @@ function onEvent(ev) {
         }
         if (mdParts.length) {
           const copyResp = h('button', 'btn ghost sm');
-          copyResp.innerHTML = icon('copy', 'xs') + 'Copy response';
+          copyResp.title = 'Copy response';
+          copyResp.innerHTML = icon('copy', 'xs') + 'Copy';
           copyResp.onclick = () => {
             navigator.clipboard.writeText(mdParts.join('\n\n'));
             copyResp.innerHTML = icon('check', 'xs') + 'Copied';
-            setTimeout(() => { copyResp.innerHTML = icon('copy', 'xs') + 'Copy response'; }, 1400);
+            setTimeout(() => { copyResp.innerHTML = icon('copy', 'xs') + 'Copy'; }, 1400);
           };
           f.appendChild(copyResp);
         }
@@ -740,7 +950,8 @@ function onEvent(ev) {
       }
       Panels.markSession(v);
       Panels.renderSessions();
-      if (cur) { updateComposer(); Panels.refreshGitSoon(); }
+      if (cur) { updateComposer(); Panels.refreshGitSoon(); Panels.renderPlan(); renderMissionBar(v); updateFloatIsland(); }
+      if (S.lens === 'mission') Panels.renderMissionDeck?.();
       break;
     }
   }
@@ -802,6 +1013,7 @@ function chapterEl(id, title, summary) {
   return d;
 }
 /** A floating table of contents for the current session's chapters; click to jump. */
+let tocOutsideBound = false;
 function renderToc(v) {
   const toc = $('#toc');
   if (!toc) return;
@@ -811,7 +1023,7 @@ function renderToc(v) {
   toc.innerHTML = '';
   const btn = h('button', 'toc-btn'); btn.innerHTML = icon('list', 'xs') + `<span>${chapters.length} chapters</span>`;
   const list = h('div', 'toc-list'); list.hidden = true;
-  btn.onclick = () => { list.hidden = !list.hidden; };
+  btn.onclick = (e) => { e.stopPropagation(); list.hidden = !list.hidden; };
   chapters.forEach((c, i) => {
     const it = h('button', 'toc-item');
     it.innerHTML = `<span class="toc-n">${i + 1}</span><span class="toc-t"></span>`;
@@ -820,6 +1032,17 @@ function renderToc(v) {
     list.appendChild(it);
   });
   toc.append(btn, list);
+  if (!tocOutsideBound) {
+    tocOutsideBound = true;
+    document.addEventListener('mousedown', (e) => {
+      const l = $('#toc .toc-list');
+      if (l && !l.hidden && !e.target.closest('#toc')) l.hidden = true;
+    });
+    document.addEventListener('keydown', (e) => {
+      const l = $('#toc .toc-list');
+      if (e.key === 'Escape' && l && !l.hidden) l.hidden = true;
+    });
+  }
 }
 
 function renderPlanArtifact(v, plan) {
@@ -839,116 +1062,349 @@ function renderPlanArtifact(v, plan) {
   for (const s of plan.steps || []) { const li = document.createElement('li'); li.textContent = s; ol.appendChild(li); }
   if (plan.verification) $('.pa-verify', card).textContent = `Verify: ${plan.verification}`;
   $('.pa-proceed', card).onclick = () => {
-    if (typeof setMode === 'function' && (S.mode === 'plan' || S.mode === 'architect')) { setMode('code'); persistOpts?.(); }
+    if (typeof setMode === 'function' && currentOpts().mode === 'plan') { setMode('auto-edit'); persistOpts?.(); }
     sendText('Proceed with the implementation plan.');
   };
   place(v, card);
 }
 
-// ---------- live browser pane ----------
+// ---------- live browser pane (Antigravity-style live CDP stream & stage) ----------
+function ensureBrowserStageOpen(v) {
+  if (S.lens === 'mission' || S.lens === 'focus' || S.userClosedInsp || S.userInspLock || v?._autoOpenedBrowser) {
+    const bd = $('#browserBadge');
+    if (bd && $('#browserBody')?.hidden) bd.hidden = false;
+    return;
+  }
+  if (v) v._autoOpenedBrowser = true;
+  const b = $('#body');
+  if (b?.classList.contains('no-insp') || (window.innerWidth <= 1280 && !b?.classList.contains('force-insp'))) {
+    if (typeof toggleInspector === 'function') toggleInspector();
+  }
+  if ($('#browserBody')?.hidden) Panels.switchTab('browser', { auto: true });
+}
+
+function updateBrowserFrameUi(f, v) {
+  const box = $('#browserBody');
+  const shell = box?.querySelector('.bp-shell');
+  if (!shell) return;
+  const img = $('.bp-shot', shell);
+  const prevImg = $('.bp-shot-prev', shell);
+  const empty = $('.bp-empty', shell);
+  const buildBox = $('.bp-building', shell);
+  const sweep = $('.bp-sweep', shell);
+  const livePill = $('.bp-live-pill', shell);
+  const pagesBar = $('.bp-pages', shell);
+  const addr = $('.bp-addr', shell);
+  const urlLbl = $('.bp-url', shell);
+  const tabTitle = $('.bp-tab-title', shell);
+  const stopFloat = $('.bp-stop-float', shell);
+  const stepsBox = $('.bp-steps-pop', shell);
+  if (stopFloat) stopFloat.hidden = !v?.busy;
+
+  const st = v?.previewStatus;
+  const isErr = !!(f?.errorPage || /^chrome-error:|^about:blank$/i.test(f?.url || ''));
+  if (sweep) sweep.hidden = !['writing', 'building', 'updating'].includes(st?.state);
+
+  if (pagesBar) {
+    const pages = v?.previewPages || [];
+    if (pages.length) {
+      pagesBar.hidden = false;
+      pagesBar.innerHTML = '';
+      for (const p of pages) {
+        const b = h('button', 'bp-page-tab');
+        b.type = 'button';
+        b.textContent = p.label;
+        b.title = p.rel;
+        if (f?.url === p.url || st?.url === p.url || st?.activeHtml === p.rel) b.classList.add('on');
+        b.onclick = async () => {
+          if (v) v._animateNextFrame = true;
+          try {
+            const next = await api.browserInteract?.(box._bp.key, 'open', { url: p.url });
+            const cv = currentView();
+            if (next && cv) {
+              cv.browserFrame = { ...next, step: `Preview ${p.label}`, livePreview: true, file: p.rel };
+              cv.previewStatus = { state: 'live', file: p.rel, url: p.url, activeHtml: p.rel, at: Date.now() };
+              cv._animateNextFrame = true;
+              updateBrowserFrameUi(cv.browserFrame, cv);
+            }
+          } catch (e) { toast(e.message || 'Preview error'); }
+        };
+        pagesBar.appendChild(b);
+      }
+    } else {
+      pagesBar.hidden = true;
+      pagesBar.innerHTML = '';
+    }
+  }
+
+  if (f?.data && !isErr) {
+    empty.hidden = true;
+    if (buildBox) buildBox.hidden = true;
+    const nextSrc = `data:image/jpeg;base64,${f.data}`;
+    if (v?._animateNextFrame) {
+      v._animateNextFrame = false;
+      if (prevImg && !img.hidden && img.src && img.src.startsWith('data:image/') && img.src !== nextSrc) {
+        prevImg.src = img.src;
+        prevImg.hidden = false;
+        clearTimeout(box._prevTimer);
+        box._prevTimer = setTimeout(() => { prevImg.hidden = true; }, 420);
+      }
+      img.hidden = false;
+      img.src = nextSrc;
+      img.classList.remove('reveal');
+      void img.offsetWidth;
+      img.classList.add('reveal');
+      if (livePill) {
+        const lbl = st?.file || f.file || (f.title || '').trim() || 'Live preview';
+        $('.bp-lp-t', livePill).textContent = `Live · ${lbl}`;
+        livePill.hidden = false;
+        clearTimeout(box._pillTimer);
+        box._pillTimer = setTimeout(() => { livePill.hidden = true; }, 2600);
+      }
+    } else {
+      img.hidden = false;
+      if (img.src !== nextSrc) img.src = nextSrc;
+    }
+    img.alt = f.title || 'Browser page';
+    if (document.activeElement !== addr) addr.value = f.url || '';
+    urlLbl.textContent = f.url || '';
+    tabTitle.textContent = (f.title || '').trim() || (() => { try { return new URL(f.url).hostname; } catch { return 'Browser'; } })();
+  } else {
+    img.hidden = true;
+    if (prevImg) prevImg.hidden = true;
+    if (livePill) livePill.hidden = true;
+    if (st && ['writing', 'building', 'updating', 'unreachable'].includes(st.state) && buildBox) {
+      empty.hidden = true;
+      buildBox.hidden = false;
+      $('.bp-build-title', buildBox).textContent = st.state === 'unreachable' ? 'Page could not be loaded' : 'Rendering live UI preview';
+      $('.bp-build-sub', buildBox).textContent = st.state === 'unreachable'
+        ? (st.url && !/^chrome-error:/i.test(st.url) ? st.url : 'Waiting for local live UI preview…')
+        : (st.file ? `Building ${st.file}…` : 'Preparing live preview…');
+      if (document.activeElement !== addr) addr.value = st.url && !/^chrome-error:/i.test(st.url) ? st.url : '';
+      urlLbl.textContent = st.url && !/^chrome-error:/i.test(st.url) ? st.url : '';
+      tabTitle.textContent = st.state === 'unreachable' ? 'Preview' : 'Live Preview';
+    } else {
+      if (buildBox) buildBox.hidden = true;
+      empty.hidden = false;
+      if (document.activeElement !== addr) addr.value = '';
+      urlLbl.textContent = '';
+      tabTitle.textContent = 'Live Browser';
+    }
+  }
+  if (stepsBox && !stepsBox.hidden) {
+    stepsBox.innerHTML = '';
+    const list = (v?.browserSteps || []).slice(-10).reverse();
+    if (!list.length) stepsBox.appendChild(h('div', 'empty', 'No recorded browser actions yet.'));
+    for (const s of list) {
+      const r = h('div', 'bp-row');
+      r.innerHTML = `<span class="bp-t"></span><span class="bp-u mono"></span>`;
+      $('.bp-t', r).textContent = s.step;
+      try { $('.bp-u', r).textContent = new URL(s.url).pathname; } catch { $('.bp-u', r).textContent = s.url; }
+      stepsBox.appendChild(r);
+    }
+  }
+}
+
 function renderBrowserPane(v, fresh) {
   const box = $('#browserBody');
   if (!box) return;
-  const f = v?.browserFrame;
   const badge = $('#browserBadge');
   if (badge) badge.hidden = !(fresh && !$('#browserBody').offsetParent);
   const key = v?.data?.projectDir || S.project || 'default';
 
-  const nav = h('div', 'bp-nav');
-  nav.innerHTML = `
-    <button class="icon-btn bp-btn" data-act="back" title="Back">←</button>
-    <button class="icon-btn bp-btn" data-act="forward" title="Forward">→</button>
-    <button class="icon-btn bp-btn" data-act="reload" title="Reload">↻</button>
-    <button class="icon-btn bp-btn bp-stop" data-act="stop" title="Stop loading" hidden>✕</button>
-    <input class="input sm bp-addr mono" type="text" placeholder="Enter URL (e.g. http://localhost:3100)" />
-  `;
-  const stopBtn = $('.bp-stop', nav);
-  const runNav = async (action, payload = {}) => {
-    const showBusy = action !== 'move';
-    if (showBusy) { nav.classList.add('loading'); if (stopBtn) stopBtn.hidden = false; }
-    try {
-      const next = await api.browserInteract?.(key, action, payload);
-      if (next && v) {
-        v.browserFrame = { ...next, step: action };
-        renderBrowserPane(v, false);
+  let shell = box.querySelector('.bp-shell');
+  if (!shell) {
+    box.innerHTML = '';
+    shell = h('div', 'bp-shell');
+    shell.innerHTML = `
+      <div class="bp-chrome">
+        <div class="bp-tab-row">
+          <div class="bp-tab" title="Live headless Chromium stream">
+            <i class="bp-live-dot"></i>
+            <span class="bp-tab-title">Live Browser</span>
+          </div>
+          <span class="bp-url mono"></span>
+          <div class="bp-tab-acts">
+            <button type="button" class="icon-btn bp-hist-btn" title="Action history">${icon('history', 'xs')}</button>
+            <button type="button" class="icon-btn bp-ext-btn" title="Open in system browser">${icon('external', 'xs')}</button>
+            <button type="button" class="icon-btn bp-wide-btn" title="Expand browser stage">${icon('maximize', 'xs')}</button>
+          </div>
+        </div>
+        <div class="bp-nav">
+          <button type="button" class="icon-btn bp-btn" data-act="back" title="Back">←</button>
+          <button type="button" class="icon-btn bp-btn" data-act="forward" title="Forward">→</button>
+          <button type="button" class="icon-btn bp-btn" data-act="reload" title="Reload">↻</button>
+          <button type="button" class="icon-btn bp-btn bp-stop" data-act="stop" title="Stop loading" hidden>✕</button>
+          <input class="input sm bp-addr mono" type="text" placeholder="Enter URL (e.g. http://localhost:3000)" />
+        </div>
+        <div class="bp-pages" hidden></div>
+      </div>
+      <div class="bp-stage">
+        <div class="bp-sweep" hidden></div>
+        <div class="bp-empty">
+          ${icon('globe', 'sm')}
+          <div class="bp-empty-t">Live Interactive Browser</div>
+          <p class="muted">Enter any URL above or ask DROPs to run and inspect your app. You can click, type, scroll and take control anytime.</p>
+          <div class="bp-quick-urls">
+            <button type="button" class="btn sm bp-q" data-url="http://localhost:3000">localhost:3000</button>
+            <button type="button" class="btn sm bp-q" data-url="http://localhost:5173">localhost:5173</button>
+            <button type="button" class="btn sm bp-q" data-url="http://localhost:8080">localhost:8080</button>
+          </div>
+        </div>
+        <div class="bp-building" hidden>
+          <div class="bp-skel">
+            <div class="bp-sk-bar"></div>
+            <div class="bp-sk-hero"></div>
+            <div class="bp-sk-cols"><span></span><span></span></div>
+          </div>
+          <div class="bp-build-badge">
+            <i class="bp-build-dot"></i>
+            <div class="bp-build-txt"><b class="bp-build-title"></b><span class="bp-build-sub mono"></span></div>
+          </div>
+        </div>
+        <img class="bp-shot-prev" aria-hidden="true" hidden />
+        <img class="bp-shot interactive" draggable="false" tabindex="0" title="Live browser — click, drag, scroll or type directly" hidden />
+        <div class="bp-agent-cursor" hidden>
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 3l14 9-6.2 1.4L10 19.5z" fill="#6ea8fe" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <span class="bp-cur-label"></span>
+        </div>
+        <div class="bp-live-pill" hidden><i class="bp-lp-dot"></i><span class="bp-lp-t mono"></span></div>
+        <div class="bp-steps-pop" hidden></div>
+        <button type="button" class="bp-stop-float" hidden>${icon('square', 'xs')}<span>Stop</span></button>
+      </div>
+    `;
+    box.appendChild(shell);
+
+    const nav = $('.bp-nav', shell);
+    const stopBtn = $('.bp-stop', nav);
+    const addr = $('.bp-addr', nav);
+    const img = $('.bp-shot', shell);
+    const stage = $('.bp-stage', shell);
+    const stepsPop = $('.bp-steps-pop', shell);
+    box._bp = { key };
+
+    const runNav = async (action, payload = {}) => {
+      const showBusy = action !== 'move';
+      if (showBusy) { nav.classList.add('loading'); if (stopBtn) stopBtn.hidden = false; }
+      try {
+        const next = await api.browserInteract?.(box._bp.key, action, payload);
+        const cv = currentView();
+        if (next && cv) {
+          cv.browserFrame = { ...next, step: action };
+          updateBrowserFrameUi(cv.browserFrame, cv);
+        }
+      } catch (e) { toast(e.message || 'Browser error'); } finally {
+        if (showBusy) { nav.classList.remove('loading'); if (stopBtn) stopBtn.hidden = true; }
       }
-    } catch (e) { toast(e.message || 'Browser error'); } finally {
-      if (showBusy) { nav.classList.remove('loading'); if (stopBtn) stopBtn.hidden = true; }
+    };
+
+    addr.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); runNav('open', { url: addr.value }); } };
+    nav.querySelectorAll('.bp-btn').forEach((b) => (b.onclick = () => runNav(b.dataset.act)));
+    shell.querySelectorAll('.bp-q').forEach((b) => (b.onclick = () => { addr.value = b.dataset.url; runNav('open', { url: b.dataset.url }); }));
+    const wideBtn = $('.bp-wide-btn', shell);
+    wideBtn.onclick = () => {
+      const b = $('#body');
+      if (!b) return;
+      b.style.removeProperty('--insp-custom-w');
+      b.classList.add('browser-stage');
+      const wide = b.classList.toggle('browser-wide');
+      if (wide) b.classList.remove('force-side');
+      wideBtn.classList.toggle('on', wide);
+      wideBtn.innerHTML = icon(wide ? 'minimize' : 'maximize', 'xs');
+      wideBtn.title = wide ? 'Restore browser width' : 'Expand browser stage';
+      wideBtn.setAttribute('aria-label', wideBtn.title);
+    };
+    $('.bp-ext-btn', shell).onclick = () => { const u = addr.value.trim(); if (/^https?:\/\//i.test(u)) window.open(u, '_blank'); };
+    $('.bp-hist-btn', shell).onclick = () => { stepsPop.hidden = !stepsPop.hidden; updateBrowserFrameUi(currentView()?.browserFrame, currentView()); };
+    $('.bp-stop-float', shell).onclick = () => { const cv = currentView(); if (cv) api.stop(cv.id); };
+
+    let downPt = null, moveAt = 0;
+    img.onmousedown = (e) => {
+      img.focus();
+      const r = img.getBoundingClientRect();
+      if (r.width && r.height) downPt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, cx: e.clientX, cy: e.clientY };
+    };
+    img.onmouseup = (e) => {
+      const r = img.getBoundingClientRect();
+      if (!downPt || !r.width || !r.height) return;
+      const x2 = (e.clientX - r.left) / r.width, y2 = (e.clientY - r.top) / r.height;
+      const dist = Math.hypot(e.clientX - downPt.cx, e.clientY - downPt.cy);
+      const p = downPt; downPt = null;
+      if (dist > 6) runNav('drag', { x1: p.x, y1: p.y, x2, y2 });
+      else runNav('clickAt', { xRatio: x2, yRatio: y2 });
+    };
+    img.onmousemove = (e) => {
+      if (downPt) return;
+      const now = Date.now();
+      if (now - moveAt < 180) return;
+      moveAt = now;
+      const r = img.getBoundingClientRect();
+      if (r.width && r.height) api.browserInteract?.(box._bp.key, 'move', { xRatio: (e.clientX - r.left) / r.width, yRatio: (e.clientY - r.top) / r.height }).catch(() => {});
+    };
+    let wheelTimer = null, wheelDelta = 0;
+    img.onwheel = (e) => {
+      e.preventDefault();
+      wheelDelta += e.deltaY;
+      if (wheelTimer) return;
+      wheelTimer = setTimeout(() => {
+        const d = wheelDelta; wheelDelta = 0; wheelTimer = null;
+        runNav('scroll', { deltaY: d });
+      }, 90);
+    };
+    img.onkeydown = (e) => {
+      if (['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        e.preventDefault(); runNav('type', { key: e.key });
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault(); runNav('type', { text: e.key });
+      }
+    };
+
+    if (typeof ResizeObserver !== 'undefined') {
+      let rTimer = null;
+      new ResizeObserver((entries) => {
+        const rect = entries[0]?.contentRect;
+        if (!rect || rect.width < 220 || rect.height < 200 || box.hidden) return;
+        clearTimeout(rTimer);
+        rTimer = setTimeout(() => {
+          const w = Math.max(640, Math.round(rect.width * 1.15));
+          const h = Math.max(480, Math.round(rect.height * 1.15));
+          api.browserStream?.(box._bp.key, 'resize', { width: w, height: h }).then((r) => {
+            const cv = currentView();
+            if (r?.frame && cv && !box.hidden) { cv.browserFrame = { ...r.frame, step: cv.browserFrame?.step || 'live' }; updateBrowserFrameUi(cv.browserFrame, cv); }
+          }).catch(() => {});
+        }, 220);
+      }).observe(stage);
     }
-  };
-  const addr = $('.bp-addr', nav);
-  addr.value = f?.url || '';
-  addr.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); runNav('open', { url: addr.value }); } };
-  nav.querySelectorAll('.bp-btn').forEach((b) => (b.onclick = () => runNav(b.dataset.act)));
-  box.innerHTML = '';
-  box.appendChild(nav);
-
-  if (!f) {
-    box.appendChild(h('div', 'empty', 'Type a URL above (e.g. http://localhost:3100) and press Enter, or ask DROPs to open a page.'));
-    return;
   }
+  box._bp.key = key;
+  updateBrowserFrameUi(v?.browserFrame, v);
+}
 
-  const head = h('div', 'bp-head');
-  head.innerHTML = `${icon('globe', 'xs')}<span class="bp-url mono"></span><span class="bp-step"></span>`;
-  head.querySelector('.bp-url').textContent = f.url;
-  head.querySelector('.bp-step').textContent = f.step || '';
-
-  const img = h('img', 'bp-shot interactive');
-  img.src = `data:image/jpeg;base64,${f.data}`;
-  img.alt = f.title || 'Browser page';
-  img.draggable = false;
-  img.tabIndex = 0;
-  img.title = 'Click, drag to select, scroll, or type directly on the live page';
-  let downPt = null, moveAt = 0;
-  img.onmousedown = (e) => {
-    img.focus();
-    const r = img.getBoundingClientRect();
-    if (r.width && r.height) downPt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, cx: e.clientX, cy: e.clientY };
-  };
-  img.onmouseup = (e) => {
-    const r = img.getBoundingClientRect();
-    if (!downPt || !r.width || !r.height) return;
-    const x2 = (e.clientX - r.left) / r.width, y2 = (e.clientY - r.top) / r.height;
-    const dist = Math.hypot(e.clientX - downPt.cx, e.clientY - downPt.cy);
-    const p = downPt; downPt = null;
-    if (dist > 6) runNav('drag', { x1: p.x, y1: p.y, x2, y2 });
-    else runNav('clickAt', { xRatio: x2, yRatio: y2 });
-  };
-  img.onmousemove = (e) => {
-    if (downPt) return;
-    const now = Date.now();
-    if (now - moveAt < 180) return;
-    moveAt = now;
-    const r = img.getBoundingClientRect();
-    if (r.width && r.height) api.browserInteract?.(key, 'move', { xRatio: (e.clientX - r.left) / r.width, yRatio: (e.clientY - r.top) / r.height }).catch(() => {});
-  };
-  let wheelTimer = null, wheelDelta = 0;
-  img.onwheel = (e) => {
-    e.preventDefault();
-    wheelDelta += e.deltaY;
-    if (wheelTimer) return;
-    wheelTimer = setTimeout(() => {
-      const d = wheelDelta; wheelDelta = 0; wheelTimer = null;
-      runNav('scroll', { deltaY: d });
-    }, 90);
-  };
-  img.onkeydown = (e) => {
-    if (['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
-      e.preventDefault(); runNav('type', { key: e.key });
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault(); runNav('type', { text: e.key });
+let browserCursorHideTimer = null;
+function onBrowserStream(ev) {
+  if (!ev) return;
+  const v = currentView();
+  const activeKey = v?.data?.projectDir || S.project || 'default';
+  if (ev.key && ev.key !== activeKey) return;
+  if (ev.type === 'frame' && v) {
+    v.browserFrame = { url: ev.url, title: ev.title, data: ev.data, step: v.browserFrame?.step || 'live' };
+    if ($('#browserBody') && !$('#browserBody').hidden) updateBrowserFrameUi(v.browserFrame, v);
+  } else if (ev.type === 'cursor') {
+    const curEl = $('#browserBody .bp-agent-cursor');
+    if (!curEl) return;
+    if (!ev.active) {
+      clearTimeout(browserCursorHideTimer);
+      browserCursorHideTimer = setTimeout(() => { curEl.hidden = true; }, 850);
+      return;
     }
-  };
-
-  const steps = h('div', 'bp-steps');
-  for (const s of (v.browserSteps || []).slice(-8).reverse()) {
-    const r = h('div', 'bp-row');
-    r.innerHTML = `<span class="bp-t"></span><span class="bp-u mono"></span>`;
-    r.querySelector('.bp-t').textContent = s.step;
-    try { r.querySelector('.bp-u').textContent = new URL(s.url).pathname; } catch { r.querySelector('.bp-u').textContent = s.url; }
-    steps.appendChild(r);
+    clearTimeout(browserCursorHideTimer);
+    curEl.hidden = false;
+    curEl.style.left = `${Math.max(2, Math.min(98, (ev.xRatio || 0.5) * 100))}%`;
+    curEl.style.top = `${Math.max(2, Math.min(98, (ev.yRatio || 0.5) * 100))}%`;
+    curEl.classList.toggle('flip-x', (ev.xRatio || 0.5) > 0.65);
+    curEl.classList.toggle('flip-y', (ev.yRatio || 0.5) > 0.82);
+    $('.bp-cur-label', curEl).textContent = ev.label || '';
   }
-  box.append(head, img, steps);
 }
 
 // ---------- split view: a second session beside the current one ----------
@@ -960,17 +1416,28 @@ function setSplit(id) {
 async function openSplitPicker() {
   const others = S.sessions.filter((s) => s.id !== S.current).slice(0, 12);
   if (!others.length) { toast('Open another session first'); return; }
+  const o = h('div', 'overlay center');
   const m = h('div', 'modal'); m.style.width = 'min(440px, 92vw)';
-  m.innerHTML = '<div class="modal-head">Show beside this session</div>';
+  m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+  m.innerHTML = `<div class="modal-head"><h2>Show beside this session</h2><button type="button" class="icon-btn modal-close" title="Close">${icon('x', 'xs')}</button></div>`;
   const list = h('div', 'split-list');
+  const close = () => { document.removeEventListener('keydown', onEsc, true); o.remove(); };
+  const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onEsc, true);
+  $('.modal-close', m).onclick = close;
   for (const s of others) {
-    const b = h('button', 'btn ghost split-item'); b.textContent = s.title;
-    b.onclick = async () => { o.remove(); if (!S.views.get(s.id)) { const data = await api.loadSession(s.id); if (data) makeView(data); } setSplit(s.id); };
+    const live = S.views.get(s.id)?.data;
+    const b = h('button', 'btn ghost split-item');
+    b.innerHTML = `<span class="grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span class="muted" style="font-size:11.5px"></span>`;
+    $('.grow', b).textContent = live?.title || s.title || 'Untitled session';
+    $('.muted', b).textContent = timeAgo(live?.updated || s.updated);
+    b.onclick = async () => { close(); if (!S.views.get(s.id)) { const data = await api.loadSession(s.id); if (data) makeView(data); } setSplit(s.id); };
     list.appendChild(b);
   }
   m.appendChild(list);
-  const o = h('div', 'overlay'); o.appendChild(m); o.onclick = (e) => { if (e.target === o) o.remove(); };
+  o.appendChild(m); o.onclick = (e) => { if (e.target === o) close(); };
   document.body.appendChild(o);
+  list.querySelector('button')?.focus();
 }
 
 function maybePlanCta(v) {
@@ -1081,6 +1548,7 @@ async function openSession(id) {
   } else if (v.data.projectDir !== S.project) await setProject(v.data.projectDir, true);
   S.current = id;
   S.unread?.delete(id);
+  if (S.lens === 'mission') setLens('default');
   showCurrent();
   Panels.renderSessions(false);
 }
@@ -1120,14 +1588,19 @@ function showCurrent() {
   $('#effortSel').value = d.effort || 'high';
   setMode(d.mode || 'ask');
   syncPills(); updateComposer(); updateCtx();
+  renderMissionBar(v); updateFloatIsland();
   Panels.renderSessions(); Panels.renderPlan(); Panels.renderChanges(); Panels.renderUsage(); Panels.renderProcs(); Panels.renderStatus(); Panels.refreshTreeMarks();
+  if (S.lens === 'mission') Panels.renderMissionDeck?.();
+  if ($('#mapBody') && !$('#mapBody').hidden) Panels.renderMap?.();
   if (v) autoScroll(v, true);
 }
 
 async function setProject(p, keepSession) {
   const ok = await api.useProject(p);
   if (!ok) { toast('Folder not found: ' + p); return; }
+  const changedProject = S.project && S.project !== p;
   S.project = p;
+  if (changedProject && typeof Editor !== 'undefined') Editor.closeAll?.(true);
   S.settings = await api.getSettings();
   $('#projectName').textContent = baseName(p);
   $('#projectBtn').title = p;
@@ -1142,11 +1615,13 @@ async function pickProject() { const p = await api.openProject(); if (p) await s
 
 // ---------- composer ----------
 function modelUsable(x) {
-  if (x.id.startsWith('__')) return false;
-  if (x.provider === 'Gemini') return S.settings.hasGemini;
-  if (x.provider === 'Claude') return S.settings.hasAnthropic;
-  if (x.provider === 'Auto') return S.settings.hasGemini || S.settings.hasAnthropic || S.settings.ollamaEnabled;
-  return true; // local models
+  if (!x || x.id.startsWith('__') || x.disabled) return false;
+  if (x.provider === 'Gemini') return !!S.settings?.hasGemini;
+  if (x.provider === 'Claude') return !!S.settings?.hasAnthropic;
+  if (x.provider === 'Auto') {
+    return !!S.settings?.hasKey || !!(S.info?.models || []).some((m) => !m.id.startsWith('__') && m.id !== 'auto' && !m.disabled && m.provider !== 'Auto' && modelUsable(m));
+  }
+  return true; // local & configured OpenAI-compatible models
 }
 function usableModel(id) {
   const ok = modelUsable;
@@ -1212,10 +1687,37 @@ function updateComposer() {
   $('#sendBtn').hidden = busy && !hasText;
   $('#sendBtn').disabled = !hasText;
   $('#sendBtn').title = busy ? 'Send now: the agent reads it at its next step (Enter) · Queue for after this task (Ctrl+Enter)' : 'Send (Enter)';
-  const askPh = (window.UI_STRINGS?.[S.settings?.uiLang] || window.UI_STRINGS?.en)?.askPlaceholder || 'Type @ to tag files, / for commands';
+  const askPh = (window.UI_STRINGS?.[S.settings?.uiLanguage] || window.UI_STRINGS?.en)?.askPlaceholder || 'Type @ to tag files, / for commands';
   $('#input').placeholder = busy ? 'Enter to send now, Ctrl+Enter to queue for later' : askPh;
   updateSuggestStrip();
+  updateCtxMentions();
   renderQueue();
+}
+
+function updateCtxMentions() {
+  const box = $('#ctxMentions');
+  const t = $('#input');
+  if (!box || !t) return;
+  const tokens = [];
+  const seen = new Set();
+  for (const m of (t.value || '').matchAll(/(?:^|\s)(@[^\s@]+)/g)) {
+    const tok = m[1];
+    if (!seen.has(tok) && tok.length > 1) { seen.add(tok); tokens.push(tok); }
+  }
+  box.innerHTML = '';
+  box.hidden = !tokens.length;
+  for (const tok of tokens.slice(0, 8)) {
+    const chip = h('span', 'ctx-chip');
+    const ic = tok === '@git' || tok === '@diff' ? 'branch' : tok === '@terminal' ? 'terminal' : tok === '@errors' ? 'alert' : tok.startsWith('@folder:') ? 'folder' : tok.startsWith('@url:') ? 'globe' : tok === '@codebase' ? 'search' : 'file';
+    chip.innerHTML = `${icon(ic, 'xs')}<span class="ctx-tok"></span><button type="button" class="ctx-x" title="Remove context">${icon('x', 'xs')}</button>`;
+    $('.ctx-tok', chip).textContent = tok;
+    $('.ctx-x', chip).onclick = () => {
+      const escTok = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      t.value = t.value.replace(new RegExp(`(^|\\s)${escTok}(?=\\s|$)`, 'g'), '$1').replace(/\s{2,}/g, ' ').trimStart();
+      autosize(); updateComposer(); t.focus();
+    };
+    box.appendChild(chip);
+  }
 }
 
 function insertComposerTrigger(token) {
@@ -1242,9 +1744,7 @@ function insertComposerTrigger(token) {
 
 function updateSuggestStrip() {
   const strip = $('#suggestStrip');
-  const t = $('#input');
-  if (!strip || !t) return;
-  strip.hidden = !(document.activeElement === t && t.value === '');
+  if (strip) strip.hidden = true;
 }
 
 (() => {
@@ -1338,7 +1838,13 @@ async function renderQueue() {
     bar.appendChild(row);
   }
 }
-function autosize() { const t = $('#input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 280) + 'px'; }
+function autosize() {
+  const t = $('#input');
+  t.style.height = 'auto';
+  const nextH = Math.min(t.scrollHeight, 280);
+  t.style.height = nextH + 'px';
+  t.style.overflowY = t.scrollHeight > 280 ? 'auto' : 'hidden';
+}
 function insertAtCursor(s) {
   const t = $('#input'); const a = t.selectionStart, b = t.selectionEnd;
   t.value = t.value.slice(0, a) + s + t.value.slice(b);
@@ -1376,7 +1882,7 @@ function renderAttachments() {
 }
 
 const SLASH = [
-  { k: '/init', d: 'Analyze the project and write DROPs.md', run: () => sendText('Analyze this project thoroughly (structure, stack, build/test/lint commands, conventions, architecture, gotchas) and create or update H2O.md in the project root with a concise, high-signal guide for future AI sessions. Use sub-agents to explore in parallel if the project is large.') },
+  { k: '/init', d: 'Analyze the project and write DROPs.md', run: () => sendText('Analyze this project thoroughly (structure, stack, build/test/lint commands, conventions, architecture, gotchas) and create or update DROPs.md in the project root with a concise, high-signal guide for future AI sessions. Use sub-agents to explore in parallel if the project is large.') },
   { k: '/review', d: 'Review uncommitted changes for bugs', run: () => sendText('Review the current uncommitted changes (use `git diff` and read the touched files). Look for bugs, edge cases, security issues, performance problems and missing tests. Report findings ranked by severity with file:line references. Do not modify files.') },
   { k: '/test', d: 'Run the tests and fix failures', run: () => sendText('Run the project\'s test suite (find the right command first). If anything fails, diagnose the root cause and fix it, then re-run until green. Report what you changed.') },
   { k: '/fix', d: 'Build/type-check and fix all errors', run: () => sendText('Run the project\'s build and type-checker/linter, then fix every error and warning you find. Re-run until clean. Report what you changed.') },
@@ -1409,9 +1915,10 @@ async function send(action = 'queue') {
   const t = $('#input');
   const text = t.value.trim();
   if (!text && !S.attachments.length) return;
+  if (typeof closePop === 'function') closePop();
   const selModel = $('#modelSel').value || '';
-  const isLocal = /^(ollama|lmstudio):/.test(selModel) || (selModel === 'auto' && S.settings.ollamaEnabled);
-  if (!S.settings.hasKey && !isLocal) { Panels.openSettings(); return; }
+  const isLocal = /^(ollama|lmstudio):/.test(selModel) || (selModel === 'auto' && (S.settings.ollamaEnabled || S.settings.lmstudioEnabled));
+  if (!S.settings.hasKey && !isLocal) { Panels.openSettings('providers'); return; }
   if (!S.project) { await pickProject(); if (!S.project) return; }
   const word = text.split(/\s/)[0];
   const cmd = word.startsWith('/') ? allSlash().find((c) => c.k === word) : null;
@@ -1425,7 +1932,9 @@ async function send(action = 'queue') {
 }
 async function doSend(v, text, images, action = 'queue') {
   $('#hero').hidden = true; v.el.hidden = S.current !== v.id;
+  renderMissionBar(v);
   const isRunning = v.busy;
+  if (!isRunning) { S.userInspLock = false; v._autoOpenedBrowser = false; }
   let tagText = null;
   if (isRunning) {
     tagText = action === 'steer' ? 'Steering — delivered at next step' : 'Queued — runs after current task';
@@ -1475,6 +1984,7 @@ async function rewind(v, turnIndex) {
   v.data = r.session;
   renderHistory(v);
   showCurrent();
+  Editor.reloadAll?.();
   $('#input').value = r.text; autosize(); updateComposer(); $('#input').focus();
   toast((r.restored ? `Rewound · ${r.restored} file${r.restored > 1 ? 's' : ''} restored` : 'Rewound') + (r.kept?.length ? ` · kept your own changes to ${r.kept.join(', ')}` : ''));
   Panels.refreshGitSoon();
@@ -1487,6 +1997,7 @@ async function retryTurn(v, turnIndex) {
   v.data = r.session;
   renderHistory(v);
   showCurrent();
+  Editor.reloadAll?.();
   doSend(v, r.text, []);
 }
 async function forkSession(v) {
@@ -1536,37 +2047,59 @@ async function newWorktreeSession() {
   showCurrent();
   toast(`Working in ${data.worktree.branch} — other sessions keep running on their own branches`);
 }
-function promptText(title, placeholder) {
+function promptText(title, placeholder, initialValue = '', okLabel = 'Create') {
   return new Promise((res) => {
     const o = h('div', 'overlay center');
     const m = h('div', 'modal'); m.style.width = 'min(440px, 92vw)';
-    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2></div><div class="modal-body" style="padding-top:14px"><input class="input" style="width:100%"></div>`;
-    const f = h('div', 'modal-foot'); const no = h('button', 'btn', 'Cancel'); const yes = h('button', 'btn primary', 'Create');
+    m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2><button type="button" class="icon-btn modal-close" title="Close">${icon('x', 'xs')}</button></div><div class="modal-body" style="padding-top:14px"><input class="input" style="width:100%"></div>`;
+    const f = h('div', 'modal-foot'); const no = h('button', 'btn', 'Cancel'); const yes = h('button', 'btn primary', okLabel);
     f.append(no, yes); m.appendChild(f); o.appendChild(m); document.body.appendChild(o);
-    const inp = $('input', m); inp.placeholder = placeholder; inp.focus();
-    const done = (r) => { o.remove(); res(r); };
-    no.onclick = () => done(null); yes.onclick = () => done(inp.value.trim() || null);
-    inp.onkeydown = (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); if (e.key === 'Escape') done(null); };
+    const inp = $('input', m); inp.placeholder = placeholder || ''; inp.value = initialValue || ''; if (initialValue) inp.select(); inp.focus();
+    const done = (r) => { document.removeEventListener('keydown', onEsc, true); o.remove(); res(r); };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); } };
+    document.addEventListener('keydown', onEsc, true);
+    no.onclick = () => done(null); $('.modal-close', m).onclick = () => done(null);
+    yes.onclick = () => done(inp.value.trim() || null);
+    o.onclick = (e) => { if (e.target === o) done(null); };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') done(inp.value.trim() || null); };
   });
 }
+window.promptText = promptText;
 
 // ---------- dialogs ----------
 /** Lessons learned: what DROPs remembers from past mistakes. Pending ones are not used until confirmed. */
 async function lessonsBox() {
   const o = h('div', 'overlay center');
   const m = h('div', 'modal'); m.style.width = 'min(620px, 94vw)';
-  m.innerHTML = '<div class="modal-head"><h2>Lessons learned</h2></div><div class="modal-body lessons-body"></div>';
+  m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+  m.innerHTML = `<div class="modal-head"><h2>Lessons learned</h2><button type="button" class="icon-btn modal-close" title="Close">${icon('x', 'xs')}</button></div><div class="modal-body lessons-body"></div>`;
   const body = $('.lessons-body', m);
   const paint = (list) => {
     body.innerHTML = '';
-    body.appendChild(h('p', 'muted', 'DROPs remembers these rules from its past mistakes and applies them in every project. A lesson it noticed by itself stays pending until the same mistake happens again. Remove any rule that is wrong.'));
+    body.appendChild(h('p', 'muted', 'DROPs remembers these rules from its past mistakes and applies them in every project. Add your own permanent rule below or remove any rule that is wrong.'));
+    const addRow = h('div', 'lesson-add');
+    addRow.innerHTML = `<input class="input" placeholder="Add a rule (e.g. Always use pnpm instead of npm in monorepos)…"><button type="button" class="btn sm primary">Add rule</button>`;
+    const addInp = $('input', addRow), addBtn = $('button', addRow);
+    const submitAdd = async () => {
+      const txt = addInp.value.trim();
+      if (!txt) return;
+      const r = await api.lessonsAdd?.(txt);
+      if (r?.error) { toast(r.error); return; }
+      addInp.value = '';
+      paint(r?.list || await api.lessonsList());
+      toast('Lesson added');
+    };
+    addBtn.onclick = submitAdd;
+    addInp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submitAdd(); } };
+    body.appendChild(addRow);
     if (!list.length) { body.appendChild(h('div', 'empty', 'No lessons yet.')); return; }
     for (const l of list) {
       const r = h('div', 'lesson-row');
       r.innerHTML = `<span class="chip-st ${l.active ? 'on' : ''}"></span><span class="lt"></span><span class="lm"></span><button class="icon-btn" title="Remove">${icon('trash', 'xs')}</button>`;
       $('.chip-st', r).textContent = l.active ? 'Active' : 'Pending';
       $('.lt', r).textContent = l.text;
-      $('.lm', r).textContent = `${l.source === 'agent' ? 'written by the agent' : 'noticed automatically'} · seen ${l.count || 1}×`;
+      $('.lm', r).textContent = `${l.source === 'agent' ? 'active rule' : 'noticed automatically'} · seen ${l.count || 1}×`;
       $('button', r).onclick = async () => paint(await api.lessonsRemove(l.text));
       body.appendChild(r);
     }
@@ -1574,8 +2107,10 @@ async function lessonsBox() {
   paint(await api.lessonsList());
   const f = h('div', 'modal-foot'); const close = h('button', 'btn primary', 'Done'); f.appendChild(close); m.appendChild(f);
   o.appendChild(m); document.body.appendChild(o);
-  const done = () => o.remove();
-  close.onclick = done; o.onclick = (e) => { if (e.target === o) done(); }; o.onkeydown = (e) => { if (e.key === 'Escape') done(); };
+  const done = () => { document.removeEventListener('keydown', onEsc, true); o.remove(); };
+  const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(); } };
+  document.addEventListener('keydown', onEsc, true);
+  close.onclick = done; $('.modal-close', m).onclick = done; o.onclick = (e) => { if (e.target === o) done(); };
   close.focus();
 }
 
@@ -1583,12 +2118,15 @@ function confirmBox(title, text, okLabel = 'Continue') {
   return new Promise((res) => {
     const o = h('div', 'overlay center');
     const m = h('div', 'modal'); m.style.width = 'min(460px, 92vw)';
-    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2></div><div class="modal-body" style="padding-top:14px;color:var(--text-2);white-space:pre-line">${esc(text)}</div>`;
+    m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+    m.innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2><button type="button" class="icon-btn modal-close" title="Close">${icon('x', 'xs')}</button></div><div class="modal-body" style="padding-top:14px;color:var(--text-2);white-space:pre-line">${esc(text)}</div>`;
     const f = h('div', 'modal-foot'); const no = h('button', 'btn', 'Cancel'); const yes = h('button', 'btn primary', okLabel);
     f.append(no, yes); m.appendChild(f); o.appendChild(m); document.body.appendChild(o);
-    const done = (r) => { o.remove(); res(r); };
-    no.onclick = () => done(false); yes.onclick = () => done(true); o.onclick = (e) => { if (e.target === o) done(false); };
-    o.onkeydown = (e) => { if (e.key === 'Escape') done(false); };
+    const done = (r) => { document.removeEventListener('keydown', onEsc, true); o.remove(); res(r); };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); } };
+    document.addEventListener('keydown', onEsc, true);
+    no.onclick = () => done(false); $('.modal-close', m).onclick = () => done(false);
+    yes.onclick = () => done(true); o.onclick = (e) => { if (e.target === o) done(false); };
     yes.focus();
   });
 }

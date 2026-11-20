@@ -439,6 +439,68 @@ test('Ctrl+Shift+L switches between light and dark themes', async () => {
   assert.equal(await theme(), first);
 });
 
+test('workspace lenses (Focus/Studio/Mission), Codebase Impact Map, and @ context chips work together', async () => {
+  const proj = path.join(tmp, 'proj-v24');
+  fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'src', 'auth.js'), 'export function checkAuth() { return true; }\n');
+  fs.writeFileSync(path.join(proj, 'src', 'index.js'), 'import { checkAuth } from "./auth.js";\ncheckAuth();\n');
+  await win.evaluate(async (projDir) => {
+    await window.drops.setSettings({ recentProjects: [projDir] });
+    await setProject(projDir);
+    await newSession();
+  }, proj);
+
+  await win.keyboard.press('Control+Shift+F');
+  await win.waitForFunction(() => document.querySelector('#body')?.dataset.lens === 'focus');
+  await win.keyboard.press('Control+Shift+F');
+  await win.waitForFunction(() => document.querySelector('#body')?.dataset.lens === 'default');
+
+  await win.click('.lens-btn[data-lens="studio"]');
+  await win.waitForFunction(() => document.querySelector('#body')?.dataset.lens === 'studio');
+  await win.click('#inspTabs button[data-tab="map"]');
+  await win.waitForSelector('#mapBody .map-svg .map-node', { timeout: 10000 });
+  assert.ok((await win.locator('#mapBody .map-svg .map-node').count()) >= 2, 'renders code graph nodes');
+
+  await win.click('.lens-btn[data-lens="mission"]');
+  await win.waitForSelector('#missionDeck .mc-card', { timeout: 5000 });
+  await win.click('#mcExit');
+  await win.waitForFunction(() => document.querySelector('#body')?.dataset.lens === 'default');
+
+  await win.fill('#input', 'Check @src/index.js and @git');
+  await win.waitForSelector('#ctxMentions .ctx-chip', { timeout: 3000 });
+  assert.equal(await win.locator('#ctxMentions .ctx-chip').count(), 2);
+  await win.click('#ctxMentions .ctx-chip:first-child .ctx-x');
+  assert.equal(await win.locator('#ctxMentions .ctx-chip').count(), 1);
+  assert.doesNotMatch(await win.inputValue('#input'), /@src\/index\.js/);
+  await win.fill('#input', '');
+  await win.click('.lens-btn[data-lens="studio"]');
+  await win.click('#inspTabs button[data-tab="browser"]');
+  await win.waitForFunction(() => document.querySelector('#body')?.classList.contains('browser-stage'));
+  assert.equal(await win.isVisible('#sidebar'), false, 'sidebar auto-hides in Studio + browser-stage');
+  const baseBrowserW = await win.$eval('#inspector', (el) => el.getBoundingClientRect().width);
+  await win.click('#browserBody .bp-wide-btn');
+  await win.waitForFunction(() => document.querySelector('#body')?.classList.contains('browser-wide'));
+  const wideBrowserW = await win.$eval('#inspector', (el) => el.getBoundingClientRect().width);
+  assert.ok(wideBrowserW > baseBrowserW + 80, `browser expand button widens stage (${wideBrowserW} vs ${baseBrowserW})`);
+  await win.click('#browserBody .bp-wide-btn');
+  await win.waitForFunction(() => !document.querySelector('#body')?.classList.contains('browser-wide'));
+  await win.click('.rail button[data-view="explorer"]');
+  await win.waitForSelector('#tree .tree-row', { timeout: 5000 });
+  assert.equal(await win.isVisible('#sidebar'), true, 'clicking Explorer rail button reveals sidebar even in Studio + Browser Stage');
+  assert.match(await win.textContent('#tree'), /src/);
+  await win.click('.rail button[data-view="explorer"]');
+  await win.waitForFunction(() => getComputedStyle(document.querySelector('#sidebar')).display === 'none');
+  await win.click('#inspTabs button[data-tab="plan"]');
+  await win.evaluate(() => {
+    const v = currentView();
+    if (v) v._autoOpenedBrowser = false;
+    ensureBrowserStageOpen(v);
+  });
+  assert.ok(await win.$eval('#inspTabs button[data-tab="plan"]', (b) => b.classList.contains('on')), 'user inspector tab lock prevents auto-preview from hijacking Overview');
+  await win.click('.lens-btn[data-lens="default"]');
+  await win.click('.rail button[data-view="sessions"]');
+});
+
 test('the user data stays in the test folder, and the page logged no errors', async () => {
   assert.ok(!fs.existsSync(path.join(os.homedir(), '.drops', 'ui-test-marker')));
   const dataDir = await app.evaluate(({ app: a }) => a.getPath('userData'));

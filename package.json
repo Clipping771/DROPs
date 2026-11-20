@@ -8,7 +8,7 @@
     "dist": "electron-builder --win nsis portable zip",
     "check": "node scripts/check.js",
     "icon": "electron scripts/make-icon.js",
-    "test": "node --import ./tests/setup.js --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/security-attack-suite.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js tests/recovery.test.js tests/memory.test.js tests/audit.test.js tests/app.test.js tests/desktop.test.js tests/hooks.test.js tests/schedule.test.js tests/release.test.js tests/perf.test.js",
+    "test": "node --import ./tests/setup.js --test tests/guards.test.js tests/features.test.js tests/muse-glimmer.test.js tests/security.test.js tests/security-attack-suite.test.js tests/capabilities.test.js tests/media-workers.test.js tests/lessons.test.js tests/browser.test.js tests/fallback.test.js tests/brand.test.js tests/hardening.test.js tests/tasks.test.js tests/turns.test.js tests/evidence.test.js tests/debug.test.js tests/codegraph.test.js tests/recovery.test.js tests/memory.test.js tests/audit.test.js tests/app.test.js tests/desktop.test.js tests/hooks.test.js tests/schedule.test.js tests/release.test.js tests/perf.test.js tests/preview.test.js tests/audit-fixes.test.js",
     "bench": "node bench/run.js",
     "bench:dashboard": "node bench/dashboard.js",
     "headless": "node src/cli.js",
@@ -49,6 +49,10 @@
     "appId": "dev.drops.agent",
     "productName": "DROPs",
     "electronDist": "node_modules/electron/dist",
+    "asarUnpack": [
+      "src/assets/icon.ico",
+      "src/assets/icon.png"
+    ],
     "files": [
       "src/**/*",
       "node_modules/**/*",
@@ -61,12 +65,15 @@
         "portable",
         "zip"
       ],
-      "icon": "src/assets/icon.png"
+      "icon": "src/assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh"
+      "include": "build/installer.nsh",
+      "installerIcon": "src/assets/icon.ico",
+      "uninstallerIcon": "src/assets/icon.ico",
+      "installerHeaderIcon": "src/assets/icon.ico"
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.exe"

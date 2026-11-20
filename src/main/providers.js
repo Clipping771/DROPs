@@ -50,6 +50,25 @@ const resolveAuto = (settings = {}, tier = 1) => {
   return TIERS[prov][Math.max(0, Math.min(2, tier))];
 };
 
+/**
+ * Resolves `'auto'` or unset model identifiers to a concrete model id based on settings.
+ * Returns any already-concrete model id unchanged.
+ */
+function resolveConcreteModel(model, settings = {}) {
+  const raw = String(model || '').trim();
+  if (raw && raw !== 'auto' && !raw.startsWith('__')) return raw;
+  const pref = settings.autoProvider;
+  if (pref === 'anthropic' && settings.hasAnthropic) return resolveAuto(settings, 1);
+  if (pref === 'gemini' && settings.hasGemini) return resolveAuto(settings, 1);
+  if (pref === 'ollama' && settings.ollamaEnabled) return resolveAuto(settings, 1);
+  if (settings.hasAnthropic || settings.hasGemini) return resolveAuto(settings, 1);
+  const oaiProvs = settings.providers || {};
+  const enabledOai = Object.entries(oaiProvs).find(([, p]) => p && p.enabled);
+  if (enabledOai && /** @type {any} */ (settings).oaiDefaultModel) return /** @type {any} */ (settings).oaiDefaultModel;
+  if (settings.ollamaEnabled && /** @type {any} */ (settings).ollamaDefaultModel) return /** @type {any} */ (settings).ollamaDefaultModel;
+  return resolveAuto(settings, 1);
+}
+
 /** Classifies a user prompt into a coarse task category for historical model routing. */
 function inferTaskCategory(prompt = '') {
   const p = String(prompt || '');
@@ -296,9 +315,11 @@ async function callOne(opts) {
 
 // Plain, tool-less completion (summaries, commit messages). Returns text.
 async function complete({ model, system, prompt, deps, signal = new AbortController().signal, effort }) {
-  const eff = effort !== undefined ? effort : (providerOf(model) === 'ollama' ? false : 'low');
+  const settings = deps?.getSettings?.() || {};
+  const useModel = resolveConcreteModel(model, settings);
+  const eff = effort !== undefined ? effort : (providerOf(useModel) === 'ollama' ? false : 'low');
   const res = await callModel({
-    model, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [],
+    model: useModel, system, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }], tools: [],
     effort: eff, signal, emit: () => { }, deps, state: { compat: false }, web: false,
   });
   return res.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
@@ -319,4 +340,4 @@ function friendlyError(err, model) {
   return { message: msg, needsKey: !!err?.needsKey };
 }
 
-module.exports = { TIERS, autoProvider, initialTier, inferTaskCategory, resolveAuto, scoreModelCandidate, selectOptimalModel, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, isTransientError, exhaustedUntil };
+module.exports = { TIERS, autoProvider, initialTier, inferTaskCategory, resolveAuto, resolveConcreteModel, scoreModelCandidate, selectOptimalModel, cheapModelFor, CLAUDE, EFFORTS, providerOf, contextWindow, costOf, callModel, complete, friendlyError, isGemini: gemini.isGemini, isCapacityError, isTransientError, exhaustedUntil };

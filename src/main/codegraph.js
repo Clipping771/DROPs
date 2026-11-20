@@ -536,4 +536,81 @@ function planRenameSymbol(root, oldName, newName, targetFiles = null) {
   return edits;
 }
 
-module.exports = { buildGraph, invalidateGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses, tsSymbolReferences, findReferences, typeCheck, planRenameSymbol, searchCode };
+/** Resolves local asset references inside `.html` and `.css` files so web projects map cleanly. */
+function scanWebAssets(root, knownFiles) {
+  const webFiles = fg.sync(['**/*.{html,htm,css,scss}'], { cwd: root, ignore: IGNORE, onlyFiles: true, suppressErrors: true, deep: 10 }).slice(0, 120).map(norm);
+  const all = new Set([...knownFiles, ...webFiles]);
+  const extraEdges = [];
+  const resolveRef = (fromFile, rawRef) => {
+    const clean = String(rawRef || '').split(/[?#]/)[0].trim();
+    if (!clean || /^(?:https?:|data:|mailto:|javascript:|#)/i.test(clean)) return null;
+    const cand = norm(clean.startsWith('/') ? clean.slice(1) : path.posix.join(path.posix.dirname(fromFile), clean));
+    return all.has(cand) ? cand : null;
+  };
+  for (const wf of webFiles) {
+    const src = read(path.join(root, wf));
+    if (!src) continue;
+    if (/\.html?$/i.test(wf)) {
+      for (const m of src.matchAll(/<(?:script[^>]+src|link[^>]+href)\s*=\s*['"]([^'"]+)['"]/gi)) {
+        const to = resolveRef(wf, m[1]);
+        if (to && to !== wf) extraEdges.push({ from: wf, to });
+      }
+    } else {
+      for (const m of src.matchAll(/@import\s+(?:url\s*\(\s*)?['"]([^'"]+)['"]/gi)) {
+        const to = resolveRef(wf, m[1]);
+        if (to && to !== wf) extraEdges.push({ from: wf, to });
+      }
+    }
+  }
+  return { webFiles, extraEdges };
+}
+
+/**
+ * A small map of the project for the window: the files this session touched, their neighbours
+ * (what they import and what imports them) and the most connected files, with the edges between
+ * them and the files a change could break (dependents up to two levels away). Read only.
+ */
+function graphMap(root, touched = [], limit = 28) {
+  const g = buildGraph(root, { cache: true });
+  const { webFiles, extraEdges } = scanWebAssets(root, g.files);
+  const allFiles = new Set([...g.files, ...webFiles]);
+  const imports = new Map(g.imports);
+  const importedBy = new Map(g.importedBy);
+  for (const wf of webFiles) {
+    if (!imports.has(wf)) imports.set(wf, new Set());
+    if (!importedBy.has(wf)) importedBy.set(wf, new Set());
+  }
+  for (const { from, to } of extraEdges) {
+    imports.get(from)?.add(to);
+    importedBy.get(to)?.add(from);
+  }
+  const ag = { ...g, files: allFiles, imports, importedBy };
+  const deg = (f) => (imports.get(f)?.size || 0) + (importedBy.get(f)?.size || 0);
+  const touchedSet = new Set(touched.map((p) => norm(String(p || '')).replace(/^\.\//, '')).filter(Boolean));
+  const picked = new Set();
+  const add = (f) => { if (picked.size < limit && f) picked.add(f); };
+  for (const f of touchedSet) add(f);
+  const near = [];
+  for (const f of touchedSet) {
+    for (const by of importedBy.get(f) || []) near.push(by);
+    for (const dep of imports.get(f) || []) near.push(dep);
+  }
+  for (const f of [...new Set(near)].sort((a, b) => deg(b) - deg(a))) add(f);
+  const sortedByDeg = [...allFiles].sort((a, b) => deg(b) - deg(a) || (a < b ? -1 : 1));
+  for (const f of sortedByDeg) { if (picked.size >= limit) break; if (deg(f)) add(f); }
+  for (const f of sortedByDeg) { if (picked.size >= limit) break; add(f); }
+  const blast = new Map();
+  for (const f of touchedSet) if (allFiles.has(f)) for (const [dep, d] of dependents(ag, f, 2)) if (!touchedSet.has(dep) && (!blast.has(dep) || blast.get(dep) > d)) blast.set(dep, d);
+  const nodes = [...picked].map((id) => ({
+    id, label: path.posix.basename(id), dir: path.posix.dirname(id),
+    inDeg: importedBy.get(id)?.size || 0, outDeg: imports.get(id)?.size || 0,
+    touched: touchedSet.has(id), blast: blast.has(id) ? blast.get(id) : 0, exists: allFiles.has(id),
+    syms: (g.indexMeta.get(id)?.syms || []).slice(0, 5).map((s) => s.name),
+  }));
+  const edges = [];
+  for (const from of picked) for (const to of imports.get(from) || []) if (picked.has(to)) edges.push({ from, to });
+  const blastRadius = [...blast.entries()].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 40).map(([id, depth]) => ({ id, depth }));
+  return { totalFiles: allFiles.size, truncated: !!g.truncated, nodes, edges, blastRadius };
+}
+
+module.exports = { buildGraph, invalidateGraph, dependents, cycles, impactReport, importsOf, resolveImport, symbolUses, tsSymbolReferences, findReferences, typeCheck, planRenameSymbol, searchCode, graphMap };

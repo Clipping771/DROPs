@@ -63,14 +63,73 @@ async function secretUntracked(root) {
 }
 
 async function commit(root, message) {
-  // "Commit" stages everything; a secret file nobody added before must not slip in with it.
-  const secrets = await secretUntracked(root);
-  if (secrets.length) {
-    throw new Error(`Not committed: ${secrets.slice(0, 5).join(', ')}${secrets.length > 5 ? ', …' : ''} ${secrets.length === 1 ? 'looks like a secret' : 'look like secrets'} (keys or credentials). Add ${secrets.length === 1 ? 'it' : 'them'} to .gitignore, or commit ${secrets.length === 1 ? 'it' : 'them'} yourself with git if that is really intended.`);
+  const st = await status(root);
+  const hasStaged = !!(st.isRepo && (st.files || []).some((f) => f.staged));
+  if (!hasStaged) {
+    // "Commit all" stages everything; a secret file nobody added before must not slip in with it.
+    const secrets = await secretUntracked(root);
+    if (secrets.length) {
+      throw new Error(`Not committed: ${secrets.slice(0, 5).join(', ')}${secrets.length > 5 ? ', …' : ''} ${secrets.length === 1 ? 'looks like a secret' : 'look like secrets'} (keys or credentials). Add ${secrets.length === 1 ? 'it' : 'them'} to .gitignore, or commit ${secrets.length === 1 ? 'it' : 'them'} yourself with git if that is really intended.`);
+    }
+    await git(root, ['add', '-A']);
   }
-  await git(root, ['add', '-A']);
   const out = await git(root, ['commit', '-F', '-'], { input: message });
   return out.trim().split('\n')[0];
+}
+
+async function stage(root, rel) {
+  if (!rel) return git(root, ['add', '-A']);
+  return git(root, ['add', '--', rel.replace(/\\/g, '/')]);
+}
+
+async function unstage(root, rel) {
+  const args = rel ? ['reset', 'HEAD', '--', rel.replace(/\\/g, '/')] : ['reset', 'HEAD'];
+  try {
+    return await git(root, args);
+  } catch (e) {
+    // Unborn repository (no HEAD yet): remove from index with git rm --cached
+    const target = rel ? [rel.replace(/\\/g, '/')] : ['.'];
+    return git(root, ['rm', '--cached', '-r', '--ignore-unmatch', '--', ...target]).catch(() => { throw e; });
+  }
+}
+
+async function discard(root, rel) {
+  if (!rel) throw new Error('A file path is required to discard changes.');
+  const normRel = rel.replace(/\\/g, '/');
+  const st = await status(root);
+  const entry = (st.files || []).find((f) => f.path.replace(/\\/g, '/') === normRel);
+  const abs = path.resolve(root, rel);
+  if (!entry || entry.status === 'untracked') {
+    fs.rmSync(abs, { force: true });
+    return true;
+  }
+  if (entry.staged) await unstage(root, normRel).catch(() => {});
+  if (entry.status === 'added') {
+    fs.rmSync(abs, { force: true });
+    return true;
+  }
+  await git(root, ['checkout', '--', normRel]);
+  return true;
+}
+
+async function branches(root) {
+  const current = await currentBranch(root).catch(() => 'HEAD');
+  let local = [];
+  try {
+    const out = await git(root, ['branch', '--format=%(refname:short)']);
+    local = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch { local = current ? [current] : []; }
+  return { current, local };
+}
+
+async function checkout(root, branch, create = false) {
+  const name = String(branch || '').trim();
+  if (!name || /^[-\s]|\.\.|[~^:?*[\]\\\s]/.test(name)) {
+    throw new Error(`Invalid branch name: "${name}"`);
+  }
+  const args = create ? ['checkout', '-b', name] : ['checkout', name];
+  await git(root, args);
+  return status(root);
 }
 
 async function log(root, n = 20) {
@@ -176,4 +235,4 @@ async function restoreFromSnapshot(root, tree, rel) {
   return 'restored';
 }
 
-module.exports = { snapshot, snapshotDiff, snapshotBlob, currentBlob, restoreFromSnapshot, status, fileVersions, diffText, commit, log, init, worktreeAdd, worktreeMerge, worktreeRemove, repoRoot };
+module.exports = { snapshot, snapshotDiff, snapshotBlob, currentBlob, restoreFromSnapshot, status, fileVersions, diffText, commit, stage, unstage, discard, branches, checkout, log, init, worktreeAdd, worktreeMerge, worktreeRemove, repoRoot };
